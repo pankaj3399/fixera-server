@@ -23,9 +23,6 @@
   "homepage": "https://github.com/Absterrg0/fixera-server#readme",
   "dependencies": {
     "@getbrevo/brevo": "^3.0.1",
-    "@types/cookie-parser": "^1.4.9",
-    "@types/express": "^5.0.3",
-    "@types/jsonwebtoken": "^9.0.10",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -37,7 +34,11 @@
     "typescript": "^5.9.2"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cookie-parser": "^1.4.9",
     "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
     "tsx": "^4.20.4"
   }
 }

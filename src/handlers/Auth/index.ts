@@ -265,12 +265,13 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
 // Add logout endpoint
 export const LogOut = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // Clear the httpOnly cookie
+    const isProduction = process.env.NODE_ENV === 'production';
+
     res.clearCookie('auth-token', {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'none',
-      path: '/'
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
+      path: '/',
     });
 
     return res.status(200).json({
