@@ -17,18 +17,15 @@ app.use(cors({
   credentials: true, // Allow cookies
 }));
 
-// Database connection middleware
-app.use(async (req: Request, res: Response, next: NextFunction) => {
+// Database connection (one-time at startup)
+(async () => {
   try {
     await connectDB();
-    next();
   } catch (error) {
-    console.error('Database connection failed on request:', error);
-    res.status(500).json({
-      message: 'Internal Server Error: Could not connect to the database.',
-    });
+    console.error('Failed to connect to database on startup:', error);
+    process.exit(1);
   }
-});
+})();
 
 // Body and cookie parsers
 app.use(express.json());
