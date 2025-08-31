@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from "express";
 import User from "../../../../models/user";
-import connecToDatabase from "../../../../config/db";
 import { generateOTP, sendOTPEmail } from "../../../../utils/emailService";
 
 // Send OTP to user's email
@@ -14,8 +13,6 @@ export const sendEmailOTP = async (req: Request, res: Response, next: NextFuncti
         message: "Email is required"
       });
     }
-
-    await connecToDatabase();
 
     // Find user by email
     const user = await User.findOne({ email });
@@ -76,8 +73,6 @@ export const verifyEmailOTP = async (req: Request, res: Response, next: NextFunc
         message: "Email and OTP are required"
       });
     }
-
-    await connecToDatabase();
 
     // Find user by email
     const user = await User.findOne({ email }).select("+verificationCode +verificationCodeExpires");
@@ -149,7 +144,6 @@ export const resendEmailOTP = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    await connecToDatabase();
 
     // Find user by email
     const user = await User.findOne({ email });

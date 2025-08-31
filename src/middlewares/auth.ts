@@ -20,9 +20,7 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     if (req.cookies && req.cookies['auth-token']) {
       token = req.cookies['auth-token'];
     }
-    // 2. Fallback to Authorization header for API compatibility
- 
-
+    
     // 3. If no token found, return unauthorized
     if (!token) {
       return res.status(401).json({ 
@@ -34,8 +32,6 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     // 4. Verify the token
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
 
-    // 5. Connect to database if needed
-    await connectToDatabase();
 
     // 6. Find user and exclude password
     const user = await User.findById(decoded.id).select('-password');

@@ -1,4 +1,4 @@
-import express, { Express, Request, Response, NextFunction } from 'express';
+import express, { Express, Request, Response} from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -17,19 +17,6 @@ app.use(cors({
   origin: true, // Reflects the request's Origin header
   credentials: true, // Allow cookies
 }));
-
-// Database connection middleware
-app.use(async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    await connectDB();
-    next();
-  } catch (error) {
-    console.error('Database connection failed on request:', error);
-    res.status(500).json({
-      message: 'Internal Server Error: Could not connect to the database.',
-    });
-  }
-});
 
 // Body and cookie parsers
 app.use(express.json());
@@ -56,10 +43,18 @@ app.use('/api/admin', adminRouter);
 // Error handler (must be last)
 app.use(errorHandler);
 
-if (!process.env.VERCEL) {
-  app.listen(4000, () => {
-    
+// Traditional server: connect once at startup, then listen
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+
+connectDB()
+  .then(() => {
+    app.listen(PORT, () => {
+      // Server started
+    });
+  })
+  .catch((error) => {
+    console.error('Failed to connect to MongoDB at startup:', error);
+    process.exit(1);
   });
-}
 
 export default app;
