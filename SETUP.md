@@ -13,6 +13,7 @@ This guide provides detailed instructions on how to obtain and configure the nec
    - [JSON Web Token (JWT_SECRET)](#json-web-token-jwt_secret)
    - [Twilio (TWILIO_... variables)](#twilio-twilio-variables)
    - [Brevo (BREVO_... and SMTP_... variables)](#brevo-brevo-and-smtp-variables)
+   - [AWS S3 (AWS_... and S3_... variables)](#aws-s3-aws-and-s3-variables)
    - [General Variables (PORT, FROM_EMAIL)](#general-variables-port-from_email)
 5. [Using Environment Variables](#using-environment-variables)
 
@@ -26,6 +27,7 @@ Before you begin, ensure you have the following:
   - MongoDB Atlas
   - Twilio
   - Brevo (formerly Sendinblue)
+  - AWS (Amazon Web Services)
 
 ## Environment Variables Overview
 
@@ -42,6 +44,10 @@ Here is a list of all the environment variables you will need to configure:
 - `SMTP_PORT`: The SMTP port number provided by Brevo.
 - `SMTP_LOGIN`: The SMTP login username provided by Brevo.
 - `FROM_EMAIL`: The email address you will use to send emails from.
+- `AWS_ACCESS_KEY_ID`: Your AWS IAM user access key ID.
+- `AWS_SECRET_ACCESS_KEY`: Your AWS IAM user secret access key.
+- `AWS_REGION`: The AWS region where your S3 bucket is located.
+- `S3_BUCKET_NAME`: The name of your AWS S3 bucket for file storage.
 
 ## Setting up the .env file
 
@@ -63,6 +69,11 @@ SMTP_SERVER=
 SMTP_PORT=
 SMTP_LOGIN=
 FROM_EMAIL=
+
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=
+S3_BUCKET_NAME=
 ```
 
 **Important**: Remember to add `.env` to your `.gitignore` file to prevent your secret keys from being committed to version control.
@@ -145,6 +156,66 @@ FROM_EMAIL=
    - Copy `smtp-relay.brevo.com` and paste it for `SMTP_SERVER`.
    - Copy `587` and paste it for `SMTP_PORT`.
    - Copy your login email and paste it for `SMTP_LOGIN`.
+
+### AWS S3 (AWS_... and S3_... variables)
+
+AWS S3 is used for secure file storage, particularly for user-uploaded documents like ID proofs.
+
+1. **Create an AWS Account**:
+   - Sign up at [AWS Console](https://aws.amazon.com/console/) if you don't have an account.
+   - Note: AWS requires a valid credit card, but offers a generous free tier.
+
+2. **Create an IAM User for S3 Access**:
+   - Go to the [IAM Console](https://console.aws.amazon.com/iam/).
+   - Click **Users** → **Create User**.
+   - Enter a username (e.g., `fixera-s3-user`).
+   - Select **Attach policies directly**.
+   - Search for and select `AmazonS3FullAccess` policy (or create a custom policy for better security).
+   - Click **Create user**.
+
+3. **Generate Access Keys**:
+   - Select the user you just created.
+   - Go to the **Security credentials** tab.
+   - Click **Create access key**.
+   - Choose **Application running outside AWS**.
+   - Click **Create access key**.
+   - **Important**: Copy both the **Access Key ID** and **Secret Access Key** immediately:
+     - Copy **Access Key ID** → paste as `AWS_ACCESS_KEY_ID`
+     - Copy **Secret Access Key** → paste as `AWS_SECRET_ACCESS_KEY`
+   - Click **Done** (you won't be able to see the secret key again).
+
+4. **Create an S3 Bucket**:
+   - Go to the [S3 Console](https://s3.console.aws.amazon.com/).
+   - Click **Create bucket**.
+   - Choose a unique bucket name (e.g., `my-fixera-uploads`) → copy this for `S3_BUCKET_NAME`.
+   - Choose an AWS region (e.g., `us-east-1`, `eu-west-1`) → copy this for `AWS_REGION`.
+   - **Bucket settings** (recommended for security):
+     - Keep **Block Public Access** enabled.
+     - Enable **Bucket Versioning**.
+     - Enable **Default Encryption** with SSE-S3.
+   - Click **Create bucket**.
+
+5. **Test Your Configuration** (optional):
+   ```javascript
+   // You can test your S3 connection with this code snippet
+   const AWS = require('aws-sdk');
+   const s3 = new AWS.S3({
+     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+     region: process.env.AWS_REGION
+   });
+   
+   s3.listBuckets((err, data) => {
+     if (err) console.log('Error:', err);
+     else console.log('Success! Buckets:', data.Buckets);
+   });
+   ```
+
+**Security Best Practices**:
+- Never commit your AWS credentials to version control.
+- Consider using IAM roles in production instead of access keys.
+- Create bucket policies to restrict access to specific operations if needed.
+- Enable CloudTrail logging for audit purposes in production.
 
 ### General Variables (PORT, FROM_EMAIL)
 
