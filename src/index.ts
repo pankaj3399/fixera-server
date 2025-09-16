@@ -7,6 +7,7 @@ import connectDB from './config/db';
 import authRouter from './routes/Auth';
 import userRouter from './routes/User';
 import adminRouter from './routes/Admin';
+import projectRouter from './routes/project';
 
 dotenv.config();
 
@@ -19,7 +20,8 @@ app.use(cors({
 }));
 
 // Body and cookie parsers
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
 // Health check and root routes
@@ -39,6 +41,7 @@ app.get('/health', (req: Request, res: Response) => {
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/projects', projectRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);
