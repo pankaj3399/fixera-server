@@ -6,6 +6,7 @@ import {
     getCategoryServices,
     createOrUpdateDraft,
     getDrafts,
+    getAllProjects,
     getProject,
     submitProject
 } from '../../handlers/Project';
@@ -27,6 +28,7 @@ router.route('/categories/:categorySlug/services').get(authMiddleware, getCatego
 // Project management routes
 router.route('/draft').post(authMiddleware, createOrUpdateDraft);
 router.route('/drafts').get(authMiddleware, getDrafts);
+router.route('/all').get(authMiddleware, getAllProjects);
 router.route('/:id').get(authMiddleware, getProject);
 router.route('/:id/submit').post(authMiddleware, submitProject);
 
