@@ -235,7 +235,7 @@ function convertToServiceConfig(row: any): any {
 
 async function importFromCSV() {
     try {
-        const csvPath = 'C:\\Users\\Ana Fariya\\Downloads\\Fixera service data ENG.csv';
+        const csvPath = path.join(__dirname, '../public/Fixera service data ENG.csv');
 
         console.log('📖 Reading CSV file...');
         const rows = parseCSVFile(csvPath);
