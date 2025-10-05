@@ -43,6 +43,13 @@ export interface IIncludedItem {
     isCustom: boolean;
 }
 
+export interface IMaterial {
+    name: string;
+    quantity?: string;
+    unit?: string;
+    description?: string;
+}
+
 export interface IExecutionDuration {
     value: number;
     unit: 'hours' | 'days';
@@ -74,6 +81,7 @@ export interface ISubproject {
     pricing: IPricing;
     included: IIncludedItem[];
     materialsIncluded: boolean;
+    materials?: IMaterial[]; // List of materials if materialsIncluded is true
     deliveryPreparation: number;
     executionDuration: IExecutionDuration;
     buffer?: IBuffer;
@@ -127,20 +135,28 @@ export interface IQualityCheck {
     checkedAt: Date;
 }
 
-export interface IProject extends Document {
-    // Step 1: Basic Info
-    professionalId: string;
+export interface IServiceSelection {
     category: string;
     service: string;
     areaOfWork?: string;
+}
+
+export interface IProject extends Document {
+    // Step 1: Basic Info
+    professionalId: string;
+    category: string; // Kept for backwards compatibility (primary category)
+    service: string; // Kept for backwards compatibility (primary service)
+    areaOfWork?: string;
     serviceConfigurationId?: string; // Reference to the ServiceConfiguration
+    categories?: string[]; // Multiple categories
+    services?: IServiceSelection[]; // 3-10 services with category and area
     certifications: ICertification[];
     distance: IDistance;
     intakeMeeting?: IIntakeMeeting;
     renovationPlanning?: IRenovationPlanning;
     resources: string[];
     description: string;
-    priceModel: 'fixed' | 'meter' | 'm2' | 'hour' | 'day' | 'room';
+    priceModel: string;
     keywords: string[];
     title: string;
     media: IMedia;
@@ -233,6 +249,14 @@ const IncludedItemSchema = new Schema<IIncludedItem>({
     isCustom: { type: Boolean, default: false }
 });
 
+// Material Schema
+const MaterialSchema = new Schema<IMaterial>({
+    name: { type: String, required: true, maxlength: 200 },
+    quantity: { type: String, maxlength: 50 },
+    unit: { type: String, maxlength: 50 },
+    description: { type: String, maxlength: 500 }
+});
+
 // Execution Duration Schema
 const ExecutionDurationSchema = new Schema<IExecutionDuration>({
     value: { type: Number, required: true, min: 0 },
@@ -272,6 +296,7 @@ const SubprojectSchema = new Schema<ISubproject>({
     pricing: { type: PricingSchema, required: true },
     included: [IncludedItemSchema],
     materialsIncluded: { type: Boolean, default: false },
+    materials: [MaterialSchema],
     deliveryPreparation: { type: Number, required: true, min: 0 },
     executionDuration: { type: ExecutionDurationSchema, required: true },
     buffer: BufferSchema,
@@ -331,6 +356,13 @@ const QualityCheckSchema = new Schema<IQualityCheck>({
     checkedAt: { type: Date, default: Date.now }
 });
 
+// Service Selection Schema
+const ServiceSelectionSchema = new Schema<IServiceSelection>({
+    category: { type: String, required: true },
+    service: { type: String, required: true },
+    areaOfWork: { type: String }
+});
+
 // Main Project Schema
 const ProjectSchema = new Schema<IProject>({
     // Step 1: Basic Info
@@ -339,6 +371,17 @@ const ProjectSchema = new Schema<IProject>({
     service: { type: String, required: true },
     areaOfWork: { type: String },
     serviceConfigurationId: { type: String },
+    categories: [{ type: String }],
+    services: {
+        type: [ServiceSelectionSchema],
+        validate: {
+            validator: function(v: IServiceSelection[]) {
+                if (!v || v.length === 0) return true; // Optional field
+                return v.length >= 3 && v.length <= 10;
+            },
+            message: 'Services must contain between 3 and 10 items'
+        }
+    },
     certifications: [CertificationSchema],
     distance: { type: DistanceSchema, required: true },
     intakeMeeting: IntakeMeetingSchema,
@@ -347,7 +390,6 @@ const ProjectSchema = new Schema<IProject>({
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {
         type: String,
-        enum: ['fixed', 'meter', 'm2', 'hour', 'day', 'room'],
         required: true
     },
     keywords: [{ type: String }],

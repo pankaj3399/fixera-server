@@ -20,6 +20,7 @@ export interface IUser extends Document {
     idProofFileName?: string;
     idProofUploadedAt?: Date;
     isIdVerified?: boolean;
+    professionalId?: string;
     // Professional approval fields
     professionalStatus?: 'pending' | 'approved' | 'rejected' | 'suspended';
     approvedBy?: string; // Admin user ID who approved

@@ -9,6 +9,7 @@ import userRouter from './routes/User';
 import adminRouter from './routes/Admin';
 import projectRouter from './routes/Project';
 import publicRouter from './routes/Public';
+import meetingRouter from './routes/Meeting';
 
 dotenv.config();
 
@@ -44,6 +45,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/projects', projectRouter);
+app.use('/api/meetings', meetingRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);
