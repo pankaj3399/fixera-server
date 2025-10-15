@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "seed:admin": "node src/scripts/seedAdmin.js",
     "seed:admin:ts": "npx tsx src/scripts/seedAdmin.ts",
-    "seed:csv": "npx tsx src/scripts/parseAndImportCSV.ts"
+    "seed:csv": "npx tsx src/scripts/parseAndImportCSV.ts",
+    "migrate:merge-solar": "npx tsx src/scripts/mergeDuplicateSolarServices.ts"
   },
   "repository": {
     "type": "git",
