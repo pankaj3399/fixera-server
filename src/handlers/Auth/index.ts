@@ -375,6 +375,9 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       availability: user.availability,
       blockedDates: user.blockedDates,
       blockedRanges: user.blockedRanges,
+      companyAvailability: user.companyAvailability,
+      companyBlockedDates: user.companyBlockedDates,
+      companyBlockedRanges: user.companyBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt

@@ -40,6 +40,7 @@ export interface IUser extends Document {
     hourlyRate?: number;
     currency?: string;
     serviceCategories?: string[];
+    // Personal availability (professional's own working schedule)
     availability?: {
         monday?: { available: boolean; startTime?: string; endTime?: string; };
         tuesday?: { available: boolean; startTime?: string; endTime?: string; };
@@ -57,6 +58,28 @@ export interface IUser extends Document {
         startDate: Date;
         endDate: Date;
         reason?: string;
+        createdAt?: Date;
+    }[];
+    // Company-wide availability (for team members to inherit)
+    companyAvailability?: {
+        monday?: { available: boolean; startTime?: string; endTime?: string; };
+        tuesday?: { available: boolean; startTime?: string; endTime?: string; };
+        wednesday?: { available: boolean; startTime?: string; endTime?: string; };
+        thursday?: { available: boolean; startTime?: string; endTime?: string; };
+        friday?: { available: boolean; startTime?: string; endTime?: string; };
+        saturday?: { available: boolean; startTime?: string; endTime?: string; };
+        sunday?: { available: boolean; startTime?: string; endTime?: string; };
+    };
+    companyBlockedDates?: {
+        date: Date;
+        reason?: string;
+        isHoliday?: boolean;
+    }[];
+    companyBlockedRanges?: {
+        startDate: Date;
+        endDate: Date;
+        reason?: string;
+        isHoliday?: boolean;
         createdAt?: Date;
     }[];
     profileCompletedAt?: Date;
@@ -251,6 +274,55 @@ const UserSchema = new Schema<IUser>({
         startDate: { type: Date, required: true },
         endDate: { type: Date, required: true },
         reason: { type: String, required: false, maxlength: 200 },
+        createdAt: { type: Date, default: Date.now }
+    }],
+    companyAvailability: {
+        monday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        },
+        tuesday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        },
+        wednesday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        },
+        thursday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        },
+        friday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        },
+        saturday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        },
+        sunday: {
+            available: { type: Boolean, default: false },
+            startTime: { type: String, required: false },
+            endTime: { type: String, required: false }
+        }
+    },
+    companyBlockedDates: [{
+        date: { type: Date, required: true },
+        reason: { type: String, required: false, maxlength: 200 },
+        isHoliday: { type: Boolean, default: false }
+    }],
+    companyBlockedRanges: [{
+        startDate: { type: Date, required: true },
+        endDate: { type: Date, required: true },
+        reason: { type: String, required: false, maxlength: 200 },
+        isHoliday: { type: Boolean, default: false },
         createdAt: { type: Date, default: Date.now }
     }],
     profileCompletedAt: {

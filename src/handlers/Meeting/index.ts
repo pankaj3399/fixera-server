@@ -94,20 +94,20 @@ export const getTeamAvailability = async (req: Request, res: Response) => {
             };
         });
 
-        // If team members use company availability, get the professional's availability
-        const professional = await User.findById(professionalId).select('availability blockedDates blockedRanges');
+        // Get the professional's company availability (for team members using same_as_company)
+        const professional = await User.findById(professionalId).select('availability blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
 
         res.status(200).json({
             success: true,
             data: {
                 teamMembers: availabilityData,
                 companyAvailability: {
-                    availability: professional?.availability || {},
-                    blockedDates: professional?.blockedDates?.filter(blocked => {
+                    availability: professional?.companyAvailability || {},
+                    blockedDates: professional?.companyBlockedDates?.filter(blocked => {
                         const blockedDate = new Date(blocked.date);
                         return blockedDate >= start && blockedDate <= end;
                     }) || [],
-                    blockedRanges: professional?.blockedRanges?.filter(range => {
+                    blockedRanges: professional?.companyBlockedRanges?.filter(range => {
                         const rangeStart = new Date(range.startDate);
                         const rangeEnd = new Date(range.endDate);
                         return rangeStart <= end && rangeEnd >= start;

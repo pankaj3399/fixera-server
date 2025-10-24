@@ -149,14 +149,17 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       });
     }
 
-    const { 
-      businessInfo, 
-      hourlyRate, 
-      currency, 
-      serviceCategories, 
+    const {
+      businessInfo,
+      hourlyRate,
+      currency,
+      serviceCategories,
       availability,
       blockedDates,
-      blockedRanges
+      blockedRanges,
+      companyAvailability,
+      companyBlockedDates,
+      companyBlockedRanges
     } = req.body;
 
     await connecToDatabase();
@@ -251,19 +254,19 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
           msg: "Blocked ranges must be an array"
         });
       }
-      
+
       const validatedRanges = blockedRanges.map((range, index) => {
         if (!range.startDate || !range.endDate) {
           throw new Error('Start date and end date are required for blocked ranges');
         }
-        
+
         const startDate = new Date(range.startDate);
         const endDate = new Date(range.endDate);
-        
+
         if (startDate > endDate) {
           throw new Error('Start date must be before or equal to end date');
         }
-        
+
         const processedRange = {
           startDate,
           endDate,
@@ -272,8 +275,70 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
         };
         return processedRange;
       });
-      
+
       user.blockedRanges = validatedRanges;
+    }
+
+    // Handle company availability (for team members to inherit)
+    if (companyAvailability) {
+      user.companyAvailability = {
+        ...user.companyAvailability,
+        ...companyAvailability
+      };
+    }
+
+    if (companyBlockedDates !== undefined) {
+      console.log('📅 Received companyBlockedDates:', companyBlockedDates);
+      if (!Array.isArray(companyBlockedDates)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Company blocked dates must be an array"
+        });
+      }
+      user.companyBlockedDates = companyBlockedDates.map(item => {
+        if (typeof item === 'string') {
+          return { date: new Date(item), isHoliday: false };
+        } else {
+          return {
+            date: new Date(item.date),
+            reason: item.reason || undefined,
+            isHoliday: item.isHoliday || false
+          };
+        }
+      });
+      console.log('✅ Mapped companyBlockedDates:', user.companyBlockedDates);
+    }
+
+    if (companyBlockedRanges !== undefined) {
+      if (!Array.isArray(companyBlockedRanges)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Company blocked ranges must be an array"
+        });
+      }
+
+      const validatedCompanyRanges = companyBlockedRanges.map((range) => {
+        if (!range.startDate || !range.endDate) {
+          throw new Error('Start date and end date are required for company blocked ranges');
+        }
+
+        const startDate = new Date(range.startDate);
+        const endDate = new Date(range.endDate);
+
+        if (startDate > endDate) {
+          throw new Error('Start date must be before or equal to end date');
+        }
+
+        return {
+          startDate,
+          endDate,
+          reason: range.reason || undefined,
+          isHoliday: range.isHoliday || false,
+          createdAt: new Date()
+        };
+      });
+
+      user.companyBlockedRanges = validatedCompanyRanges;
     }
 
     // Mark profile as completed if key fields are filled
@@ -284,6 +349,8 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     await user.save();
 
     console.log(`✅ Profile: Successfully updated professional profile for ${user.email}`);
+    console.log('💾 Saved companyBlockedDates:', user.companyBlockedDates);
+    console.log('💾 Saved companyBlockedRanges:', user.companyBlockedRanges);
 
     // Return updated user data (without password)
     const userResponse = {
@@ -307,6 +374,9 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       availability: user.availability,
       blockedDates: user.blockedDates,
       blockedRanges: user.blockedRanges,
+      companyAvailability: user.companyAvailability,
+      companyBlockedDates: user.companyBlockedDates,
+      companyBlockedRanges: user.companyBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt

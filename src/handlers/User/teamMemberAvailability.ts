@@ -35,10 +35,28 @@ export const updateTeamMemberAvailabilityPreference = async (req: Request, res: 
       });
     }
 
-    // TODO: Implement availability preference update logic
+    const { availabilityPreference } = req.body;
+
+    if (!availabilityPreference || !['personal', 'same_as_company'].includes(availabilityPreference)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid availability preference. Must be 'personal' or 'same_as_company'"
+      });
+    }
+
+    // Update the team member's availability preference
+    if (!user.teamMember) {
+      user.teamMember = {};
+    }
+    user.teamMember.availabilityPreference = availabilityPreference;
+    await user.save();
+
     return res.status(200).json({
       success: true,
-      msg: "Availability preference updated successfully"
+      msg: "Availability preference updated successfully",
+      data: {
+        availabilityPreference: user.teamMember.availabilityPreference
+      }
     });
 
   } catch (error: any) {
@@ -81,10 +99,76 @@ export const updateTeamMemberAvailability = async (req: Request, res: Response, 
       });
     }
 
-    // TODO: Implement availability update logic
+    const { availability, blockedDates, blockedRanges } = req.body;
+
+    // Update team member's personal availability
+    if (availability) {
+      user.availability = {
+        ...user.availability,
+        ...availability
+      };
+    }
+
+    if (blockedDates !== undefined) {
+      if (!Array.isArray(blockedDates)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Blocked dates must be an array"
+        });
+      }
+      user.blockedDates = blockedDates.map(item => {
+        if (typeof item === 'string') {
+          return { date: new Date(item) };
+        } else {
+          return {
+            date: new Date(item.date),
+            reason: item.reason || undefined
+          };
+        }
+      });
+    }
+
+    if (blockedRanges !== undefined) {
+      if (!Array.isArray(blockedRanges)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Blocked ranges must be an array"
+        });
+      }
+
+      const validatedRanges = blockedRanges.map((range) => {
+        if (!range.startDate || !range.endDate) {
+          throw new Error('Start date and end date are required for blocked ranges');
+        }
+
+        const startDate = new Date(range.startDate);
+        const endDate = new Date(range.endDate);
+
+        if (startDate > endDate) {
+          throw new Error('Start date must be before or equal to end date');
+        }
+
+        return {
+          startDate,
+          endDate,
+          reason: range.reason || undefined,
+          createdAt: new Date()
+        };
+      });
+
+      user.blockedRanges = validatedRanges;
+    }
+
+    await user.save();
+
     return res.status(200).json({
       success: true,
-      msg: "Availability updated successfully"
+      msg: "Availability updated successfully",
+      data: {
+        availability: user.availability,
+        blockedDates: user.blockedDates,
+        blockedRanges: user.blockedRanges
+      }
     });
 
   } catch (error: any) {
@@ -127,11 +211,41 @@ export const getTeamMemberEffectiveAvailability = async (req: Request, res: Resp
       });
     }
 
-    // TODO: Implement get effective availability logic
+    // Get effective availability based on preference
+    const preference = user.teamMember?.availabilityPreference || 'personal';
+
+    let effectiveAvailability;
+    let effectiveBlockedDates;
+    let effectiveBlockedRanges;
+
+    if (preference === 'same_as_company') {
+      // Fetch professional's company availability
+      const professional = await User.findById(user.teamMember?.companyId);
+
+      if (!professional) {
+        return res.status(404).json({
+          success: false,
+          msg: "Company information not found"
+        });
+      }
+
+      effectiveAvailability = professional.companyAvailability || {};
+      effectiveBlockedDates = professional.companyBlockedDates || [];
+      effectiveBlockedRanges = professional.companyBlockedRanges || [];
+    } else {
+      // Use team member's personal availability
+      effectiveAvailability = user.availability || {};
+      effectiveBlockedDates = user.blockedDates || [];
+      effectiveBlockedRanges = user.blockedRanges || [];
+    }
+
     return res.status(200).json({
       success: true,
       data: {
-        availability: []
+        availabilityPreference: preference,
+        availability: effectiveAvailability,
+        blockedDates: effectiveBlockedDates,
+        blockedRanges: effectiveBlockedRanges
       }
     });
 
@@ -190,10 +304,84 @@ export const updateManagedTeamMemberAvailability = async (req: Request, res: Res
       });
     }
 
-    // TODO: Implement managed team member availability update logic
+    const { availability, blockedDates, blockedRanges } = req.body;
+
+    // Check if the team member is managed by the company
+    if (!teamMember.teamMember?.managedByCompany) {
+      return res.status(403).json({
+        success: false,
+        msg: "This team member manages their own availability"
+      });
+    }
+
+    // Update team member's availability
+    if (availability) {
+      teamMember.availability = {
+        ...teamMember.availability,
+        ...availability
+      };
+    }
+
+    if (blockedDates !== undefined) {
+      if (!Array.isArray(blockedDates)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Blocked dates must be an array"
+        });
+      }
+      teamMember.blockedDates = blockedDates.map(item => {
+        if (typeof item === 'string') {
+          return { date: new Date(item) };
+        } else {
+          return {
+            date: new Date(item.date),
+            reason: item.reason || undefined
+          };
+        }
+      });
+    }
+
+    if (blockedRanges !== undefined) {
+      if (!Array.isArray(blockedRanges)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Blocked ranges must be an array"
+        });
+      }
+
+      const validatedRanges = blockedRanges.map((range) => {
+        if (!range.startDate || !range.endDate) {
+          throw new Error('Start date and end date are required for blocked ranges');
+        }
+
+        const startDate = new Date(range.startDate);
+        const endDate = new Date(range.endDate);
+
+        if (startDate > endDate) {
+          throw new Error('Start date must be before or equal to end date');
+        }
+
+        return {
+          startDate,
+          endDate,
+          reason: range.reason || undefined,
+          createdAt: new Date()
+        };
+      });
+
+      teamMember.blockedRanges = validatedRanges;
+    }
+
+    await teamMember.save();
+
     return res.status(200).json({
       success: true,
-      msg: "Team member availability updated successfully"
+      msg: "Team member availability updated successfully",
+      data: {
+        availability: teamMember.availability,
+        blockedDates: teamMember.blockedDates,
+        blockedRanges: teamMember.blockedRanges
+      }
     });
 
   } catch (error: any) {

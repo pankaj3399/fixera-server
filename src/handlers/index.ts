@@ -14,6 +14,9 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
     }
 
     // Return user data without sensitive information
+    console.log('📤 GetCurrentUser - companyBlockedDates from DB:', user.companyBlockedDates);
+    console.log('📤 GetCurrentUser - companyBlockedRanges from DB:', user.companyBlockedRanges);
+
     return res.status(200).json({
       success: true,
       user: {
@@ -24,6 +27,32 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         role: user.role,
         isEmailVerified: user.isEmailVerified || false,
         isPhoneVerified: user.isPhoneVerified || false,
+        vatNumber: user.vatNumber,
+        isVatVerified: user.isVatVerified,
+        idProofUrl: user.idProofUrl,
+        idProofFileName: user.idProofFileName,
+        idProofUploadedAt: user.idProofUploadedAt,
+        isIdVerified: user.isIdVerified,
+        professionalStatus: user.professionalStatus,
+        approvedBy: user.approvedBy,
+        approvedAt: user.approvedAt,
+        rejectionReason: user.rejectionReason,
+        businessInfo: user.businessInfo,
+        hourlyRate: user.hourlyRate,
+        currency: user.currency,
+        serviceCategories: user.serviceCategories,
+        availability: user.availability,
+        blockedDates: user.blockedDates,
+        blockedRanges: user.blockedRanges,
+        companyAvailability: user.companyAvailability,
+        companyBlockedDates: user.companyBlockedDates,
+        companyBlockedRanges: user.companyBlockedRanges,
+        profileCompletedAt: user.profileCompletedAt,
+        loyaltyPoints: user.loyaltyPoints,
+        loyaltyLevel: user.loyaltyLevel,
+        totalSpent: user.totalSpent,
+        totalBookings: user.totalBookings,
+        teamMember: user.teamMember,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
       }
