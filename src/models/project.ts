@@ -181,19 +181,18 @@ export interface IProject extends Document {
   customConfirmationMessage?: string;
 
   // Step 8: Review & Status
-  status:
-    | "draft"
-    | "pending_approval"
-    | "rejected"
-    | "published"
-    | "on_hold"
+  // Project lifecycle status
+  status: "draft" | "pending" | "rejected" | "published" | "on_hold";
+  // Booking lifecycle status (only applicable when project is published and has active bookings)
+  bookingStatus?:
+    | "rfq"
     | "quoted"
     | "booked"
-    | "in_progress"
+    | "execution"
     | "completed"
-    | "awaiting_confirmation"
-    | "closed"
-    | "disputed";
+    | "cancelled"
+    | "dispute"
+    | "warranty";
   qualityChecks: IQualityCheck[];
   adminFeedback?: string;
   submittedAt?: Date;
@@ -442,23 +441,26 @@ const ProjectSchema = new Schema<IProject>(
     customConfirmationMessage: { type: String, maxlength: 1000 },
 
     // Step 8: Review & Status
+    // Project lifecycle status
     status: {
       type: String,
+      enum: ["draft", "pending", "rejected", "published", "on_hold"],
+      default: "draft",
+    },
+    // Booking lifecycle status
+    bookingStatus: {
+      type: String,
       enum: [
-        "draft",
-        "pending_approval",
-        "rejected",
-        "published",
-        "on_hold",
+        "rfq",
         "quoted",
         "booked",
-        "in_progress",
+        "execution",
         "completed",
-        "awaiting_confirmation",
-        "closed",
-        "disputed",
+        "cancelled",
+        "dispute",
+        "warranty",
       ],
-      default: "draft",
+      required: false,
     },
     qualityChecks: [QualityCheckSchema],
     adminFeedback: { type: String },

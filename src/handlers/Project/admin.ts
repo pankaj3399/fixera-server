@@ -8,7 +8,7 @@ export const getPendingProjects = async (req: Request, res: Response) => {
         }
 
         const pendingProjects = await Project.find({
-            status: 'pending_approval'
+            status: 'pending'
         }).sort({ submittedAt: 1 });
 
         res.json(pendingProjects);
@@ -25,7 +25,7 @@ export const approveProject = async (req: Request, res: Response) => {
 
         const { id } = req.params;
         const project = await Project.findOneAndUpdate(
-            { _id: id, status: 'pending_approval' },
+            { _id: id, status: 'pending' },
             {
                 status: 'published',
                 approvedAt: new Date(),
@@ -54,7 +54,7 @@ export const rejectProject = async (req: Request, res: Response) => {
         const { feedback } = req.body;
 
         const project = await Project.findOneAndUpdate(
-            { _id: id, status: 'pending_approval' },
+            { _id: id, status: 'pending' },
             {
                 status: 'rejected',
                 adminFeedback: feedback

@@ -129,7 +129,7 @@ export const submitProject = async (req: Request, res: Response) => {
     // Perform quality checks here
     const qualityChecks = performQualityChecks(project);
 
-    project.status = 'pending_approval';
+    project.status = 'pending';
     project.submittedAt = new Date();
     project.qualityChecks = qualityChecks;
     await project.save();

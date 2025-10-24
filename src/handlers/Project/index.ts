@@ -105,12 +105,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         updatedAt: new Date(),
       };
 
-      // If a published/on_hold project is edited, move it back to pending_approval for re-approval
+      // If a published/on_hold project is edited, move it back to pending for re-approval
       const shouldMoveToPending = ["published", "on_hold"].includes(
         (existingProject.status as any) || ""
       );
       if (shouldMoveToPending) {
-        updateData.status = "pending_approval";
+        updateData.status = "pending";
         updateData.submittedAt = new Date();
         updateData.adminFeedback = undefined;
         updateData.approvedAt = undefined;
@@ -230,11 +230,9 @@ export const submitProject = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    // Allow resubmission for draft, rejected, or existing projects
+    // Allow resubmission for draft, rejected, pending, or existing projects
     if (
-      !["draft", "rejected", "pending_approval", "published"].includes(
-        project.status
-      )
+      !["draft", "rejected", "pending", "published"].includes(project.status)
     ) {
       console.log("❌ Invalid status for submission:", project.status);
       return res
@@ -288,7 +286,7 @@ export const submitProject = async (req: Request, res: Response) => {
 
     // Update project status and submission details
     const isResubmission = project.status !== "draft";
-    project.status = "pending_approval";
+    project.status = "pending";
     project.submittedAt = new Date();
     project.qualityChecks = qualityChecks;
 
@@ -482,13 +480,10 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
 
         return {
           drafts: byStatus["draft"] || 0,
-          pending: byStatus["pending_approval"] || 0,
+          pending: byStatus["pending"] || 0,
           published: byStatus["published"] || 0,
-          booked: byStatus["booked"] || 0,
           on_hold: byStatus["on_hold"] || 0,
-          completed: byStatus["completed"] || 0,
           rejected,
-          cancelled,
         };
       })(),
     ]);
