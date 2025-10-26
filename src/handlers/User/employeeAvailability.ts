@@ -4,68 +4,12 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 
+// They can only block specific dates
 export const updateEmployeeAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const token = req.cookies?.['auth-token'];
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        msg: "Authentication required"
-      });
-    }
-
-    let decoded: { id: string } | null = null;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
-    } catch (err) {
-      return res.status(401).json({
-        success: false,
-        msg: "Invalid authentication token"
-      });
-    }
-
-    await connecToDatabase();
-    const user = await User.findById(decoded.id);
-
-    if (!user || user.role !== 'employee') {
-      return res.status(403).json({
-        success: false,
-        msg: "Employee access required"
-      });
-    }
-
-    const { availabilityPreference } = req.body;
-
-    if (!availabilityPreference || !['personal', 'same_as_company'].includes(availabilityPreference)) {
-      return res.status(400).json({
-        success: false,
-        msg: "Invalid availability preference. Must be 'personal' or 'same_as_company'"
-      });
-    }
-
-    // Update the employee's availability preference
-    if (!user.employee) {
-      user.employee = {};
-    }
-    user.employee.availabilityPreference = availabilityPreference;
-    await user.save();
-
-    return res.status(200).json({
-      success: true,
-      msg: "Availability preference updated successfully",
-      data: {
-        availabilityPreference: user.employee.availabilityPreference
-      }
-    });
-
-  } catch (error: any) {
-    console.error(`❌ Error updating availability preference:`, error);
-    return res.status(500).json({
-      success: false,
-      msg: "Server error while updating availability preference"
-    });
-  }
+  return res.status(400).json({
+    success: false,
+    msg: "Availability preference is no longer supported. Employees always follow the company's weekly schedule and can only block specific dates."
+  });
 };
 
 export const updateEmployeeAvailability = async (req: Request, res: Response, next: NextFunction) => {
@@ -99,16 +43,9 @@ export const updateEmployeeAvailability = async (req: Request, res: Response, ne
       });
     }
 
-    const { availability, blockedDates, blockedRanges } = req.body;
+    const { blockedDates, blockedRanges } = req.body;
 
-    // Update employee's personal availability
-    if (availability) {
-      user.availability = {
-        ...user.availability,
-        ...availability
-      };
-    }
-
+    // Employees can only block dates, they follow the company's weekly schedule
     if (blockedDates !== undefined) {
       if (!Array.isArray(blockedDates)) {
         return res.status(400).json({
@@ -163,9 +100,8 @@ export const updateEmployeeAvailability = async (req: Request, res: Response, ne
 
     return res.status(200).json({
       success: true,
-      msg: "Availability updated successfully",
+      msg: "Blocked dates updated successfully",
       data: {
-        availability: user.availability,
         blockedDates: user.blockedDates,
         blockedRanges: user.blockedRanges
       }
@@ -211,41 +147,26 @@ export const getEmployeeEffectiveAvailability = async (req: Request, res: Respon
       });
     }
 
-    // Get effective availability based on preference
-    const preference = user.employee?.availabilityPreference || 'personal';
+    // Employees always follow the company's weekly schedule
+    // They can only block specific dates
+    const professional = await User.findById(user.employee?.companyId);
 
-    let effectiveAvailability;
-    let effectiveBlockedDates;
-    let effectiveBlockedRanges;
-
-    if (preference === 'same_as_company') {
-      // Fetch professional's company availability
-      const professional = await User.findById(user.employee?.companyId);
-
-      if (!professional) {
-        return res.status(404).json({
-          success: false,
-          msg: "Company information not found"
-        });
-      }
-
-      effectiveAvailability = professional.companyAvailability || {};
-      effectiveBlockedDates = professional.companyBlockedDates || [];
-      effectiveBlockedRanges = professional.companyBlockedRanges || [];
-    } else {
-      // Use employee's personal availability
-      effectiveAvailability = user.availability || {};
-      effectiveBlockedDates = user.blockedDates || [];
-      effectiveBlockedRanges = user.blockedRanges || [];
+    if (!professional) {
+      return res.status(404).json({
+        success: false,
+        msg: "Company information not found"
+      });
     }
 
+    // Return company's weekly schedule + employee's personal blocked dates
     return res.status(200).json({
       success: true,
       data: {
-        availabilityPreference: preference,
-        availability: effectiveAvailability,
-        blockedDates: effectiveBlockedDates,
-        blockedRanges: effectiveBlockedRanges
+        availability: professional.companyAvailability || {},
+        blockedDates: user.blockedDates || [],
+        blockedRanges: user.blockedRanges || [],
+        companyBlockedDates: professional.companyBlockedDates || [],
+        companyBlockedRanges: professional.companyBlockedRanges || []
       }
     });
 
@@ -304,7 +225,7 @@ export const updateManagedEmployeeAvailability = async (req: Request, res: Respo
       });
     }
 
-    const { availability, blockedDates, blockedRanges } = req.body;
+    const { blockedDates, blockedRanges } = req.body;
 
     // Check if the employee is managed by the company
     if (!employee.employee?.managedByCompany) {
@@ -314,14 +235,7 @@ export const updateManagedEmployeeAvailability = async (req: Request, res: Respo
       });
     }
 
-    // Update employee's availability
-    if (availability) {
-      employee.availability = {
-        ...employee.availability,
-        ...availability
-      };
-    }
-
+    // Employees can only have blocked dates, they follow the company's weekly schedule
     if (blockedDates !== undefined) {
       if (!Array.isArray(blockedDates)) {
         return res.status(400).json({
@@ -376,9 +290,8 @@ export const updateManagedEmployeeAvailability = async (req: Request, res: Respo
 
     return res.status(200).json({
       success: true,
-      msg: "Employee availability updated successfully",
+      msg: "Employee blocked dates updated successfully",
       data: {
-        availability: employee.availability,
         blockedDates: employee.blockedDates,
         blockedRanges: employee.blockedRanges
       }
