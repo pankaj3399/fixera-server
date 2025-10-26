@@ -12,8 +12,8 @@ const generatePassword = (): string => {
     return crypto.randomBytes(8).toString('hex');
 };
 
-// Invite team member with email
-export const inviteTeamMember = async (req: Request, res: Response, next: NextFunction) => {
+// Invite employee with email
+export const inviteEmployee = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = req.cookies?.['auth-token'];
         
@@ -48,7 +48,7 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
         if (professional.role !== 'professional' || professional.professionalStatus !== 'approved') {
             return res.status(403).json({
                 success: false,
-                msg: "Only approved professionals can invite team members"
+                msg: "Only approved professionals can invite employees"
             });
         }
 
@@ -58,7 +58,7 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
         if (!name) {
             return res.status(400).json({
                 success: false,
-                msg: "Team member name is required"
+                msg: "Employee name is required"
             });
         }
 
@@ -80,25 +80,25 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
             }
         }
 
-        console.log(`👥 TEAM: Professional ${professional.email} inviting team member: ${name} (hasEmail: ${hasEmail})`);
+        console.log(`👥 EMPLOYEE: Professional ${professional.email} inviting employee: ${name} (hasEmail: ${hasEmail})`);
 
-        let teamMember: IUser;
+        let employee: IUser;
         let generatedPassword: string | null = null;
 
         if (hasEmail && email) {
-            // Create team member with email
+            // Create employee with email
             generatedPassword = generatePassword();
             const hashedPassword = await bcrypt.hash(generatedPassword, 12);
 
-            teamMember = new User({
+            employee = new User({
                 name: name.trim(),
                 email: email.toLowerCase().trim(),
-                phone: `+1000000${Date.now().toString().slice(-4)}`, // Clean placeholder phone for team members
+                phone: `+1000000${Date.now().toString().slice(-4)}`, // Clean placeholder phone for employees
                 password: hashedPassword,
-                role: 'team_member',
-                isEmailVerified: true, // Team members' email is verified when they accept invitation
-                isPhoneVerified: true, // Team members don't need phone verification
-                teamMember: {
+                role: 'employee',
+                isEmailVerified: true, // Employees' email is verified when they accept invitation
+                isPhoneVerified: true, // Employees don't need phone verification
+                employee: {
                     companyId: (professional._id as mongoose.Types.ObjectId).toString(),
                     invitedBy: (professional._id as mongoose.Types.ObjectId).toString(),
                     invitedAt: new Date(),
@@ -109,31 +109,31 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
                 }
             });
         } else {
-            // Create team member without email (managed by company)
-            teamMember = new User({
+            // Create employee without email (managed by company)
+            employee = new User({
                 name: name.trim(),
                 email: `no-email-${Date.now()}@company.local`, // Clean placeholder email
-                phone: `+1000000${Date.now().toString().slice(-4)}`, // Clean placeholder phone for team members
+                phone: `+1000000${Date.now().toString().slice(-4)}`, // Clean placeholder phone for employees
                 password: await bcrypt.hash('temp-password-123', 12), // Temporary password
-                role: 'team_member',
-                isEmailVerified: true, // Team members don't require email verification
-                isPhoneVerified: true, // Team members don't require phone verification
-                teamMember: {
+                role: 'employee',
+                isEmailVerified: true, // Employees don't require email verification
+                isPhoneVerified: true, // Employees don't require phone verification
+                employee: {
                     companyId: (professional._id as mongoose.Types.ObjectId).toString(),
                     invitedBy: (professional._id as mongoose.Types.ObjectId).toString(),
                     invitedAt: new Date(),
                     acceptedAt: new Date(), // Auto-accept for non-email members
                     isActive: true,
                     hasEmail: false,
-                    availabilityPreference: 'same_as_company',
+                    availabilityPreference: 'personal',
                     managedByCompany: true
                 }
             });
         }
 
-        await teamMember.save();
+        await employee.save();
 
-        // Send email invitation if team member has email
+        // Send email invitation if employee has email
         let emailSent = false;
         if (hasEmail && email && generatedPassword) {
             try {
@@ -145,24 +145,24 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
                     generatedPassword
                 );
                 emailSent = true;
-                console.log(`📧 TEAM: Invitation email sent to ${email}`);
+                console.log(`📧 EMPLOYEE: Invitation email sent to ${email}`);
             } catch (error) {
-                console.error(`❌ TEAM: Failed to send invitation email to ${email}:`, error);
+                console.error(`❌ EMPLOYEE: Failed to send invitation email to ${email}:`, error);
             }
         }
 
-        console.log(`✅ TEAM: Team member ${name} invited by ${professional.email} (hasEmail: ${hasEmail})`);
+        console.log(`✅ EMPLOYEE: Employee ${name} invited by ${professional.email} (hasEmail: ${hasEmail})`);
 
         const responseData: any = {
-            teamMember: {
-                _id: teamMember._id,
-                name: teamMember.name,
-                email: hasEmail ? teamMember.email : undefined,
-                role: teamMember.role,
+            employee: {
+                _id: employee._id,
+                name: employee.name,
+                email: hasEmail ? employee.email : undefined,
+                role: employee.role,
                 hasEmail: hasEmail,
-                availabilityPreference: teamMember.teamMember?.availabilityPreference,
-                invitedAt: teamMember.teamMember?.invitedAt,
-                isActive: teamMember.teamMember?.isActive
+                availabilityPreference: employee.employee?.availabilityPreference,
+                invitedAt: employee.employee?.invitedAt,
+                isActive: employee.employee?.isActive
             },
             emailSent: emailSent
         };
@@ -170,21 +170,21 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
         // Include credentials in response for non-email members (for company admin to manage)
         if (!hasEmail) {
             responseData.tempCredentials = {
-                email: teamMember.email,
+                email: employee.email,
                 password: 'temp-password-123'
             };
         }
 
         res.status(201).json({
             success: true,
-            msg: hasEmail 
-                ? "Team member invitation sent successfully" 
-                : "Team member added successfully",
+            msg: hasEmail
+                ? "Employee invitation sent successfully"
+                : "Employee added successfully",
             data: responseData
         });
 
     } catch (error) {
-        console.error("❌ TEAM: Error inviting team member:", error);
+        console.error("❌ EMPLOYEE: Error inviting employee:", error);
         res.status(500).json({
             success: false,
             msg: "Internal server error"
@@ -192,8 +192,8 @@ export const inviteTeamMember = async (req: Request, res: Response, next: NextFu
     }
 };
 
-// Get team members for a professional
-export const getTeamMembers = async (req: Request, res: Response, next: NextFunction) => {
+// Get employees for a professional
+export const getEmployees = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = req.cookies?.['auth-token'];
         
@@ -228,43 +228,43 @@ export const getTeamMembers = async (req: Request, res: Response, next: NextFunc
         if (professional.role !== 'professional') {
             return res.status(403).json({
                 success: false,
-                msg: "Only professionals can view team members"
+                msg: "Only professionals can view employees"
             });
         }
 
-        // Get all team members for this professional
-        const teamMembers = await User.find({
-            role: 'team_member',
-            'teamMember.companyId': (professional._id as mongoose.Types.ObjectId).toString(),
-            'teamMember.isActive': true
+        // Get all employees for this professional
+        const employees = await User.find({
+            role: 'employee',
+            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString(),
+            'employee.isActive': true
         }).select('-password -verificationCode -verificationCodeExpires');
 
-        console.log(`👥 TEAM: Retrieved ${teamMembers.length} team members for ${professional.email}`);
+        console.log(`👥 EMPLOYEE: Retrieved ${employees.length} employees for ${professional.email}`);
 
         res.status(200).json({
             success: true,
             data: {
-                teamMembers: teamMembers.map(member => ({
+                employees: employees.map(member => ({
                     _id: member._id,
                     name: member.name,
-                    email: member.teamMember?.hasEmail ? member.email : undefined,
-                    hasEmail: member.teamMember?.hasEmail,
+                    email: member.employee?.hasEmail ? member.email : undefined,
+                    hasEmail: member.employee?.hasEmail,
                     role: member.role,
-                    availabilityPreference: member.teamMember?.availabilityPreference,
-                    invitedAt: member.teamMember?.invitedAt,
-                    acceptedAt: member.teamMember?.acceptedAt,
-                    isActive: member.teamMember?.isActive,
-                    managedByCompany: member.teamMember?.managedByCompany,
+                    availabilityPreference: member.employee?.availabilityPreference,
+                    invitedAt: member.employee?.invitedAt,
+                    acceptedAt: member.employee?.acceptedAt,
+                    isActive: member.employee?.isActive,
+                    managedByCompany: member.employee?.managedByCompany,
                     availability: member.availability,
                     blockedDates: member.blockedDates,
                     blockedRanges: member.blockedRanges
                 })),
-                totalCount: teamMembers.length
+                totalCount: employees.length
             }
         });
 
     } catch (error) {
-        console.error("❌ TEAM: Error getting team members:", error);
+        console.error("❌ EMPLOYEE: Error getting employees:", error);
         res.status(500).json({
             success: false,
             msg: "Internal server error"
@@ -272,8 +272,8 @@ export const getTeamMembers = async (req: Request, res: Response, next: NextFunc
     }
 };
 
-// Update team member status (activate/deactivate)
-export const updateTeamMemberStatus = async (req: Request, res: Response, next: NextFunction) => {
+// Update employee status (activate/deactivate)
+export const updateEmployeeStatus = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = req.cookies?.['auth-token'];
         
@@ -300,45 +300,45 @@ export const updateTeamMemberStatus = async (req: Request, res: Response, next: 
         if (!professional || professional.role !== 'professional') {
             return res.status(403).json({
                 success: false,
-                msg: "Only professionals can update team member status"
+                msg: "Only professionals can update employee status"
             });
         }
 
-        const { teamMemberId } = req.params;
+        const { employeeId } = req.params;
         const { isActive } = req.body;
 
-        const teamMember = await User.findOne({
-            _id: teamMemberId,
-            role: 'team_member',
-            'teamMember.companyId': (professional._id as mongoose.Types.ObjectId).toString()
+        const employee = await User.findOne({
+            _id: employeeId,
+            role: 'employee',
+            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
         });
 
-        if (!teamMember) {
+        if (!employee) {
             return res.status(404).json({
                 success: false,
-                msg: "Team member not found"
+                msg: "Employee not found"
             });
         }
 
-        teamMember.teamMember!.isActive = isActive;
-        await teamMember.save();
+        employee.employee!.isActive = isActive;
+        await employee.save();
 
-        console.log(`🔄 TEAM: ${professional.email} ${isActive ? 'activated' : 'deactivated'} team member ${teamMember.name}`);
+        console.log(`🔄 EMPLOYEE: ${professional.email} ${isActive ? 'activated' : 'deactivated'} employee ${employee.name}`);
 
         res.status(200).json({
             success: true,
-            msg: `Team member ${isActive ? 'activated' : 'deactivated'} successfully`,
+            msg: `Employee ${isActive ? 'activated' : 'deactivated'} successfully`,
             data: {
-                teamMember: {
-                    _id: teamMember._id,
-                    name: teamMember.name,
-                    isActive: teamMember.teamMember?.isActive
+                employee: {
+                    _id: employee._id,
+                    name: employee.name,
+                    isActive: employee.employee?.isActive
                 }
             }
         });
 
     } catch (error) {
-        console.error("❌ TEAM: Error updating team member status:", error);
+        console.error("❌ EMPLOYEE: Error updating employee status:", error);
         res.status(500).json({
             success: false,
             msg: "Internal server error"
@@ -346,7 +346,7 @@ export const updateTeamMemberStatus = async (req: Request, res: Response, next: 
     }
 };
 
-// Team member accepts invitation (first login)
+// Employee accepts invitation (first login)
 export const acceptInvitation = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const { email, password } = req.body;
@@ -359,20 +359,20 @@ export const acceptInvitation = async (req: Request, res: Response, next: NextFu
         }
 
         await connecToDatabase();
-        
-        const teamMember = await User.findOne({ 
+
+        const employee = await User.findOne({
             email: email.toLowerCase(),
-            role: 'team_member'
+            role: 'employee'
         }).select('+password');
 
-        if (!teamMember) {
+        if (!employee) {
             return res.status(404).json({
                 success: false,
-                msg: "Team member not found"
+                msg: "Employee not found"
             });
         }
 
-        const isPasswordValid = await bcrypt.compare(password, teamMember.password!);
+        const isPasswordValid = await bcrypt.compare(password, employee.password!);
         if (!isPasswordValid) {
             return res.status(401).json({
                 success: false,
@@ -381,14 +381,14 @@ export const acceptInvitation = async (req: Request, res: Response, next: NextFu
         }
 
         // Mark as accepted if not already
-        if (!teamMember.teamMember?.acceptedAt) {
-            teamMember.teamMember!.acceptedAt = new Date();
-            await teamMember.save();
+        if (!employee.employee?.acceptedAt) {
+            employee.employee!.acceptedAt = new Date();
+            await employee.save();
         }
 
         // Generate JWT token
         const token = jwt.sign(
-            { id: teamMember._id },
+            { id: employee._id },
             process.env.JWT_SECRET!,
             { expiresIn: '7d' }
         );
@@ -400,24 +400,24 @@ export const acceptInvitation = async (req: Request, res: Response, next: NextFu
             maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
         });
 
-        console.log(`✅ TEAM: Team member ${teamMember.name} accepted invitation and logged in`);
+        console.log(`✅ EMPLOYEE: Employee ${employee.name} accepted invitation and logged in`);
 
         res.status(200).json({
             success: true,
             msg: "Login successful",
             data: {
                 user: {
-                    _id: teamMember._id,
-                    name: teamMember.name,
-                    email: teamMember.email,
-                    role: teamMember.role,
-                    teamMember: teamMember.teamMember
+                    _id: employee._id,
+                    name: employee.name,
+                    email: employee.email,
+                    role: employee.role,
+                    employee: employee.employee
                 }
             }
         });
 
     } catch (error) {
-        console.error("❌ TEAM: Error accepting invitation:", error);
+        console.error("❌ EMPLOYEE: Error accepting invitation:", error);
         res.status(500).json({
             success: false,
             msg: "Internal server error"

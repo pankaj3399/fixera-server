@@ -11,6 +11,7 @@ import projectRouter from './routes/Project';
 import publicRouter from './routes/Public';
 import meetingRouter from './routes/Meeting';
 import serviceCategoryRouter from './routes/ServiceCategory';
+import professionalRouter from './routes/Professional';
 
 dotenv.config();
 
@@ -48,6 +49,7 @@ app.use('/api/admin', adminRouter);
 app.use('/api/projects', projectRouter);
 app.use('/api/meetings', meetingRouter);
 app.use('/api/service-categories', serviceCategoryRouter);
+app.use('/api/professionals', professionalRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);

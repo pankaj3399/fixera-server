@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 
-export type UserRole = "admin" | "visitor" | "customer" | "professional"
+export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee"
 
 
  export interface User{

@@ -4,17 +4,17 @@ import User from '../../models/user';
 import Project from '../../models/project';
 
 /**
- * Get team members' availability for a specific date range
+ * Get employees' availability for a specific date range
  */
-export const getTeamAvailability = async (req: Request, res: Response) => {
+export const getEmployeeAvailability = async (req: Request, res: Response) => {
     try {
         const { professionalId } = req.user!;
-        const { teamMemberIds, startDate, endDate } = req.body;
+        const { employeeIds, startDate, endDate } = req.body;
 
-        if (!teamMemberIds || !Array.isArray(teamMemberIds) || teamMemberIds.length === 0) {
+        if (!employeeIds || !Array.isArray(employeeIds) || employeeIds.length === 0) {
             return res.status(400).json({
                 success: false,
-                message: 'Team member IDs are required'
+                message: 'Employee IDs are required'
             });
         }
 
@@ -35,30 +35,30 @@ export const getTeamAvailability = async (req: Request, res: Response) => {
             });
         }
 
-        // Get team members and verify they belong to the professional
-        const teamMembers = await User.find({
-            _id: { $in: teamMemberIds },
-            role: 'team_member',
-            'teamMember.companyId': professionalId,
-            'teamMember.isActive': true
-        }).select('name email availability blockedDates blockedRanges teamMember');
+        // Get employees and verify they belong to the professional
+        const employees = await User.find({
+            _id: { $in: employeeIds },
+            role: 'employee',
+            'employee.companyId': professionalId,
+            'employee.isActive': true
+        }).select('name email availability blockedDates blockedRanges employee');
 
-        if (teamMembers.length !== teamMemberIds.length) {
+        if (employees.length !== employeeIds.length) {
             return res.status(404).json({
                 success: false,
-                message: 'One or more team members not found or not associated with your account'
+                message: 'One or more employees not found or not associated with your account'
             });
         }
 
-        // Get existing meetings for these team members in the date range
+        // Get existing meetings for these employees in the date range
         const existingMeetings = await Meeting.find({
-            'attendees.userId': { $in: teamMemberIds },
+            'attendees.userId': { $in: employeeIds },
             scheduledDate: { $gte: start, $lte: end },
             status: { $in: ['scheduled', 'rescheduled'] }
         }).select('scheduledDate startTime endTime attendees duration');
 
-        // Build availability data for each team member
-        const availabilityData = teamMembers.map(member => {
+        // Build availability data for each employee
+        const availabilityData = employees.map(member => {
             const memberMeetings = existingMeetings.filter(meeting =>
                 meeting.attendees.some(attendee => attendee.userId === String(member._id))
             );
@@ -90,17 +90,17 @@ export const getTeamAvailability = async (req: Request, res: Response) => {
                     endTime: meeting.endTime,
                     duration: meeting.duration
                 })),
-                availabilityPreference: member.teamMember?.availabilityPreference || 'personal'
+                availabilityPreference: member.employee?.availabilityPreference || 'personal'
             };
         });
 
-        // Get the professional's company availability (for team members using same_as_company)
+        // Get the professional's company availability (for employees using same_as_company)
         const professional = await User.findById(professionalId).select('availability blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
 
         res.status(200).json({
             success: true,
             data: {
-                teamMembers: availabilityData,
+                employees: availabilityData,
                 companyAvailability: {
                     availability: professional?.companyAvailability || {},
                     blockedDates: professional?.companyBlockedDates?.filter(blocked => {
@@ -117,10 +117,10 @@ export const getTeamAvailability = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error('Get team availability error:', error);
+        console.error('Get employee availability error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get team availability',
+            message: 'Failed to get employee availability',
             error: error.message
         });
     }
@@ -181,24 +181,24 @@ export const createMeeting = async (req: Request, res: Response) => {
         // Validate attendees if provided
         let attendees: Array<{ userId: string; name: string; role: string; status: string }> = [];
         if (attendeeIds && Array.isArray(attendeeIds) && attendeeIds.length > 0) {
-            const teamMembers = await User.find({
+            const employees = await User.find({
                 _id: { $in: attendeeIds },
-                role: 'team_member',
-                'teamMember.companyId': professionalId,
-                'teamMember.isActive': true
+                role: 'employee',
+                'employee.companyId': professionalId,
+                'employee.isActive': true
             }).select('name');
 
-            attendees = teamMembers.map(member => ({
+            attendees = employees.map(member => ({
                 userId: String(member._id),
                 name: member.name,
-                role: 'team_member',
+                role: 'employee',
                 status: 'pending'
             }));
 
             if (attendees.length !== attendeeIds.length) {
                 return res.status(400).json({
                     success: false,
-                    message: 'One or more team members not found or not active'
+                    message: 'One or more employees not found or not active'
                 });
             }
         }

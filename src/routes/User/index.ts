@@ -8,14 +8,14 @@ import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handle
 import { uploadIdProof, updateProfessionalProfile, submitForVerification } from "../../handlers/User/profileManagement";
 import { upload } from "../../utils/s3Upload";
 import { getLoyaltyStatus, addSpending, getLeaderboard } from "../../handlers/User/loyaltyManagement";
-import { inviteTeamMember, getTeamMembers, updateTeamMemberStatus, acceptInvitation } from "../../handlers/User/teamManagement";
-import { changePassword, resetTeamMemberPassword } from "../../handlers/User/passwordManagement";
+import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation } from "../../handlers/User/employeeManagement";
+import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
 import {
-    updateTeamMemberAvailabilityPreference,
-    updateTeamMemberAvailability,
-    getTeamMemberEffectiveAvailability,
-    updateManagedTeamMemberAvailability
-} from "../../handlers/User/teamMemberAvailability";
+    updateEmployeeAvailabilityPreference,
+    updateEmployeeAvailability,
+    getEmployeeEffectiveAvailability,
+    updateManagedEmployeeAvailability
+} from "../../handlers/User/employeeAvailability";
 import {
     getServiceConfigurationForProfessional,
     getDynamicFieldsForService,
@@ -28,7 +28,8 @@ import {
     getProject,
     getAllProjects,
     submitProject,
-    deleteProject
+    deleteProject,
+    getEmployeeAssignedProjects
 } from "../../handlers/Professional/projectManagement";
 import {
     uploadProjectImage,
@@ -56,21 +57,21 @@ userRouter.route("/loyalty/status").get(getLoyaltyStatus)
 userRouter.route("/loyalty/add-spending").post(addSpending)
 userRouter.route("/loyalty/leaderboard").get(getLeaderboard)
 
-// Team Management Routes
-userRouter.route("/team/invite").post(inviteTeamMember)
-userRouter.route("/team/members").get(getTeamMembers)
-userRouter.route("/team/members/:teamMemberId/status").put(updateTeamMemberStatus) 
-userRouter.route("/team/accept-invitation").post(acceptInvitation) 
+// Employee Management Routes
+userRouter.route("/employee/invite").post(inviteEmployee)
+userRouter.route("/employee/list").get(getEmployees)
+userRouter.route("/employee/:employeeId/status").put(updateEmployeeStatus)
+userRouter.route("/employee/accept-invitation").post(acceptInvitation)
 
 // Password Management Routes
-userRouter.route("/change-password").put(changePassword) 
-userRouter.route("/team/reset-password").put(resetTeamMemberPassword)
+userRouter.route("/change-password").put(changePassword)
+userRouter.route("/employee/reset-password").put(resetEmployeePassword)
 
-// Team Member Availability Routes
-userRouter.route("/team/availability/preference").put(updateTeamMemberAvailabilityPreference)
-userRouter.route("/team/availability").put(updateTeamMemberAvailability)
-userRouter.route("/team/availability/effective").get(getTeamMemberEffectiveAvailability)
-userRouter.route("/team/members/:teamMemberId/availability").put(updateManagedTeamMemberAvailability)
+// Employee Availability Routes
+userRouter.route("/employee/availability/preference").put(updateEmployeeAvailabilityPreference)
+userRouter.route("/employee/availability").put(updateEmployeeAvailability)
+userRouter.route("/employee/availability/effective").get(getEmployeeEffectiveAvailability)
+userRouter.route("/employee/:employeeId/availability").put(updateManagedEmployeeAvailability)
 
 // Service Configuration Routes (for Professionals)
 userRouter.route("/service-configuration").get(getServiceConfigurationForProfessional)
@@ -83,6 +84,9 @@ userRouter.route("/areas-of-work").get(getAreasOfWork)
 userRouter.route("/projects").get(getAllProjects).post(saveProjectDraft)
 userRouter.route("/projects/:id").get(getProject).delete(deleteProject)
 userRouter.route("/projects/:id/submit").post(submitProject)
+
+// Employee Project Routes
+userRouter.route("/employee/projects").get(getEmployeeAssignedProjects)
 
 // Project File Upload Routes
 userRouter.route("/projects/upload/image").post(upload.single('image'), uploadProjectImage)

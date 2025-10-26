@@ -52,7 +52,7 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         loyaltyLevel: user.loyaltyLevel,
         totalSpent: user.totalSpent,
         totalBookings: user.totalBookings,
-        teamMember: user.teamMember,
+        employee: user.employee,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
       }

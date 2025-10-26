@@ -5,7 +5,7 @@ export type MeetingType = 'planning' | 'team';
 export interface IMeetingAttendee {
     userId: string;
     name: string;
-    role: 'professional' | 'team_member';
+    role: 'professional' | 'employee';
     status: 'pending' | 'accepted' | 'declined';
     responseAt?: Date;
 }
@@ -57,7 +57,7 @@ export interface IMeeting extends Document {
 const MeetingAttendeeSchema = new Schema<IMeetingAttendee>({
     userId: { type: String, required: true },
     name: { type: String, required: true },
-    role: { type: String, enum: ['professional', 'team_member'], required: true },
+    role: { type: String, enum: ['professional', 'employee'], required: true },
     status: { type: String, enum: ['pending', 'accepted', 'declined'], default: 'pending' },
     responseAt: { type: Date }
 });

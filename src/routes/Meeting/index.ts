@@ -6,7 +6,7 @@ import {
     updateMeeting,
     cancelMeeting,
     getAllMeetings,
-    getTeamAvailability
+    getEmployeeAvailability
 } from '../../handlers/Meeting';
 import { authMiddleware } from '../../middlewares/auth';
 
@@ -17,10 +17,10 @@ router.use(authMiddleware(['professional']));
 
 /**
  * @route   POST /api/meetings/availability
- * @desc    Get team members' availability for a date range
+ * @desc    Get employees' availability for a date range
  * @access  Professional
  */
-router.post('/availability', getTeamAvailability);
+router.post('/availability', getEmployeeAvailability);
 
 /**
  * @route   POST /api/meetings

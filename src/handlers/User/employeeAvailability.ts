@@ -4,7 +4,7 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 
-export const updateTeamMemberAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {
+export const updateEmployeeAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const token = req.cookies?.['auth-token'];
 
@@ -28,10 +28,10 @@ export const updateTeamMemberAvailabilityPreference = async (req: Request, res: 
     await connecToDatabase();
     const user = await User.findById(decoded.id);
 
-    if (!user || user.role !== 'team_member') {
+    if (!user || user.role !== 'employee') {
       return res.status(403).json({
         success: false,
-        msg: "Team member access required"
+        msg: "Employee access required"
       });
     }
 
@@ -44,18 +44,18 @@ export const updateTeamMemberAvailabilityPreference = async (req: Request, res: 
       });
     }
 
-    // Update the team member's availability preference
-    if (!user.teamMember) {
-      user.teamMember = {};
+    // Update the employee's availability preference
+    if (!user.employee) {
+      user.employee = {};
     }
-    user.teamMember.availabilityPreference = availabilityPreference;
+    user.employee.availabilityPreference = availabilityPreference;
     await user.save();
 
     return res.status(200).json({
       success: true,
       msg: "Availability preference updated successfully",
       data: {
-        availabilityPreference: user.teamMember.availabilityPreference
+        availabilityPreference: user.employee.availabilityPreference
       }
     });
 
@@ -68,7 +68,7 @@ export const updateTeamMemberAvailabilityPreference = async (req: Request, res: 
   }
 };
 
-export const updateTeamMemberAvailability = async (req: Request, res: Response, next: NextFunction) => {
+export const updateEmployeeAvailability = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const token = req.cookies?.['auth-token'];
 
@@ -92,16 +92,16 @@ export const updateTeamMemberAvailability = async (req: Request, res: Response, 
     await connecToDatabase();
     const user = await User.findById(decoded.id);
 
-    if (!user || user.role !== 'team_member') {
+    if (!user || user.role !== 'employee') {
       return res.status(403).json({
         success: false,
-        msg: "Team member access required"
+        msg: "Employee access required"
       });
     }
 
     const { availability, blockedDates, blockedRanges } = req.body;
 
-    // Update team member's personal availability
+    // Update employee's personal availability
     if (availability) {
       user.availability = {
         ...user.availability,
@@ -180,7 +180,7 @@ export const updateTeamMemberAvailability = async (req: Request, res: Response, 
   }
 };
 
-export const getTeamMemberEffectiveAvailability = async (req: Request, res: Response, next: NextFunction) => {
+export const getEmployeeEffectiveAvailability = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const token = req.cookies?.['auth-token'];
 
@@ -204,15 +204,15 @@ export const getTeamMemberEffectiveAvailability = async (req: Request, res: Resp
     await connecToDatabase();
     const user = await User.findById(decoded.id);
 
-    if (!user || user.role !== 'team_member') {
+    if (!user || user.role !== 'employee') {
       return res.status(403).json({
         success: false,
-        msg: "Team member access required"
+        msg: "Employee access required"
       });
     }
 
     // Get effective availability based on preference
-    const preference = user.teamMember?.availabilityPreference || 'personal';
+    const preference = user.employee?.availabilityPreference || 'personal';
 
     let effectiveAvailability;
     let effectiveBlockedDates;
@@ -220,7 +220,7 @@ export const getTeamMemberEffectiveAvailability = async (req: Request, res: Resp
 
     if (preference === 'same_as_company') {
       // Fetch professional's company availability
-      const professional = await User.findById(user.teamMember?.companyId);
+      const professional = await User.findById(user.employee?.companyId);
 
       if (!professional) {
         return res.status(404).json({
@@ -233,7 +233,7 @@ export const getTeamMemberEffectiveAvailability = async (req: Request, res: Resp
       effectiveBlockedDates = professional.companyBlockedDates || [];
       effectiveBlockedRanges = professional.companyBlockedRanges || [];
     } else {
-      // Use team member's personal availability
+      // Use employee's personal availability
       effectiveAvailability = user.availability || {};
       effectiveBlockedDates = user.blockedDates || [];
       effectiveBlockedRanges = user.blockedRanges || [];
@@ -258,9 +258,9 @@ export const getTeamMemberEffectiveAvailability = async (req: Request, res: Resp
   }
 };
 
-export const updateManagedTeamMemberAvailability = async (req: Request, res: Response, next: NextFunction) => {
+export const updateManagedEmployeeAvailability = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { teamMemberId } = req.params;
+    const { employeeId } = req.params;
     const token = req.cookies?.['auth-token'];
 
     if (!token) {
@@ -290,34 +290,34 @@ export const updateManagedTeamMemberAvailability = async (req: Request, res: Res
       });
     }
 
-    // Find the team member
-    const teamMember = await User.findOne({
-      _id: teamMemberId,
-      role: 'team_member',
-      'teamMember.companyId': (professional._id as mongoose.Types.ObjectId).toString()
+    // Find the employee
+    const employee = await User.findOne({
+      _id: employeeId,
+      role: 'employee',
+      'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
     });
 
-    if (!teamMember) {
+    if (!employee) {
       return res.status(404).json({
         success: false,
-        msg: "Team member not found or not managed by you"
+        msg: "Employee not found or not managed by you"
       });
     }
 
     const { availability, blockedDates, blockedRanges } = req.body;
 
-    // Check if the team member is managed by the company
-    if (!teamMember.teamMember?.managedByCompany) {
+    // Check if the employee is managed by the company
+    if (!employee.employee?.managedByCompany) {
       return res.status(403).json({
         success: false,
-        msg: "This team member manages their own availability"
+        msg: "This employee manages their own availability"
       });
     }
 
-    // Update team member's availability
+    // Update employee's availability
     if (availability) {
-      teamMember.availability = {
-        ...teamMember.availability,
+      employee.availability = {
+        ...employee.availability,
         ...availability
       };
     }
@@ -329,7 +329,7 @@ export const updateManagedTeamMemberAvailability = async (req: Request, res: Res
           msg: "Blocked dates must be an array"
         });
       }
-      teamMember.blockedDates = blockedDates.map(item => {
+      employee.blockedDates = blockedDates.map(item => {
         if (typeof item === 'string') {
           return { date: new Date(item) };
         } else {
@@ -369,26 +369,26 @@ export const updateManagedTeamMemberAvailability = async (req: Request, res: Res
         };
       });
 
-      teamMember.blockedRanges = validatedRanges;
+      employee.blockedRanges = validatedRanges;
     }
 
-    await teamMember.save();
+    await employee.save();
 
     return res.status(200).json({
       success: true,
-      msg: "Team member availability updated successfully",
+      msg: "Employee availability updated successfully",
       data: {
-        availability: teamMember.availability,
-        blockedDates: teamMember.blockedDates,
-        blockedRanges: teamMember.blockedRanges
+        availability: employee.availability,
+        blockedDates: employee.blockedDates,
+        blockedRanges: employee.blockedRanges
       }
     });
 
   } catch (error: any) {
-    console.error(`❌ Error updating managed team member availability:`, error);
+    console.error(`❌ Error updating managed employee availability:`, error);
     return res.status(500).json({
       success: false,
-      msg: "Server error while updating managed team member availability"
+      msg: "Server error while updating managed employee availability"
     });
   }
 };

@@ -183,6 +183,44 @@ export const deleteProject = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Get projects assigned to an employee
+ * @route GET /api/user/employee/projects
+ */
+export const getEmployeeAssignedProjects = async (req: Request, res: Response) => {
+  try {
+    const userId = String(req.user?._id);
+    const user = req.user;
+
+    // Verify user is an employee
+    if (user?.role !== 'employee') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only employees can access this endpoint'
+      });
+    }
+
+    // Find projects where the employee is in the resources array
+    const projects = await Project.find({
+      resources: userId,
+      status: { $in: ['published', 'on_hold'] } // Only show published or on-hold projects
+    })
+      .select('title description category service professionalId status createdAt updatedAt')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: projects
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching assigned projects',
+      error: error.message
+    });
+  }
+};
+
 // Helper function for quality checks
 function performQualityChecks(project: any) {
   const checks: Array<{

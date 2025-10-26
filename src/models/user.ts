@@ -1,6 +1,6 @@
 import { Schema, model, Document } from "mongoose";
 
-export type UserRole = "admin" | "visitor" | "customer" | "professional" | "team_member";
+export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee";
 
 export interface IUser extends Document {
     name: string;
@@ -89,7 +89,7 @@ export interface IUser extends Document {
     totalSpent?: number;
     totalBookings?: number;
     lastLoyaltyUpdate?: Date;
-    teamMember?: {
+    employee?: {
         companyId?: string;
         invitedBy?: string;
         invitedAt?: Date;
@@ -97,7 +97,7 @@ export interface IUser extends Document {
         isActive?: boolean;
         hasEmail?: boolean;
         availabilityPreference?: 'personal' | 'same_as_company';
-        managedByCompany?: boolean; 
+        managedByCompany?: boolean;
     };
 }
 
@@ -133,7 +133,7 @@ const UserSchema = new Schema<IUser>({
     },
     role: {
         type: String,
-        enum: ['admin', 'visitor', 'customer', 'professional', 'team_member'],
+        enum: ['admin', 'visitor', 'customer', 'professional', 'employee'],
         default: 'customer'
     },
 
@@ -354,19 +354,19 @@ const UserSchema = new Schema<IUser>({
         type: Date,
         default: Date.now
     },
-    teamMember: {
+    employee: {
         companyId: { type: String, required: false },
         invitedBy: { type: String, required: false },
         invitedAt: { type: Date, required: false },
         acceptedAt: { type: Date, required: false },
         isActive: { type: Boolean, default: true },
         hasEmail: { type: Boolean, default: true },
-        availabilityPreference: { 
-            type: String, 
-            enum: ['personal', 'same_as_company'], 
+        availabilityPreference: {
+            type: String,
+            enum: ['personal', 'same_as_company'],
             default: 'personal',
             required: function(this: IUser) {
-                return this.role === 'team_member';
+                return this.role === 'employee';
             }
         },
         managedByCompany: { type: Boolean, default: false }
@@ -379,7 +379,7 @@ UserSchema.index({ role: 1, professionalStatus: 1 });
 UserSchema.index({ role: 1 });
 UserSchema.index({ role: 1, loyaltyPoints: 1 });
 UserSchema.index({ role: 1, totalSpent: -1 });
-UserSchema.index({ 'teamMember.companyId': 1 });
+UserSchema.index({ 'employee.companyId': 1 });
 UserSchema.index({ email: 1 });
 UserSchema.index({ phone: 1 });
 

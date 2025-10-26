@@ -105,8 +105,8 @@ export const changePassword = async (req: Request, res: Response, next: NextFunc
     }
 };
 
-// Reset password for team members (by company admin)
-export const resetTeamMemberPassword = async (req: Request, res: Response, next: NextFunction) => {
+// Reset password for employees (by company admin)
+export const resetEmployeePassword = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = req.cookies?.['auth-token'];
         
@@ -141,17 +141,17 @@ export const resetTeamMemberPassword = async (req: Request, res: Response, next:
         if (professional.role !== 'professional') {
             return res.status(403).json({
                 success: false,
-                msg: "Only professionals can reset team member passwords"
+                msg: "Only professionals can reset employee passwords"
             });
         }
 
-        const { teamMemberId, newPassword } = req.body;
+        const { employeeId, newPassword } = req.body;
 
         // Validate input
-        if (!teamMemberId || !newPassword) {
+        if (!employeeId || !newPassword) {
             return res.status(400).json({
                 success: false,
-                msg: "Team member ID and new password are required"
+                msg: "Employee ID and new password are required"
             });
         }
 
@@ -162,53 +162,53 @@ export const resetTeamMemberPassword = async (req: Request, res: Response, next:
             });
         }
 
-        // Find the team member
-        const teamMember = await User.findOne({
-            _id: teamMemberId,
-            role: 'team_member',
-            'teamMember.companyId': (professional._id as mongoose.Types.ObjectId).toString()
+        // Find the employee
+        const employee = await User.findOne({
+            _id: employeeId,
+            role: 'employee',
+            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
         }).select('+password');
 
-        if (!teamMember) {
+        if (!employee) {
             return res.status(404).json({
                 success: false,
-                msg: "Team member not found or not associated with your company"
+                msg: "Employee not found or not associated with your company"
             });
         }
 
-        // Only allow for team members managed by company (non-email employees)
-        if (teamMember.teamMember?.hasEmail && !teamMember.teamMember?.managedByCompany) {
+        // Only allow for employees managed by company (non-email employees)
+        if (employee.employee?.hasEmail && !employee.employee?.managedByCompany) {
             return res.status(403).json({
                 success: false,
-                msg: "Can only reset passwords for company-managed team members"
+                msg: "Can only reset passwords for company-managed employees"
             });
         }
 
-        console.log(`🔒 PASSWORD: Professional ${professional.email} resetting password for team member ${teamMember.name}`);
+        console.log(`🔒 PASSWORD: Professional ${professional.email} resetting password for employee ${employee.name}`);
 
         // Hash new password
         const hashedNewPassword = await bcrypt.hash(newPassword, 12);
-        
-        // Update password
-        teamMember.password = hashedNewPassword;
-        await teamMember.save();
 
-        console.log(`✅ PASSWORD: Password reset successfully for team member ${teamMember.name} by ${professional.email}`);
+        // Update password
+        employee.password = hashedNewPassword;
+        await employee.save();
+
+        console.log(`✅ PASSWORD: Password reset successfully for employee ${employee.name} by ${professional.email}`);
 
         res.status(200).json({
             success: true,
-            msg: "Team member password reset successfully",
+            msg: "Employee password reset successfully",
             data: {
-                teamMember: {
-                    _id: teamMember._id,
-                    name: teamMember.name,
-                    email: teamMember.teamMember?.hasEmail ? teamMember.email : undefined
+                employee: {
+                    _id: employee._id,
+                    name: employee.name,
+                    email: employee.employee?.hasEmail ? employee.email : undefined
                 }
             }
         });
 
     } catch (error) {
-        console.error("❌ PASSWORD: Error resetting team member password:", error);
+        console.error("❌ PASSWORD: Error resetting employee password:", error);
         res.status(500).json({
             success: false,
             msg: "Internal server error"
