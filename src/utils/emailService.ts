@@ -455,8 +455,8 @@ export const sendProfessionalReactivationEmail = async (email: string, name: str
 
 // Send team member invitation email
 export const sendTeamMemberInvitationEmail = async (
-  email: string, 
-  teamMemberName: string, 
+  email: string,
+  teamMemberName: string,
   companyName: string,
   loginEmail: string,
   temporaryPassword: string
@@ -468,33 +468,33 @@ export const sendTeamMemberInvitationEmail = async (
       <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; background: #f9f9f9; padding: 20px;">
         <div style="background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
           ${getEmailHeader('Team Member Invitation')}
-          
+
           <div style="padding: 30px;">
             <h2 style="color: #333; margin-bottom: 20px;">Welcome to the Team, ${teamMemberName}!</h2>
-            
+
             <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
               You have been invited to join <strong>${companyName}</strong> as a team member on the Fixera platform.
             </p>
-            
+
             <div style="background: #f8f9ff; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea;">
               <h3 style="color: #333; margin: 0 0 15px 0; font-size: 18px;">Your Login Credentials</h3>
               <p style="margin: 5px 0; color: #666;"><strong>Email:</strong> ${loginEmail}</p>
               <p style="margin: 5px 0; color: #666;"><strong>Temporary Password:</strong> <code style="background: #e8e8e8; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${temporaryPassword}</code></p>
             </div>
-            
+
             <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
               <p style="margin: 0; color: #856404; font-size: 14px;">
                 <strong>Security Note:</strong> Please change your password after your first login for security purposes.
               </p>
             </div>
-            
+
             <div style="text-align: center; margin: 30px 0;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/login" 
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/login"
                  style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: bold; display: inline-block;">
                 Login to Your Account
               </a>
             </div>
-            
+
             <div style="margin-top: 30px;">
               <h3 style="color: #333; margin-bottom: 15px; font-size: 18px;">What's Next?</h3>
               <ul style="color: #666; line-height: 1.8; padding-left: 20px;">
@@ -504,12 +504,12 @@ export const sendTeamMemberInvitationEmail = async (
                 <li>Start collaborating with your team</li>
               </ul>
             </div>
-            
+
             <p style="color: #999; font-size: 14px; margin-top: 30px;">
               If you have any questions or need assistance, please contact your company administrator or reach out to our support team.
             </p>
           </div>
-          
+
           ${getEmailFooter()}
         </div>
       </div>
@@ -519,15 +519,392 @@ export const sendTeamMemberInvitationEmail = async (
       to: [{ email: email, name: teamMemberName }],
       subject: `Welcome to ${companyName} - Team Member Invitation`,
       htmlContent: htmlContent,
-      sender: { 
-        email: process.env.FROM_EMAIL || 'noreply@fixera.com', 
-        name: 'Fixera Team' 
+      sender: {
+        email: process.env.FROM_EMAIL || 'noreply@fixera.com',
+        name: 'Fixera Team'
       },
     };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
+    return false;
+  }
+};
+
+// Send project approval email
+export const sendProjectApprovalEmail = async (
+  email: string,
+  professionalName: string,
+  projectTitle: string,
+  projectId: string
+): Promise<boolean> => {
+  try {
+    console.log(`📧 Sending project approval email to ${email}`);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Project Approved! 🎉")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${professionalName}!</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            Great news! Your project "<strong>${projectTitle}</strong>" has been approved and is now live on Fixera.
+          </p>
+
+          <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;">
+            <h3 style="color: #2E7D32; margin: 0 0 15px 0; font-size: 18px;">🚀 Your Project is Live!</h3>
+            <p style="color: #333; margin: 0 0 20px 0; line-height: 1.6;">
+              Customers can now find and book your project. Start managing your bookings and connecting with clients.
+            </p>
+            <div style="text-align: center; margin-top: 20px;">
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}"
+                 style="background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+                View Project
+              </a>
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
+                 style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+                Go to Dashboard
+              </a>
+            </div>
+          </div>
+
+          <div style="background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #333; margin: 0 0 15px 0; font-size: 16px;">💼 Next Steps:</h3>
+            <ul style="color: #666; line-height: 1.8; margin: 0; padding-left: 20px;">
+              <li>Monitor inquiries and booking requests</li>
+              <li>Keep your availability calendar updated</li>
+              <li>Respond promptly to customer messages</li>
+              <li>Deliver quality service to earn great reviews</li>
+            </ul>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            Thank you for being part of the Fixera community. We're excited to see your project succeed!
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "🎉 Your Fixera Project is Approved!";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send project approval email:', error);
+    return false;
+  }
+};
+
+// Send project rejection email
+export const sendProjectRejectionEmail = async (
+  email: string,
+  professionalName: string,
+  projectTitle: string,
+  feedback: string,
+  projectId: string
+): Promise<boolean> => {
+  try {
+    console.log(`📧 Sending project rejection email to ${email}`);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Project Update Required")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            Thank you for submitting your project "<strong>${projectTitle}</strong>". After reviewing it, we need you to address some items before we can approve it.
+          </p>
+
+          <div style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">⚠️ Items to Address</h3>
+            <div style="background: #fff; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px;">
+              <p style="color: #333; margin: 0; line-height: 1.6;">
+                <strong>Feedback:</strong> ${feedback}
+              </p>
+            </div>
+          </div>
+
+          <div style="background: #e8f4fd; border: 2px solid #667eea; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #1565C0; margin: 0 0 15px 0; font-size: 18px;">🔧 How to Fix This</h3>
+            <p style="color: #333; margin: 0 0 15px 0; line-height: 1.6;">
+              Please update your project with the requested changes, then resubmit it for review.
+            </p>
+            <div style="text-align: center; margin-top: 20px;">
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}/edit"
+                 style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+                Edit Project
+              </a>
+            </div>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            Once you've made the necessary updates, we'll review your project again within 48 hours. If you have questions, feel free to reply to this email.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Fixera Project Update Required - Please Review";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send project rejection email:', error);
+    return false;
+  }
+};
+
+// Send project deleted email
+export const sendProjectDeletedEmail = async (
+  email: string,
+  professionalName: string,
+  projectTitle: string,
+  reason: string
+): Promise<boolean> => {
+  try {
+    console.log(`📧 Sending project deletion email to ${email}`);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Project Deleted")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            We're writing to inform you that your project "<strong>${projectTitle}</strong>" has been removed from Fixera.
+          </p>
+
+          <div style="background: #fee2e2; border: 2px solid #ef4444; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #dc2626; margin: 0 0 15px 0; font-size: 18px;">❌ Reason for Deletion</h3>
+            <div style="background: #fff; border-left: 4px solid #ef4444; padding: 15px; border-radius: 4px;">
+              <p style="color: #333; margin: 0; line-height: 1.6;">
+                ${reason}
+              </p>
+            </div>
+          </div>
+
+          <div style="background: #e8f4fd; border: 2px solid #3b82f6; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #1565C0; margin: 0 0 15px 0; font-size: 18px;">🔧 What This Means</h3>
+            <ul style="color: #333; margin: 0; padding-left: 20px; line-height: 1.6;">
+              <li>The project is no longer visible on the platform</li>
+              <li>You can create a new project that complies with our guidelines</li>
+              <li>Contact support if you have questions about this decision</li>
+            </ul>
+          </div>
+
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/create"
+               style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+              Create New Project
+            </a>
+            <a href="mailto:support@fixera.com"
+               style="background: #6b7280; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+              Contact Support
+            </a>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            We appreciate your understanding and look forward to seeing your future projects on Fixera.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Fixera Project Deleted - Important Notice";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send project deletion email:', error);
+    return false;
+  }
+};
+
+// Send project deactivated email
+export const sendProjectDeactivatedEmail = async (
+  email: string,
+  professionalName: string,
+  projectTitle: string,
+  reason: string,
+  projectId: string
+): Promise<boolean> => {
+  try {
+    console.log(`📧 Sending project deactivation email to ${email}`);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Project Temporarily Deactivated")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            We're writing to inform you that your project "<strong>${projectTitle}</strong>" has been temporarily deactivated.
+          </p>
+
+          <div style="background: #fef3c7; border: 2px solid #f59e0b; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #92400e; margin: 0 0 15px 0; font-size: 18px;">⏸️ Reason for Deactivation</h3>
+            <div style="background: #fff; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 4px;">
+              <p style="color: #333; margin: 0; line-height: 1.6;">
+                ${reason}
+              </p>
+            </div>
+          </div>
+
+          <div style="background: #e8f4fd; border: 2px solid #3b82f6; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #1565C0; margin: 0 0 15px 0; font-size: 18px;">🔧 What This Means</h3>
+            <ul style="color: #333; margin: 0; padding-left: 20px; line-height: 1.6;">
+              <li>The project is temporarily hidden from customers</li>
+              <li>You can still access and edit the project</li>
+              <li>New bookings are paused until reactivation</li>
+              <li>Contact support to resolve this issue and reactivate</li>
+            </ul>
+          </div>
+
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}/edit"
+               style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+              View Project
+            </a>
+            <a href="mailto:support@fixera.com"
+               style="background: #6b7280; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+              Contact Support
+            </a>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            Once the issue is resolved, your project will be reactivated and visible to customers again.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Fixera Project Temporarily Deactivated";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send project deactivation email:', error);
+    return false;
+  }
+};
+
+// Send project reactivated email
+export const sendProjectReactivatedEmail = async (
+  email: string,
+  professionalName: string,
+  projectTitle: string,
+  projectId: string
+): Promise<boolean> => {
+  try {
+    console.log(`📧 Sending project reactivation email to ${email}`);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Project Reactivated! ✅")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Great News, ${professionalName}!</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            Your project "<strong>${projectTitle}</strong>" has been reactivated and is now live on Fixera again!
+          </p>
+
+          <div style="background: #dcfce7; border: 2px solid #16a34a; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;">
+            <h3 style="color: #15803d; margin: 0 0 15px 0; font-size: 18px;">🎉 Your Project is Live!</h3>
+            <p style="color: #333; margin: 0 0 20px 0; line-height: 1.6;">
+              Customers can now find and book your project again. Continue managing your bookings and connecting with clients.
+            </p>
+            <div style="text-align: center; margin-top: 20px;">
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}"
+                 style="background: #16a34a; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+                View Project
+              </a>
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
+                 style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+                Go to Dashboard
+              </a>
+            </div>
+          </div>
+
+          <div style="background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #333; margin: 0 0 15px 0; font-size: 16px;">💼 Keep It Going:</h3>
+            <ul style="color: #666; line-height: 1.8; margin: 0; padding-left: 20px;">
+              <li>Monitor new inquiries and booking requests</li>
+              <li>Keep your availability calendar updated</li>
+              <li>Respond promptly to customer messages</li>
+              <li>Maintain high service quality standards</li>
+            </ul>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            Thank you for your patience. We're excited to have your project back on the platform!
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "🎉 Your Fixera Project is Reactivated!";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send project reactivation email:', error);
     return false;
   }
 };

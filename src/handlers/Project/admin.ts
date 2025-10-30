@@ -1,5 +1,13 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
+import User from '../../models/user';
+import {
+    sendProjectApprovalEmail,
+    sendProjectRejectionEmail,
+    sendProjectDeletedEmail,
+    sendProjectDeactivatedEmail,
+    sendProjectReactivatedEmail
+} from '../../utils/emailService';
 
 export const getPendingProjects = async (req: Request, res: Response) => {
     try {
@@ -7,12 +15,33 @@ export const getPendingProjects = async (req: Request, res: Response) => {
             return res.status(403).json({ error: 'Admin access required' });
         }
 
+        // Get all pending projects with full details
         const pendingProjects = await Project.find({
             status: 'pending'
         }).sort({ submittedAt: 1 });
 
-        res.json(pendingProjects);
+        // Enrich with professional information
+        const projectsWithProfessional = await Promise.all(
+            pendingProjects.map(async (project) => {
+                const professional = await User.findById(project.professionalId).select(
+                    'name email phone businessInfo professionalStatus'
+                );
+                return {
+                    ...project.toObject(),
+                    professional: professional ? {
+                        name: professional.name,
+                        email: professional.email,
+                        phone: professional.phone,
+                        businessInfo: professional.businessInfo,
+                        professionalStatus: professional.professionalStatus
+                    } : null
+                };
+            })
+        );
+
+        res.json(projectsWithProfessional);
     } catch (error) {
+        console.error('Failed to fetch pending projects:', error);
         res.status(500).json({ error: 'Failed to fetch pending projects' });
     }
 };
@@ -38,8 +67,31 @@ export const approveProject = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Project not found' });
         }
 
+        // Get professional details for email
+        console.log('🔍 Looking up professional for email notification...');
+        console.log('Professional ID:', project.professionalId);
+
+        const professional = await User.findById(project.professionalId);
+        console.log('Professional found:', !!professional);
+        console.log('Professional email:', professional?.email);
+        console.log('Professional name:', professional?.name);
+
+        if (professional && professional.email) {
+            console.log('📧 Attempting to send approval email...');
+            const emailSent = await sendProjectApprovalEmail(
+                professional.email,
+                professional.name || 'Professional',
+                project.title,
+                String(project._id)
+            );
+            console.log('📧 Email send result:', emailSent ? '✅ SUCCESS' : '❌ FAILED');
+        } else {
+            console.log('⚠️ No email sent - professional or email not found');
+        }
+
         res.json({ message: 'Project approved', project });
     } catch (error) {
+        console.error('Failed to approve project:', error);
         res.status(500).json({ error: 'Failed to approve project' });
     }
 };
@@ -52,6 +104,10 @@ export const rejectProject = async (req: Request, res: Response) => {
 
         const { id } = req.params;
         const { feedback } = req.body;
+
+        if (!feedback || feedback.trim().length === 0) {
+            return res.status(400).json({ error: 'Rejection reason is required' });
+        }
 
         const project = await Project.findOneAndUpdate(
             { _id: id, status: 'pending' },
@@ -66,8 +122,162 @@ export const rejectProject = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Project not found' });
         }
 
+        // Get professional details for email
+        console.log('🔍 Looking up professional for rejection email...');
+        console.log('Professional ID:', project.professionalId);
+
+        const professional = await User.findById(project.professionalId);
+        console.log('Professional found:', !!professional);
+        console.log('Professional email:', professional?.email);
+        console.log('Professional name:', professional?.name);
+
+        if (professional && professional.email) {
+            console.log('📧 Attempting to send rejection email...');
+            console.log('Rejection reason:', feedback);
+            const emailSent = await sendProjectRejectionEmail(
+                professional.email,
+                professional.name || 'Professional',
+                project.title,
+                feedback,
+                String(project._id)
+            );
+            console.log('📧 Email send result:', emailSent ? '✅ SUCCESS' : '❌ FAILED');
+        } else {
+            console.log('⚠️ No email sent - professional or email not found');
+        }
+
         res.json({ message: 'Project rejected', project });
     } catch (error) {
+        console.error('Failed to reject project:', error);
         res.status(500).json({ error: 'Failed to reject project' });
+    }
+};
+
+// Delete a project (admin only)
+export const deleteProjectByAdmin = async (req: Request, res: Response) => {
+    try {
+        if (!req.user || req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { id } = req.params;
+        const { reason } = req.body;
+
+        if (!reason || reason.trim().length === 0) {
+            return res.status(400).json({ error: 'Deletion reason is required' });
+        }
+
+        const project = await Project.findById(id);
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        // Get professional details for email before deletion
+        const professional = await User.findById(project.professionalId);
+        const projectTitle = project.title;
+
+        // Delete the project
+        await Project.findByIdAndDelete(id);
+
+        // Send email notification
+        if (professional && professional.email) {
+            await sendProjectDeletedEmail(
+                professional.email,
+                professional.name || 'Professional',
+                projectTitle,
+                reason
+            );
+        }
+
+        res.json({ message: 'Project deleted successfully' });
+    } catch (error) {
+        console.error('Failed to delete project:', error);
+        res.status(500).json({ error: 'Failed to delete project' });
+    }
+};
+
+// Deactivate a published project (admin only)
+export const deactivateProject = async (req: Request, res: Response) => {
+    try {
+        if (!req.user || req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { id } = req.params;
+        const { reason } = req.body;
+
+        if (!reason || reason.trim().length === 0) {
+            return res.status(400).json({ error: 'Deactivation reason is required' });
+        }
+
+        const project = await Project.findOneAndUpdate(
+            { _id: id, status: 'published' },
+            {
+                status: 'on_hold',
+                adminFeedback: reason
+            },
+            { new: true }
+        );
+
+        if (!project) {
+            return res.status(404).json({ error: 'Published project not found' });
+        }
+
+        // Get professional details for email
+        const professional = await User.findById(project.professionalId);
+        if (professional && professional.email) {
+            await sendProjectDeactivatedEmail(
+                professional.email,
+                professional.name || 'Professional',
+                project.title,
+                reason,
+                String(project._id)
+            );
+        }
+
+        res.json({ message: 'Project deactivated', project });
+    } catch (error) {
+        console.error('Failed to deactivate project:', error);
+        res.status(500).json({ error: 'Failed to deactivate project' });
+    }
+};
+
+// Reactivate a deactivated project (admin only)
+export const reactivateProject = async (req: Request, res: Response) => {
+    try {
+        if (!req.user || req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { id } = req.params;
+
+        const project = await Project.findOneAndUpdate(
+            { _id: id, status: 'on_hold' },
+            {
+                status: 'published',
+                adminFeedback: undefined // Clear the feedback
+            },
+            { new: true }
+        );
+
+        if (!project) {
+            return res.status(404).json({ error: 'Deactivated project not found' });
+        }
+
+        // Get professional details for email
+        const professional = await User.findById(project.professionalId);
+        if (professional && professional.email) {
+            await sendProjectReactivatedEmail(
+                professional.email,
+                professional.name || 'Professional',
+                project.title,
+                String(project._id)
+            );
+        }
+
+        res.json({ message: 'Project reactivated', project });
+    } catch (error) {
+        console.error('Failed to reactivate project:', error);
+        res.status(500).json({ error: 'Failed to reactivate project' });
     }
 };

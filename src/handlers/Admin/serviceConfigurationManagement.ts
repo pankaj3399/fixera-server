@@ -108,10 +108,6 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
         const { id } = req.params;
         const updateData = req.body;
 
-        // Don't allow updating category and service
-        delete updateData.category;
-        delete updateData.service;
-
         const configuration = await ServiceConfiguration.findByIdAndUpdate(
             id,
             updateData,

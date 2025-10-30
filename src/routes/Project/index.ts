@@ -18,6 +18,9 @@ import {
   getPendingProjects,
   approveProject,
   rejectProject,
+  deleteProjectByAdmin,
+  deactivateProject,
+  reactivateProject,
 } from "../../handlers/Project/admin";
 
 const router = Router();
@@ -46,5 +49,8 @@ router.route("/:id/status").patch(authMiddleware, updateProjectStatus);
 router.route("/admin/pending").get(authMiddleware, getPendingProjects);
 router.route("/admin/:id/approve").put(authMiddleware, approveProject);
 router.route("/admin/:id/reject").put(authMiddleware, rejectProject);
+router.route("/admin/:id/delete").delete(authMiddleware, deleteProjectByAdmin);
+router.route("/admin/:id/deactivate").put(authMiddleware, deactivateProject);
+router.route("/admin/:id/reactivate").put(authMiddleware, reactivateProject);
 
 export default router;

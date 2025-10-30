@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { protect } from "../../middlewares/auth";
+import { protect, authMiddleware } from "../../middlewares/auth";
 import {
   getPendingProfessionals,
   getProfessionalDetails,
@@ -30,8 +30,8 @@ import {
 
 const adminRouter = Router();
 
-// All admin routes require authentication
-adminRouter.use(protect);
+// All admin routes require authentication and admin role
+adminRouter.use(authMiddleware(['admin']));
 
 // Professional approval routes
 adminRouter.route('/professionals').get(getPendingProfessionals);
