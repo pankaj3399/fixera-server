@@ -13,7 +13,7 @@ export const getAllServiceConfigurations = async (req: Request, res: Response) =
         if (category) filter.category = category;
         if (service) filter.service = service;
         if (isActive !== undefined) filter.isActive = isActive === 'true';
-        if (country) filter.country = country;
+        if (country) filter.activeCountries = country;
 
         const configurations = await ServiceConfiguration.find(filter).sort({ category: 1, service: 1 });
 

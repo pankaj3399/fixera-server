@@ -251,6 +251,6 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
   return config;
 };
 
-const LoyaltyConfig = mongoose.model<ILoyaltyConfig, ILoyaltyConfigModel>('LoyaltyConfig', loyaltyConfigSchema);
+const LoyaltyConfig = mongoose.model('LoyaltyConfig', loyaltyConfigSchema) as unknown as ILoyaltyConfigModel;
 
 export default LoyaltyConfig;

@@ -233,7 +233,7 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
 
 
     // Find user with password field
-    const userExists: IUser = await User.findOne({
+    const userExists = await User.findOne({
       email: email.toLowerCase().trim()
     }).select("+password");
 

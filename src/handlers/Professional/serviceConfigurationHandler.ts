@@ -7,7 +7,7 @@ import ServiceConfiguration from '../../models/serviceConfiguration';
  */
 export const getServiceConfigurationForProfessional = async (req: Request, res: Response) => {
     try {
-        const { category, service, areaOfWork } = req.query;
+        const { category, service, areaOfWork, country = 'BE' } = req.query as any;
 
         if (!category || !service) {
             return res.status(400).json({
@@ -19,7 +19,8 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         const filter: any = {
             category,
             service,
-            isActive: true
+            isActive: true,
+            activeCountries: country
         };
 
         if (areaOfWork && areaOfWork !== 'Not applicable') {
@@ -27,7 +28,7 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         }
 
         const configuration = await ServiceConfiguration.findOne(filter)
-            .select('category service areaOfWork pricingModel certificationRequired projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings');
+            .select('category service areaOfWork pricingModel certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries');
 
         if (!configuration) {
             return res.status(404).json({
@@ -63,7 +64,7 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
  */
 export const getDynamicFieldsForService = async (req: Request, res: Response) => {
     try {
-        const { category, service, areaOfWork } = req.query;
+        const { category, service, areaOfWork, country = 'BE' } = req.query as any;
 
         if (!category || !service) {
             return res.status(400).json({
@@ -75,7 +76,8 @@ export const getDynamicFieldsForService = async (req: Request, res: Response) =>
         const filter: any = {
             category,
             service,
-            isActive: true
+            isActive: true,
+            activeCountries: country
         };
 
         if (areaOfWork && areaOfWork !== 'Not applicable') {
@@ -113,11 +115,11 @@ export const getDynamicFieldsForService = async (req: Request, res: Response) =>
  */
 export const getCategoriesForProfessional = async (req: Request, res: Response) => {
     try {
-        const { country = 'BE' } = req.query;
+        const { country = 'BE' } = req.query as any;
 
         const categories = await ServiceConfiguration.distinct('category', {
             isActive: true,
-            country
+            activeCountries: country
         });
 
         res.status(200).json({
@@ -140,12 +142,12 @@ export const getCategoriesForProfessional = async (req: Request, res: Response) 
 export const getServicesByCategoryForProfessional = async (req: Request, res: Response) => {
     try {
         const { category } = req.params;
-        const { country = 'BE' } = req.query;
+        const { country = 'BE' } = req.query as any;
 
         const services = await ServiceConfiguration.distinct('service', {
             category,
             isActive: true,
-            country
+            activeCountries: country
         });
 
         res.status(200).json({
@@ -167,7 +169,7 @@ export const getServicesByCategoryForProfessional = async (req: Request, res: Re
  */
 export const getAreasOfWork = async (req: Request, res: Response) => {
     try {
-        const { category, service, country = 'BE' } = req.query;
+        const { category, service, country = 'BE' } = req.query as any;
 
         if (!category || !service) {
             return res.status(400).json({
@@ -180,7 +182,7 @@ export const getAreasOfWork = async (req: Request, res: Response) => {
             category,
             service,
             isActive: true,
-            country
+            activeCountries: country
         });
 
         // Filter out null/undefined values

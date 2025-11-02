@@ -282,7 +282,8 @@ function convertToServiceConfig(row: any): any {
     extraOptions,
     conditionsAndWarnings,
     isActive: true,
-    country: "BE",
+    activeCountries: ["BE"],
+    requiredCertifications: [],
   };
 }
 

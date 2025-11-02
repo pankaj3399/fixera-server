@@ -44,6 +44,7 @@ export interface IServiceConfiguration extends Document {
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
     pricingModel: string; // e.g., "Total price", "Total price or m² of material"
     certificationRequired: boolean;
+    requiredCertifications?: string[]; // Specific certification types required
 
     // Project types (multi-select options)
     projectTypes: string[]; // e.g., ["New Built", "Extension", "Refurbishment"]
@@ -62,7 +63,7 @@ export interface IServiceConfiguration extends Document {
 
     // Metadata
     isActive: boolean;
-    country: string;
+    activeCountries: string[]; // Countries where this config is active
     createdAt: Date;
     updatedAt: Date;
 }
@@ -115,6 +116,7 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     areaOfWork: { type: String },
     pricingModel: { type: String, required: true },
     certificationRequired: { type: Boolean, default: false },
+    requiredCertifications: [{ type: String, default: [] }],
 
     projectTypes: [{ type: String }],
 
@@ -125,14 +127,14 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
     // Metadata
     isActive: { type: Boolean, default: true },
-    country: { type: String, default: 'BE' }
+    activeCountries: { type: [String], default: ['BE'] }
 }, {
     timestamps: true
 });
 
 // Indexes for efficient querying
 ServiceConfigurationSchema.index({ category: 1, service: 1, areaOfWork: 1 });
-ServiceConfigurationSchema.index({ isActive: 1, country: 1 });
+ServiceConfigurationSchema.index({ isActive: 1, activeCountries: 1 });
 ServiceConfigurationSchema.index({ category: 1, isActive: 1 });
 
 const ServiceConfiguration = model<IServiceConfiguration>('ServiceConfiguration', ServiceConfigurationSchema);

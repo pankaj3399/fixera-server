@@ -101,7 +101,7 @@ export interface IUser extends Document {
     };
 }
 
-const UserSchema = new Schema<IUser>({
+const UserSchema = new Schema({
     name: {
         type: String,
         required: [true, 'Name is required'],

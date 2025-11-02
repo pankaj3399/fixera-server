@@ -16,7 +16,7 @@ export const getActiveServiceCategories = async (
     // Find all active service configurations for the country
     const serviceConfigs = await ServiceConfiguration.find({
       isActive: true,
-      country: country,
+      activeCountries: country,
     })
       .select("category service areaOfWork pricingModel certificationRequired")
       .sort({ category: 1, service: 1 });
