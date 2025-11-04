@@ -281,3 +281,45 @@ export const reactivateProject = async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Failed to reactivate project' });
     }
 };
+
+// Get approved (published/on_hold) projects for admin moderation
+export const getApprovedProjects = async (req: Request, res: Response) => {
+    try {
+        if (!req.user || req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { status } = req.query as any;
+        const statuses = status === 'on_hold'
+            ? ['on_hold']
+            : status === 'published'
+            ? ['published']
+            : ['published', 'on_hold'];
+
+        const approved = await Project.find({ status: { $in: statuses } })
+            .sort({ approvedAt: -1, updatedAt: -1 });
+
+        const withProfessional = await Promise.all(
+            approved.map(async (project) => {
+                const professional = await User.findById(project.professionalId).select(
+                    'name email phone businessInfo professionalStatus'
+                );
+                return {
+                    ...project.toObject(),
+                    professional: professional ? {
+                        name: professional.name,
+                        email: professional.email,
+                        phone: professional.phone,
+                        businessInfo: professional.businessInfo,
+                        professionalStatus: professional.professionalStatus
+                    } : null
+                };
+            })
+        );
+
+        res.json(withProfessional);
+    } catch (error) {
+        console.error('Failed to fetch approved projects:', error);
+        res.status(500).json({ error: 'Failed to fetch approved projects' });
+    }
+};
