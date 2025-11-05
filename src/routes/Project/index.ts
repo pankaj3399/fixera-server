@@ -16,6 +16,7 @@ import {
 } from "../../handlers/Project";
 import {
   getPendingProjects,
+  getApprovedProjects,
   approveProject,
   rejectProject,
   deleteProjectByAdmin,
@@ -47,6 +48,7 @@ router.route("/:id/status").patch(authMiddleware, updateProjectStatus);
 
 // Admin routes
 router.route("/admin/pending").get(authMiddleware, getPendingProjects);
+router.route("/admin/approved").get(authMiddleware, getApprovedProjects);
 router.route("/admin/:id/approve").put(authMiddleware, approveProject);
 router.route("/admin/:id/reject").put(authMiddleware, rejectProject);
 router.route("/admin/:id/delete").delete(authMiddleware, deleteProjectByAdmin);
