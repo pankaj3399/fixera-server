@@ -560,9 +560,9 @@ export const sendProjectApprovalEmail = async (
             </p>
             <div style="text-align: center; margin-top: 20px;">
               <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}"
-                 style="background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
-                View Project
-              </a>
+                  style="background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+                 View Project
+               </a>
               <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
                  style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
                 Go to Dashboard
@@ -644,10 +644,10 @@ export const sendProjectRejectionEmail = async (
               Please update your project with the requested changes, then resubmit it for review.
             </p>
             <div style="text-align: center; margin-top: 20px;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}/edit"
-                 style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-                Edit Project
-              </a>
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${projectId}/edit"
+                  style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+                 Edit Project
+               </a>
             </div>
           </div>
 
@@ -861,10 +861,10 @@ export const sendProjectReactivatedEmail = async (
               Customers can now find and book your project again. Continue managing your bookings and connecting with clients.
             </p>
             <div style="text-align: center; margin-top: 20px;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/projects/${projectId}"
-                 style="background: #16a34a; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
-                View Project
-              </a>
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${projectId}"
+                  style="background: #16a34a; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+                 View Project
+               </a>
               <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
                  style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
                 Go to Dashboard
