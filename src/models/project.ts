@@ -182,7 +182,7 @@ export interface IProject extends Document {
 
   // Step 8: Review & Status
   // Project lifecycle status
-  status: "draft" | "pending" | "rejected" | "published" | "on_hold";
+  status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
   // Booking lifecycle status (only applicable when project is published and has active bookings)
   bookingStatus?:
     | "rfq"
@@ -444,7 +444,7 @@ const ProjectSchema = new Schema<IProject>(
     // Project lifecycle status
     status: {
       type: String,
-      enum: ["draft", "pending", "rejected", "published", "on_hold"],
+      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended"],
       default: "draft",
     },
     // Booking lifecycle status

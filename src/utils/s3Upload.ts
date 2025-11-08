@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Request } from 'express';
 import multer from 'multer';
@@ -115,7 +115,7 @@ export const deleteFromS3 = async (key: string): Promise<void> => {
 // Generate presigned URL for secure file viewing
 export const getPresignedUrl = async (key: string, expiresIn: number = 3600): Promise<string> => {
   try {
-    const command = new PutObjectCommand({
+    const command = new GetObjectCommand({
       Bucket: BUCKET_NAME,
       Key: key,
     });
@@ -194,4 +194,14 @@ export const uploadProjectFile = async (
 ): Promise<{ url: string; key: string }> => {
   const fileName = generateFileName(file.originalname, userId, `projects/${projectId}/${fileType}`);
   return uploadToS3(file, fileName);
+};
+
+// Helper to parse S3 object key from the stored URL
+export const parseS3KeyFromUrl = (url: string): string | null => {
+  try {
+    const u = new URL(url);
+    return u.pathname.startsWith('/') ? u.pathname.slice(1) : u.pathname;
+  } catch {
+    return null;
+  }
 };

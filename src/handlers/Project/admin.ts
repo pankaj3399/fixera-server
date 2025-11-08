@@ -8,6 +8,82 @@ import {
     sendProjectDeactivatedEmail,
     sendProjectReactivatedEmail
 } from '../../utils/emailService';
+import { getPresignedUrl, parseS3KeyFromUrl } from '../../utils/s3Upload';
+
+// Helper: presign all file URLs (certifications and attachments) for admin viewing
+const presignProjectFiles = async (projectObj: any) => {
+    const clone = { ...projectObj };
+
+    // Certifications
+    if (Array.isArray(clone.certifications)) {
+        clone.certifications = await Promise.all(
+            clone.certifications.map(async (c: any) => {
+                const fileUrl = c?.fileUrl || c?.certificateUrl;
+                if (fileUrl) {
+                    const key = parseS3KeyFromUrl(fileUrl);
+                    if (key) {
+                        // Use long-lived expiry (max ~7 days for SigV4)
+                        const signed = await getPresignedUrl(key, 7 * 24 * 60 * 60);
+                        return { ...c, fileUrl: signed };
+                    }
+                }
+                return c;
+            })
+        );
+    }
+
+    // RFQ Questions attachments
+    if (Array.isArray(clone.rfqQuestions)) {
+        clone.rfqQuestions = await Promise.all(
+            clone.rfqQuestions.map(async (q: any) => {
+                if (Array.isArray(q?.professionalAttachments)) {
+                    const signedAttachments = await Promise.all(
+                        q.professionalAttachments.map(async (a: any) => {
+                            const url = typeof a === 'string' ? a : a?.url;
+                            if (url) {
+                                const key = parseS3KeyFromUrl(url);
+                                if (key) {
+                                    const signed = await getPresignedUrl(key, 7 * 24 * 60 * 60);
+                                    return signed;
+                                }
+                            }
+                            return a;
+                        })
+                    );
+                    return { ...q, professionalAttachments: signedAttachments };
+                }
+                return q;
+            })
+        );
+    }
+
+    // Post-Booking Questions attachments
+    if (Array.isArray(clone.postBookingQuestions)) {
+        clone.postBookingQuestions = await Promise.all(
+            clone.postBookingQuestions.map(async (q: any) => {
+                if (Array.isArray(q?.professionalAttachments)) {
+                    const signedAttachments = await Promise.all(
+                        q.professionalAttachments.map(async (a: any) => {
+                            const url = typeof a === 'string' ? a : a?.url;
+                            if (url) {
+                                const key = parseS3KeyFromUrl(url);
+                                if (key) {
+                                    const signed = await getPresignedUrl(key, 7 * 24 * 60 * 60);
+                                    return signed;
+                                }
+                            }
+                            return a;
+                        })
+                    );
+                    return { ...q, professionalAttachments: signedAttachments };
+                }
+                return q;
+            })
+        );
+    }
+
+    return clone;
+};
 
 export const getPendingProjects = async (req: Request, res: Response) => {
     try {
@@ -26,7 +102,7 @@ export const getPendingProjects = async (req: Request, res: Response) => {
                 const professional = await User.findById(project.professionalId).select(
                     'name email phone businessInfo professionalStatus'
                 );
-                return {
+                const base = {
                     ...project.toObject(),
                     professional: professional ? {
                         name: professional.name,
@@ -36,6 +112,7 @@ export const getPendingProjects = async (req: Request, res: Response) => {
                         professionalStatus: professional.professionalStatus
                     } : null
                 };
+                return await presignProjectFiles(base);
             })
         );
 
@@ -213,7 +290,7 @@ export const deactivateProject = async (req: Request, res: Response) => {
         const project = await Project.findOneAndUpdate(
             { _id: id, status: 'published' },
             {
-                status: 'on_hold',
+                status: 'suspended',
                 adminFeedback: reason
             },
             { new: true }
@@ -252,7 +329,7 @@ export const reactivateProject = async (req: Request, res: Response) => {
         const { id } = req.params;
 
         const project = await Project.findOneAndUpdate(
-            { _id: id, status: 'on_hold' },
+            { _id: id, status: 'suspended' },
             {
                 status: 'published',
                 adminFeedback: undefined // Clear the feedback
@@ -294,7 +371,9 @@ export const getApprovedProjects = async (req: Request, res: Response) => {
             ? ['on_hold']
             : status === 'published'
             ? ['published']
-            : ['published', 'on_hold'];
+            : status === 'suspended'
+            ? ['suspended']
+            : ['published', 'on_hold', 'suspended'];
 
         const approved = await Project.find({ status: { $in: statuses } })
             .sort({ approvedAt: -1, updatedAt: -1 });
@@ -304,7 +383,7 @@ export const getApprovedProjects = async (req: Request, res: Response) => {
                 const professional = await User.findById(project.professionalId).select(
                     'name email phone businessInfo professionalStatus'
                 );
-                return {
+                const base = {
                     ...project.toObject(),
                     professional: professional ? {
                         name: professional.name,
@@ -314,6 +393,7 @@ export const getApprovedProjects = async (req: Request, res: Response) => {
                         professionalStatus: professional.professionalStatus
                     } : null
                 };
+                return await presignProjectFiles(base);
             })
         );
 
