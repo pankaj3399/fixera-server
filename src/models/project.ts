@@ -158,7 +158,7 @@ export interface IProject extends Document {
   minOverlapPercentage?: number;
 
   // Step 1: Basic Info
-  professionalId: string;
+  professionalId: Schema.Types.ObjectId | string;
   category: string; // Kept for backwards compatibility (primary category)
   service: string; // Kept for backwards compatibility (primary service)
   areaOfWork?: string;
@@ -430,7 +430,7 @@ const ProjectSchema = new Schema<IProject>(
       default: 70,
     },
     // Step 1: Basic Info
-    professionalId: { type: String, required: true },
+    professionalId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     category: { type: String, required: true },
     service: { type: String, required: true },
     areaOfWork: { type: String },

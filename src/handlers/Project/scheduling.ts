@@ -75,50 +75,80 @@ const dayOverlapsRange = (day: Date, start: Date, end: Date): boolean => {
   return start < dayEnd && end > dayStart;
 };
 
-const getEarliestBookableDate = (project: IProject): Date => {
+
+const getEarliestBookableDate = async (project: IProject): Promise<Date> => {
   const now = new Date();
-  if (!project.preparationDuration) {
+  if (!project.preparationDuration || project.preparationDuration.value === 0) {
     return now;
   }
-  return addDuration(now, project.preparationDuration.value, project.preparationDuration.unit);
-};
 
-/**
- * Determine which team members are considered "available" on a given day,
- * ignoring blocks shorter than or equal to 4 hours (conservative: any block
- * that overlaps the day is treated as > 4h and makes the day unavailable).
- */
-const getAvailableMembersForDay = (members: IUser[], day: Date): string[] => {
-  const dayKey = getWeekdayKey(day);
+  // If preparation is in hours, just add the hours (no working day logic for hourly)
+  if (project.preparationDuration.unit === 'hours') {
+    return addDuration(now, project.preparationDuration.value, 'hours');
+  }
 
-  return members
-    .filter((member) => {
-      // Use personal availability only for now.
+  // For days-based preparation, count only working days
+  const prepDays = project.preparationDuration.value;
+
+  // Get team members to determine working days
+  const resourceIds: string[] = Array.isArray(project.resources)
+    ? project.resources.map((r) => r.toString())
+    : [];
+
+  if (!resourceIds.length && project.professionalId) {
+    resourceIds.push(project.professionalId.toString());
+  }
+
+  if (!resourceIds.length) {
+    // No team members defined, fallback to simple addition
+    return addDuration(now, prepDays, 'days');
+  }
+
+  const teamMembers: IUser[] = await User.find({ _id: { $in: resourceIds } });
+
+  if (!teamMembers.length) {
+    // No team members found, fallback to simple addition
+    return addDuration(now, prepDays, 'days');
+  }
+
+  // Count working days for preparation
+  let workingDaysCount = 0;
+  let currentDate = startOfDay(now);
+  const maxIterations = prepDays * 3; // Safety limit (3x expected)
+  let iterations = 0;
+
+  while (workingDaysCount < prepDays && iterations < maxIterations) {
+    iterations++;
+    currentDate = addDuration(currentDate, 1, 'days');
+
+    // Check if at least one team member is available on this day
+    const availableMembers = teamMembers.filter((member) => {
+      const dayKey = getWeekdayKey(currentDate);
       const availability = member.availability || undefined;
       const dayAvailability = availability?.[dayKey];
 
+      // Not available on this weekday
       if (!dayAvailability || !dayAvailability.available) {
         return false;
       }
 
-      // If the professional or company has a blocked date on this day, treat as fully blocked.
+      // Check if blocked on this specific date
       const hasBlockedDate =
-        (member.blockedDates || []).some((b) => isSameDay(b.date, day)) ||
-        (member.companyBlockedDates || []).some((b) => isSameDay(b.date, day));
+        (member.blockedDates || []).some((b) => isSameDay(b.date, currentDate)) ||
+        (member.companyBlockedDates || []).some((b) => isSameDay(b.date, currentDate));
 
       if (hasBlockedDate) {
         return false;
       }
 
-      // If there is any blocked range overlapping this day, treat as fully blocked
-      // (conservative >= 4h block).
+      // Check if any blocked range overlaps this day
       const allRanges = [
         ...(member.blockedRanges || []),
         ...(member.companyBlockedRanges || []),
       ];
 
       const hasBlockedRange = allRanges.some((r) =>
-        dayOverlapsRange(day, r.startDate, r.endDate)
+        dayOverlapsRange(currentDate, r.startDate, r.endDate)
       );
 
       if (hasBlockedRange) {
@@ -126,8 +156,109 @@ const getAvailableMembersForDay = (members: IUser[], day: Date): string[] => {
       }
 
       return true;
+    });
+
+    // If at least one team member is available, count it as a working day
+    if (availableMembers.length > 0) {
+      workingDaysCount++;
+    }
+  }
+
+  return currentDate;
+};
+
+const calculateBlockedHoursForDay = (member: IUser, day: Date): number => {
+  const dayKey = getWeekdayKey(day);
+  const availability = member.availability || undefined;
+  const dayAvailability = availability?.[dayKey];
+
+  // If not available on this weekday, return 0 (we'll handle this separately)
+  if (!dayAvailability || !dayAvailability.available) {
+    return 0;
+  }
+
+  // Parse working hours for the day
+  const startTime = dayAvailability.startTime || "08:00";
+  const endTime = dayAvailability.endTime || "17:00";
+  const [startHour, startMin] = startTime.split(':').map(Number);
+  const [endHour, endMin] = endTime.split(':').map(Number);
+
+  const dayStart = new Date(day);
+  dayStart.setHours(startHour, startMin, 0, 0);
+
+  const dayEnd = new Date(day);
+  dayEnd.setHours(endHour, endMin, 0, 0);
+
+  const totalWorkingHours = (dayEnd.getTime() - dayStart.getTime()) / (1000 * 60 * 60);
+
+  // Check for full-day blocked dates
+  const hasBlockedDate =
+    (member.blockedDates || []).some((b) => isSameDay(b.date, day)) ||
+    (member.companyBlockedDates || []).some((b) => isSameDay(b.date, day));
+
+  if (hasBlockedDate) {
+    return totalWorkingHours; // Entire working day is blocked
+  }
+
+  // Calculate blocked hours from ranges
+  let blockedHours = 0;
+  const allRanges = [
+    ...(member.blockedRanges || []),
+    ...(member.companyBlockedRanges || []),
+  ];
+
+  for (const range of allRanges) {
+    if (!dayOverlapsRange(day, range.startDate, range.endDate)) {
+      continue;
+    }
+
+    // Calculate overlap between range and this day's working hours
+    const rangeStart = new Date(range.startDate);
+    const rangeEnd = new Date(range.endDate);
+
+    // Clamp range to this day's working hours
+    const overlapStart = new Date(Math.max(dayStart.getTime(), rangeStart.getTime()));
+    const overlapEnd = new Date(Math.min(dayEnd.getTime(), rangeEnd.getTime()));
+
+    if (overlapEnd > overlapStart) {
+      const hours = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+      blockedHours += hours;
+    }
+  }
+
+  return Math.min(blockedHours, totalWorkingHours);
+};
+
+/**
+ * Determine which team members are considered "available" on a given day.
+ * A day is considered unavailable if:
+ * - Member is not scheduled to work that weekday, OR
+ * - More than 4 hours are blocked on that day
+ */
+const getAvailableMembersForDay = (members: IUser[], day: Date): string[] => {
+  const dayKey = getWeekdayKey(day);
+
+  return members
+    .filter((member) => {
+      const availability = member.availability || undefined;
+      const dayAvailability = availability?.[dayKey];
+
+      // Not scheduled to work on this weekday at all
+      if (!dayAvailability || !dayAvailability.available) {
+        return false;
+      }
+
+      // Calculate blocked hours
+      const blockedHours = calculateBlockedHoursForDay(member, day);
+
+      // Apply 4-hour rule: if more than 4 hours blocked, day is unavailable
+      if (blockedHours > 4) {
+        return false;
+      }
+
+      return true;
     })
-    .map((m) => m._id.toString());
+    .map((m) => (m._id as any).toString());
 };
 
 export const getScheduleProposalsForProject = async (
@@ -139,7 +270,7 @@ export const getScheduleProposalsForProject = async (
   const mode: "hours" | "days" =
     project.timeMode || project.executionDuration?.unit || "days";
 
-  const earliestBookableDate = getEarliestBookableDate(project);
+  const earliestBookableDate = await getEarliestBookableDate(project);
 
   if (!project.executionDuration || !project.bufferDuration) {
     return {

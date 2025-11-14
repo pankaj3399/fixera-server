@@ -188,7 +188,7 @@ async function searchProjects(
       status: { $in: ["published", "pending"] },
     };
 
-    // Search query - search in title, description, category, and service
+    // Search query - search in title, description, category, service, and areaOfWork
     if (query && query.trim()) {
       const searchRegex = new RegExp(query.trim(), "i");
       filter.$or = [
@@ -196,6 +196,7 @@ async function searchProjects(
         { description: searchRegex },
         { category: searchRegex },
         { service: searchRegex },
+        { areaOfWork: searchRegex },
       ];
     }
 
@@ -358,19 +359,24 @@ export const autocomplete = async (req: Request, res: Response) => {
         suggestions: [...suggestions, ...categorysuggestions].slice(0, 10),
       });
     } else if (type === "projects") {
-      // Get project title and service suggestions
+      // Get project title, service, category, and areaOfWork suggestions
       const projects = await Project.find({
         status: "published",
-        $or: [{ title: searchRegex }, { service: searchRegex }, { category: searchRegex }],
+        $or: [
+          { title: searchRegex },
+          { service: searchRegex },
+          { category: searchRegex },
+          { areaOfWork: searchRegex },
+        ],
       })
-        .select("title service category")
+        .select("title service category areaOfWork")
         .limit(10)
         .lean();
 
       const suggestions = projects.map((p: any) => ({
         type: "project",
         value: p.title,
-        label: `${p.title} (${p.service || p.category})`,
+        label: `${p.title} (${p.service || p.category}${p.areaOfWork ? ` - ${p.areaOfWork}` : ''})`,
       }));
 
       return res.json({ suggestions });
