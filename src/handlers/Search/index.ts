@@ -361,7 +361,7 @@ export const autocomplete = async (req: Request, res: Response) => {
       // Get project title and service suggestions
       const projects = await Project.find({
         status: "published",
-        $or: [{ title: searchRegex }, { service: searchRegex }],
+        $or: [{ title: searchRegex }, { service: searchRegex }, { category: searchRegex }],
       })
         .select("title service category")
         .limit(10)

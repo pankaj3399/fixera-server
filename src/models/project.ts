@@ -142,6 +142,21 @@ export interface IServiceSelection {
 }
 
 export interface IProject extends Document {
+  // Time mode for scheduling
+  timeMode?: "hours" | "days";
+
+  // Project-level preparation, execution and buffer durations
+  preparationDuration?: {
+    value: number;
+    unit: "hours" | "days";
+  };
+  executionDuration?: IExecutionDuration;
+  bufferDuration?: IBuffer;
+
+  // Resource requirements for scheduling
+  minResources?: number;
+  minOverlapPercentage?: number;
+
   // Step 1: Basic Info
   professionalId: string;
   category: string; // Kept for backwards compatibility (primary category)
@@ -389,6 +404,31 @@ const ServiceSelectionSchema = new Schema<IServiceSelection>({
 // Main Project Schema
 const ProjectSchema = new Schema<IProject>(
   {
+    // Scheduling configuration
+    timeMode: {
+      type: String,
+      enum: ["hours", "days"],
+    },
+    preparationDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ["hours", "days"] },
+    },
+    executionDuration: {
+      type: ExecutionDurationSchema,
+    },
+    bufferDuration: {
+      type: BufferSchema,
+    },
+    minResources: {
+      type: Number,
+      min: 1,
+    },
+    minOverlapPercentage: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 70,
+    },
     // Step 1: Basic Info
     professionalId: { type: String, required: true },
     category: { type: String, required: true },

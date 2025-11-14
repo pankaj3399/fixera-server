@@ -46,6 +46,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       });
     }
 
+    // Normalize budget: frontend may send a single number instead of an object
+    const normalizedBudget =
+      rfqData && typeof rfqData.budget === "number"
+        ? {
+            min: rfqData.budget,
+            max: rfqData.budget,
+            currency: "EUR",
+          }
+        : rfqData?.budget;
+
     // Get customer details with location
     const customer = await User.findById(userId);
     if (!customer) {
@@ -86,22 +96,44 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           msg: "Professional is not approved to accept bookings"
         });
       }
-    } else {
-      const project = await Project.findById(projectId);
-      if (!project) {
-        return res.status(404).json({
-          success: false,
-          msg: "Project not found"
-        });
-      }
+      } else {
+        const project = await Project.findById(projectId);
+        if (!project) {
+          return res.status(404).json({
+            success: false,
+            msg: "Project not found"
+          });
+        }
 
-      if (project.status !== 'published') {
-        return res.status(400).json({
-          success: false,
-          msg: "Project is not available for booking"
-        });
+        if (project.status !== 'published') {
+          return res.status(400).json({
+            success: false,
+            msg: "Project is not available for booking"
+          });
+        }
+
+        // Enforce preparation time rule: client cannot book before preparation time has passed.
+        const preferredStart = preferredStartDate || rfqData?.preferredStartDate;
+        if (preferredStart && project.preparationDuration) {
+          const now = new Date();
+          const prepValue = project.preparationDuration.value || 0;
+          const prepUnit = project.preparationDuration.unit || "days";
+          const earliestBookable = new Date(now);
+          if (prepUnit === "hours") {
+            earliestBookable.setHours(earliestBookable.getHours() + prepValue);
+          } else {
+            earliestBookable.setDate(earliestBookable.getDate() + prepValue);
+          }
+
+          const preferred = new Date(preferredStart);
+          if (preferred < earliestBookable) {
+            return res.status(400).json({
+              success: false,
+              msg: "Selected start date is earlier than allowed by preparation time",
+            });
+          }
+        }
       }
-    }
 
     // Create booking
     const bookingData: any = {
@@ -122,7 +154,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         answers: rfqData.answers || [],
         preferredStartDate: preferredStartDate || rfqData.preferredStartDate,
         urgency: urgency || rfqData.urgency || 'medium',
-        budget: rfqData.budget,
+        budget: normalizedBudget,
         attachments: rfqData.attachments || []
       }
     };
@@ -446,7 +478,95 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
       });
     }
 
+    const previousStatus = booking.status;
     await (booking as any).updateStatus(status, userId, note);
+
+    // Ensure TypeScript treats the booking id as a string for later use
+    const bookingIdStr = (booking as any)._id?.toString();
+
+    // When a project booking is confirmed or started, compute schedule and block buffer time.
+    if (
+      booking.bookingType === 'project' &&
+      (status === 'booked' || status === 'in_progress') &&
+      booking.project
+    ) {
+      const project = await Project.findById(booking.project);
+      if (project && project.executionDuration && project.bufferDuration) {
+        const mode: 'hours' | 'days' =
+          project.timeMode || project.executionDuration.unit || 'days';
+
+        const executionValue = project.executionDuration.value || 0;
+        const executionUnit = project.executionDuration.unit || 'days';
+        const bufferValue = project.bufferDuration.value || 0;
+        const bufferUnit = project.bufferDuration.unit || 'days';
+
+        const start =
+          booking.scheduledStartDate ||
+          booking.rfqData?.preferredStartDate ||
+          new Date();
+
+        const scheduleStart = new Date(start);
+        let scheduleEnd = new Date(scheduleStart);
+
+        if (executionUnit === 'hours') {
+          scheduleEnd.setHours(scheduleEnd.getHours() + executionValue);
+        } else {
+          scheduleEnd.setDate(scheduleEnd.getDate() + executionValue);
+        }
+
+        // Compute end including buffer
+        let bufferEnd = new Date(scheduleEnd);
+        if (bufferUnit === 'hours') {
+          bufferEnd.setHours(bufferEnd.getHours() + bufferValue);
+        } else {
+          bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
+        }
+
+        booking.scheduledStartDate = scheduleStart;
+        booking.scheduledEndDate = scheduleEnd;
+        await booking.save();
+
+        // Block execution + buffer in team calendars via blockedRanges with a reason tag.
+        const projectDoc = project as any;
+        const resourceIds: string[] = Array.isArray(projectDoc.resources)
+          ? projectDoc.resources.map((r: any) => r.toString())
+          : [];
+        if (!resourceIds.length && projectDoc.professionalId) {
+          resourceIds.push(projectDoc.professionalId.toString());
+        }
+
+	        if (resourceIds.length && bookingIdStr) {
+	          const reason = `project-booking:${bookingIdStr}`;
+          await User.updateMany(
+            { _id: { $in: resourceIds } },
+            {
+              $push: {
+                blockedRanges: {
+                  startDate: scheduleStart,
+                  endDate: bufferEnd,
+                  reason,
+                  createdAt: new Date(),
+                },
+              },
+            }
+          );
+        }
+      }
+    }
+
+    // When a project booking is completed, release any buffer blocks created for it.
+	    if (
+	      booking.bookingType === 'project' &&
+	      status === 'completed' &&
+	      previousStatus !== 'completed' &&
+	      bookingIdStr
+	    ) {
+	      const reason = `project-booking:${bookingIdStr}`;
+      await User.updateMany(
+        { 'blockedRanges.reason': reason },
+        { $pull: { blockedRanges: { reason } } }
+      );
+    }
 
     await booking.populate([
       { path: 'customer', select: 'name email phone' },
