@@ -362,7 +362,7 @@ export const getScheduleProposalsForProject = async (
 
   const earliestBookableDate = await getEarliestBookableDate(project);
 
-  if (!project.executionDuration || !project.bufferDuration) {
+  if (!project.executionDuration) {
     return {
       mode,
       earliestBookableDate,
@@ -373,10 +373,12 @@ export const getScheduleProposalsForProject = async (
     project.executionDuration.value,
     project.executionDuration.unit
   );
-  const bufferHours = toHours(
-    project.bufferDuration.value,
-    project.bufferDuration.unit
-  );
+
+  // Buffer duration is optional, default to 0 if not set
+  const bufferHours = project.bufferDuration
+    ? toHours(project.bufferDuration.value, project.bufferDuration.unit)
+    : 0;
+
   const totalHours = executionHours + bufferHours;
 
   // Separate execution and buffer for formula calculations

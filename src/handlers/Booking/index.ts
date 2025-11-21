@@ -135,6 +135,41 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
       }
 
+    // For project bookings, check if date is available before creating booking
+    if (bookingType === 'project' && projectId && (preferredStartDate || rfqData.preferredStartDate)) {
+      const requestedDate = new Date(preferredStartDate || rfqData.preferredStartDate);
+      const project = await Project.findById(projectId);
+
+      if (project) {
+        // Get resources
+        const resourceIds: string[] = Array.isArray((project as any).resources)
+          ? (project as any).resources.map((r: any) => r.toString())
+          : [];
+        if (!resourceIds.length && (project as any).professionalId) {
+          resourceIds.push((project as any).professionalId.toString());
+        }
+
+        if (resourceIds.length > 0) {
+          // Check if any resource has the date blocked
+          const users = await User.find({ _id: { $in: resourceIds } });
+
+          for (const user of users) {
+            // Check blocked ranges
+            if (user.blockedRanges) {
+              for (const range of user.blockedRanges) {
+                if (requestedDate >= range.startDate && requestedDate <= range.endDate) {
+                  return res.status(400).json({
+                    success: false,
+                    msg: `The selected date is not available. This resource is blocked from ${range.startDate.toISOString()} to ${range.endDate.toISOString()}.`
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Create booking
     const bookingData: any = {
       customer: userId,
@@ -163,9 +198,77 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.professional = professionalId;
     } else {
       bookingData.project = projectId;
+      // For project bookings, set scheduledStartDate from preferred date
+      if (preferredStartDate || rfqData.preferredStartDate) {
+        bookingData.scheduledStartDate = new Date(preferredStartDate || rfqData.preferredStartDate);
+      }
     }
 
     const booking = await Booking.create(bookingData);
+
+    // For project bookings, block dates immediately when booking is created
+    // This prevents double-booking even in RFQ stage
+    if (bookingType === 'project' && projectId && bookingData.scheduledStartDate) {
+      console.log('🔒 Blocking dates immediately for new project booking (RFQ stage)');
+      const project = await Project.findById(projectId);
+
+      if (project && project.executionDuration) {
+        const executionValue = project.executionDuration.value || 0;
+        const executionUnit = project.executionDuration.unit || 'days';
+        const bufferValue = project.bufferDuration?.value || 0;
+        const bufferUnit = project.bufferDuration?.unit || executionUnit;
+
+        const scheduleStart = new Date(bookingData.scheduledStartDate);
+        let scheduleEnd = new Date(scheduleStart);
+
+        if (executionUnit === 'hours') {
+          scheduleEnd.setHours(scheduleEnd.getHours() + executionValue);
+        } else {
+          scheduleEnd.setDate(scheduleEnd.getDate() + executionValue);
+        }
+
+        let bufferEnd = new Date(scheduleEnd);
+        if (bufferUnit === 'hours') {
+          bufferEnd.setHours(bufferEnd.getHours() + bufferValue);
+        } else {
+          bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
+        }
+
+        // Update booking with calculated dates
+        booking.scheduledEndDate = scheduleEnd;
+        await booking.save();
+
+        // Block resources
+        const resourceIds: string[] = Array.isArray((project as any).resources)
+          ? (project as any).resources.map((r: any) => r.toString())
+          : [];
+        if (!resourceIds.length && (project as any).professionalId) {
+          resourceIds.push((project as any).professionalId.toString());
+        }
+
+        if (resourceIds.length) {
+          const reason = `project-booking:${booking._id.toString()}`;
+          console.log('🔒 Blocking resources:', resourceIds);
+          console.log('🔒 Blocking period:', scheduleStart, 'to', bufferEnd);
+
+          await User.updateMany(
+            { _id: { $in: resourceIds } },
+            {
+              $push: {
+                blockedRanges: {
+                  startDate: scheduleStart,
+                  endDate: bufferEnd,
+                  reason,
+                  createdAt: new Date(),
+                },
+              },
+            }
+          );
+
+          console.log('✅ Blocked dates immediately for new booking');
+        }
+      }
+    }
 
     // Populate references for response
     await booking.populate([
@@ -485,26 +588,40 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
     // Ensure TypeScript treats the booking id as a string for later use
     const bookingIdStr = (booking as any)._id?.toString();
 
-    // When a project booking is confirmed or started, compute schedule and block buffer time.
+    // When a project booking is confirmed or started, ensure dates are blocked
+    // This is redundant now (dates blocked at creation), but kept as safety net
     if (
       booking.bookingType === 'project' &&
       (status === 'booked' || status === 'in_progress') &&
+      previousStatus !== 'booked' &&
+      previousStatus !== 'in_progress' &&
       booking.project
     ) {
+      console.log('🔒 Verifying/ensuring dates are blocked for booking:', bookingIdStr);
       const project = await Project.findById(booking.project);
-      if (project && project.executionDuration && project.bufferDuration) {
+      if (project && project.executionDuration) {
         const mode: 'hours' | 'days' =
           project.timeMode || project.executionDuration.unit || 'days';
 
         const executionValue = project.executionDuration.value || 0;
         const executionUnit = project.executionDuration.unit || 'days';
-        const bufferValue = project.bufferDuration.value || 0;
-        const bufferUnit = project.bufferDuration.unit || 'days';
+
+        // Buffer duration is optional, default to 0 if not set
+        const bufferValue = project.bufferDuration?.value || 0;
+        const bufferUnit = project.bufferDuration?.unit || executionUnit;
 
         const start =
           booking.scheduledStartDate ||
           booking.rfqData?.preferredStartDate ||
           new Date();
+
+        console.log('📊 Project details:', {
+          timeMode: mode,
+          executionDuration: `${executionValue} ${executionUnit}`,
+          bufferDuration: `${bufferValue} ${bufferUnit}`,
+          minResources: project.minResources,
+          resourceCount: project.resources?.length || 0
+        });
 
         const scheduleStart = new Date(start);
         let scheduleEnd = new Date(scheduleStart);
@@ -523,6 +640,13 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
           bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
         }
 
+        console.log('📅 Calculated dates:', {
+          start: scheduleStart,
+          executionEnd: scheduleEnd,
+          bufferEnd: bufferEnd,
+          totalDuration: `${Math.round((bufferEnd.getTime() - scheduleStart.getTime()) / (1000 * 60 * 60))} hours`
+        });
+
         booking.scheduledStartDate = scheduleStart;
         booking.scheduledEndDate = scheduleEnd;
         await booking.save();
@@ -538,35 +662,54 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
 
 	        if (resourceIds.length && bookingIdStr) {
 	          const reason = `project-booking:${bookingIdStr}`;
-          await User.updateMany(
-            { _id: { $in: resourceIds } },
-            {
-              $push: {
-                blockedRanges: {
-                  startDate: scheduleStart,
-                  endDate: bufferEnd,
-                  reason,
-                  createdAt: new Date(),
+
+          // Check if already blocked to avoid duplicates
+          const alreadyBlocked = await User.findOne({
+            _id: { $in: resourceIds },
+            'blockedRanges.reason': reason
+          });
+
+          if (!alreadyBlocked) {
+            console.log('🔒 Blocking resources:', resourceIds);
+            console.log('🔒 Blocking period:', scheduleStart, 'to', bufferEnd);
+
+            await User.updateMany(
+              { _id: { $in: resourceIds } },
+              {
+                $push: {
+                  blockedRanges: {
+                    startDate: scheduleStart,
+                    endDate: bufferEnd,
+                    reason,
+                    createdAt: new Date(),
+                  },
                 },
-              },
-            }
-          );
+              }
+            );
+
+            console.log('✅ Successfully blocked dates for', resourceIds.length, 'resources');
+          } else {
+            console.log('ℹ️ Dates already blocked for this booking, skipping');
+          }
         }
       }
     }
 
-    // When a project booking is completed, release any buffer blocks created for it.
+    // When a project booking is completed, cancelled, or rejected, release blocked dates
 	    if (
 	      booking.bookingType === 'project' &&
-	      status === 'completed' &&
-	      previousStatus !== 'completed' &&
+	      (status === 'completed' || status === 'cancelled' || status === 'quote_rejected') &&
 	      bookingIdStr
 	    ) {
 	      const reason = `project-booking:${bookingIdStr}`;
-      await User.updateMany(
-        { 'blockedRanges.reason': reason },
-        { $pull: { blockedRanges: { reason } } }
-      );
+        console.log('🔓 Releasing blocked dates for booking:', bookingIdStr, '(Status:', status, ')');
+
+        const result = await User.updateMany(
+          { 'blockedRanges.reason': reason },
+          { $pull: { blockedRanges: { reason } } }
+        );
+
+        console.log('✅ Released blocked dates for', result.modifiedCount, 'resources');
     }
 
     await booking.populate([

@@ -91,17 +91,8 @@ async function searchProfessionals(
       ];
     }
 
-    // Location filter - exact match first, then broader match
-    if (location && location.trim()) {
-      const locationRegex = new RegExp(location.trim(), "i");
-      filter.$and = filter.$and || [];
-      filter.$and.push({
-        $or: [
-          { "businessInfo.city": locationRegex },
-          { "businessInfo.country": locationRegex },
-        ],
-      });
-    }
+    // Note: Location filter is applied as prioritization after query, not as database filter
+    // This ensures all professionals are shown regardless of location
 
     // Price range filter
     if (priceMin !== undefined || priceMax !== undefined) {
@@ -136,21 +127,33 @@ async function searchProfessionals(
     ]);
 
     console.log('✅ Found', total, 'professionals, returning', professionals.length);
+    if (professionals.length > 0) {
+      console.log('📋 Sample professional names:', professionals.slice(0, 3).map((p: any) => p.name || p.businessInfo?.companyName));
+    }
 
-    // If location filter is present, prioritize exact matches
+    // If location filter is present, prioritize by location but show all results
     let results = professionals;
     if (location && location.trim()) {
-      const exactMatches = results.filter(
-        (p: any) =>
-          p.businessInfo?.city?.toLowerCase() === location.toLowerCase() ||
-          p.businessInfo?.country?.toLowerCase() === location.toLowerCase()
-      );
-      const otherMatches = results.filter(
-        (p: any) =>
-          p.businessInfo?.city?.toLowerCase() !== location.toLowerCase() &&
-          p.businessInfo?.country?.toLowerCase() !== location.toLowerCase()
-      );
-      results = [...exactMatches, ...otherMatches];
+      const locationLower = location.toLowerCase();
+
+      // Prioritize professionals where location matches
+      const matchingLocation = professionals.filter((p: any) => {
+        if (!p.businessInfo) return false;
+        const city = p.businessInfo.city?.toLowerCase() || "";
+        const country = p.businessInfo.country?.toLowerCase() || "";
+        return city.includes(locationLower) || country.includes(locationLower);
+      });
+
+      const otherProfessionals = professionals.filter((p: any) => {
+        if (!p.businessInfo) return true; // Include if no location info
+        const city = p.businessInfo.city?.toLowerCase() || "";
+        const country = p.businessInfo.country?.toLowerCase() || "";
+        return !city.includes(locationLower) && !country.includes(locationLower);
+      });
+
+      // Show location matches first, then all others
+      results = [...matchingLocation, ...otherProfessionals];
+      console.log('📍 Location prioritization:', matchingLocation.length, 'matching location,', otherProfessionals.length, 'other locations');
     }
 
     res.json({
@@ -184,11 +187,11 @@ async function searchProjects(
   try {
     // Build the filter object
     const filter: any = {
-      // Include published and pending projects for now
-      status: { $in: ["published", "pending"] },
+      // Only show published projects to customers
+      status: "published",
     };
 
-    // Search query - search in title, description, category, service, and areaOfWork
+    // Search query - search in title, description, category, service, areaOfWork, and keywords
     if (query && query.trim()) {
       const searchRegex = new RegExp(query.trim(), "i");
       filter.$or = [
@@ -197,6 +200,7 @@ async function searchProjects(
         { category: searchRegex },
         { service: searchRegex },
         { areaOfWork: searchRegex },
+        { keywords: searchRegex },
       ];
     }
 
@@ -249,6 +253,8 @@ async function searchProjects(
 
     // Execute query with pagination and populate professional info
     console.log('🔍 Project search filter:', JSON.stringify(filter, null, 2));
+    console.log('🔍 Search query:', query);
+    console.log('🔍 Location:', location);
 
     const [projects, total] = await Promise.all([
       Project.find(filter)
@@ -260,13 +266,18 @@ async function searchProjects(
       Project.countDocuments(filter),
     ]);
 
-    console.log('✅ Found', total, 'projects, returning', projects.length);
+    console.log('✅ Found', total, 'projects before location filter, returning', projects.length);
+    if (projects.length > 0) {
+      console.log('📋 Sample project titles:', projects.slice(0, 3).map((p: any) => p.title));
+    }
 
-    // If location filter is present, filter by professional's location
+    // If location filter is present, prioritize by professional's location but show all results
     let results = projects;
     if (location && location.trim()) {
       const locationLower = location.toLowerCase();
-      results = projects.filter((p: any) => {
+
+      // Prioritize projects where professional's location matches
+      const matchingLocation = projects.filter((p: any) => {
         const prof = p.professionalId;
         if (!prof || !prof.businessInfo) return false;
         const city = prof.businessInfo.city?.toLowerCase() || "";
@@ -274,29 +285,26 @@ async function searchProjects(
         return city.includes(locationLower) || country.includes(locationLower);
       });
 
-      // Prioritize exact matches
-      const exactMatches = results.filter((p: any) => {
+      const otherProjects = projects.filter((p: any) => {
         const prof = p.professionalId;
-        const city = prof?.businessInfo?.city?.toLowerCase() || "";
-        const country = prof?.businessInfo?.country?.toLowerCase() || "";
-        return city === locationLower || country === locationLower;
+        if (!prof || !prof.businessInfo) return true; // Include if no location info
+        const city = prof.businessInfo.city?.toLowerCase() || "";
+        const country = prof.businessInfo.country?.toLowerCase() || "";
+        return !city.includes(locationLower) && !country.includes(locationLower);
       });
-      const otherMatches = results.filter((p: any) => {
-        const prof = p.professionalId;
-        const city = prof?.businessInfo?.city?.toLowerCase() || "";
-        const country = prof?.businessInfo?.country?.toLowerCase() || "";
-        return city !== locationLower && country !== locationLower;
-      });
-      results = [...exactMatches, ...otherMatches];
+
+      // Show location matches first, then all others
+      results = [...matchingLocation, ...otherProjects];
+      console.log('📍 Location prioritization:', matchingLocation.length, 'matching location,', otherProjects.length, 'other locations');
     }
 
     res.json({
       results,
       pagination: {
-        total: location ? results.length : total,
+        total: total,
         page: Math.ceil(skip / limit) + 1,
         limit,
-        totalPages: Math.ceil((location ? results.length : total) / limit),
+        totalPages: Math.ceil(total / limit),
       },
     });
   } catch (error) {
