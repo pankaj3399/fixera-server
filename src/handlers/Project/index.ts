@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import Project from "../../models/project";
 import ServiceCategory from "../../models/serviceCategory";
+import User from "../../models/user";
+import { getScheduleProposalsForProject } from "./scheduling";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 export const seedData = async (req: Request, res: Response) => {
@@ -200,6 +202,164 @@ export const getProject = async (req: Request, res: Response) => {
     res.json(project);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch project" });
+  }
+};
+
+// Public endpoint - Get published project by ID (for customers to view/book)
+export const getPublishedProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const project = await Project.findOne({
+      _id: id,
+      status: "published",
+    }).populate('professionalId', 'name businessInfo email phone');
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published"
+      });
+    }
+
+    res.json({
+      success: true,
+      project
+    });
+  } catch (error) {
+    console.error('Error fetching published project:', error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch project"
+    });
+  }
+};
+
+// Public endpoint - Get team availability (blocked dates) for a project
+export const getProjectTeamAvailability = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const project = await Project.findOne({
+      _id: id,
+      status: "published",
+    });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found"
+      });
+    }
+
+    // Get all team member IDs from resources
+    const teamMemberIds = project.resources || [];
+
+    if (teamMemberIds.length === 0) {
+      return res.json({
+        success: true,
+        blockedDates: [],
+        blockedRanges: []
+      });
+    }
+
+    // Fetch all team members
+    const teamMembers = await User.find({
+      _id: { $in: teamMemberIds }
+    }).select('blockedDates blockedRanges companyBlockedDates companyBlockedRanges');
+
+    // Collect all blocked dates (union of all team members)
+    const allBlockedDates = new Set<string>();
+    const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+
+    teamMembers.forEach(member => {
+      // Add individual blocked dates
+      if (member.blockedDates) {
+        member.blockedDates.forEach(blocked => {
+          allBlockedDates.add(blocked.date.toISOString());
+        });
+      }
+
+      // Add individual blocked ranges
+      if (member.blockedRanges) {
+        member.blockedRanges.forEach(range => {
+          allBlockedRanges.push({
+            startDate: range.startDate.toISOString(),
+            endDate: range.endDate.toISOString(),
+            reason: range.reason
+          });
+        });
+      }
+
+      // Add company blocked dates
+      if (member.companyBlockedDates) {
+        member.companyBlockedDates.forEach(blocked => {
+          allBlockedDates.add(blocked.date.toISOString());
+        });
+      }
+
+      // Add company blocked ranges
+      if (member.companyBlockedRanges) {
+        member.companyBlockedRanges.forEach(range => {
+          allBlockedRanges.push({
+            startDate: range.startDate.toISOString(),
+            endDate: range.endDate.toISOString(),
+            reason: range.reason
+          });
+        });
+      }
+    });
+
+    res.json({
+      success: true,
+      blockedDates: Array.from(allBlockedDates),
+      blockedRanges: allBlockedRanges
+    });
+  } catch (error) {
+    console.error('Error fetching team availability:', error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch team availability"
+    });
+  }
+};
+
+// Public endpoint - Get schedule proposals for a project (hours/days modes)
+export const getProjectScheduleProposals = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const project = await Project.findOne({
+      _id: id,
+      status: "published",
+    });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published",
+      });
+    }
+
+    const proposals = await getScheduleProposalsForProject(id);
+
+    if (!proposals) {
+      return res.status(404).json({
+        success: false,
+        error: "Unable to generate schedule proposals",
+      });
+    }
+
+    res.json({
+      success: true,
+      proposals,
+    });
+  } catch (error) {
+    console.error("Error fetching project schedule proposals:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch project schedule proposals",
+    });
   }
 };
 

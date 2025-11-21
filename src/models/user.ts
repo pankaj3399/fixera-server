@@ -1,6 +1,7 @@
 import { Schema, model, Document } from "mongoose";
 
 export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee";
+export type CustomerType = "individual" | "business";
 
 export interface IUser extends Document {
     name: string;
@@ -26,6 +27,16 @@ export interface IUser extends Document {
     approvedBy?: string; // Admin user ID who approved
     approvedAt?: Date;
     rejectionReason?: string;
+    // Customer-specific fields
+    customerType?: CustomerType;
+    location?: {
+        type: 'Point';
+        coordinates: [number, number]; // [longitude, latitude]
+        address?: string;
+        city?: string;
+        country?: string;
+        postalCode?: string;
+    };
     // Professional-specific fields
     businessInfo?: {
         companyName?: string;
@@ -370,6 +381,42 @@ const UserSchema = new Schema({
             }
         },
         managedByCompany: { type: Boolean, default: false }
+    },
+    // Customer-specific fields
+    customerType: {
+        type: String,
+        enum: ['individual', 'business'],
+        required: function(this: IUser) {
+            return this.role === 'customer';
+        },
+        default: function(this: IUser) {
+            return this.role === 'customer' ? 'individual' : undefined;
+        }
+    },
+    location: {
+        type: {
+            type: String,
+            enum: ['Point'],
+            default: 'Point'
+        },
+        coordinates: {
+            type: [Number], // [longitude, latitude]
+            required: false,
+            validate: {
+                validator: function(v: number[]) {
+                    if (!v || v.length === 0) return true; // Allow empty
+                    // Validate longitude and latitude ranges
+                    return v.length === 2 &&
+                           v[0] >= -180 && v[0] <= 180 && // longitude
+                           v[1] >= -90 && v[1] <= 90;     // latitude
+                },
+                message: 'Invalid coordinates format. Expected [longitude, latitude]'
+            }
+        },
+        address: { type: String, required: false },
+        city: { type: String, required: false },
+        country: { type: String, required: false },
+        postalCode: { type: String, required: false }
     }
 }, {
     timestamps: true
@@ -382,6 +429,15 @@ UserSchema.index({ role: 1, totalSpent: -1 });
 UserSchema.index({ 'employee.companyId': 1 });
 UserSchema.index({ email: 1 });
 UserSchema.index({ phone: 1 });
+// Text indexes for search functionality
+UserSchema.index({ name: 'text', 'businessInfo.companyName': 'text' });
+UserSchema.index({ serviceCategories: 1 });
+UserSchema.index({ 'businessInfo.city': 1, 'businessInfo.country': 1 });
+UserSchema.index({ hourlyRate: 1 });
+// Customer-specific indexes
+UserSchema.index({ customerType: 1 });
+UserSchema.index({ 'location.coordinates': '2dsphere' }); // Geospatial index for location-based queries
+UserSchema.index({ 'location.city': 1, 'location.country': 1 });
 
 const User = model<IUser>('User', UserSchema);
 

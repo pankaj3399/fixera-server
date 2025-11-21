@@ -22,7 +22,24 @@ const setTokenCookie = (res: Response, token: string) => {
 
 export const SignUp = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { name, password, email, phone, role } = req.body;
+    const {
+      name,
+      password,
+      email,
+      phone,
+      role,
+      // Customer-specific fields
+      customerType,
+      address,
+      city,
+      country,
+      postalCode,
+      latitude,
+      longitude,
+      companyName,
+      vatNumber,
+      isVatValidated
+    } = req.body;
 
     // Comprehensive validation
     if (!name || !password || !email || !phone) {
@@ -98,8 +115,8 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     const emailOtp = generateOTP();
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Create user with email verification fields initialized
-    const user = await User.create({
+    // Prepare user data
+    const userData: any = {
       name: name.trim(),
       password: hashedPassword,
       email: email.toLowerCase().trim(),
@@ -109,7 +126,49 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       isPhoneVerified: false,
       verificationCode: emailOtp,
       verificationCodeExpires: otpExpiry
-    });
+    };
+
+    // Add customer-specific fields if role is customer
+    if (role === 'customer') {
+      // Customer type
+      if (customerType) {
+        userData.customerType = customerType;
+      }
+
+      // Location data
+      if (address && city && country && postalCode) {
+        userData.location = {
+          address: address.trim(),
+          city: city.trim(),
+          country: country.trim(),
+          postalCode: postalCode.trim()
+        };
+
+        // Add coordinates if provided (from geocoding)
+        if (latitude !== undefined && longitude !== undefined) {
+          userData.location.type = 'Point';
+          userData.location.coordinates = [parseFloat(longitude), parseFloat(latitude)]; // [lng, lat]
+        }
+      }
+
+      // Business customer fields
+      if (customerType === 'business') {
+        if (companyName) {
+          // Store company name in businessInfo for consistency
+          userData.businessInfo = {
+            companyName: companyName.trim()
+          };
+        }
+
+        if (vatNumber) {
+          userData.vatNumber = vatNumber.trim().toUpperCase();
+          userData.isVatVerified = isVatValidated || false;
+        }
+      }
+    }
+
+    // Create user with all fields
+    const user = await User.create(userData);
 
     // Kick off OTP sends (email + SMS) and welcome email in parallel, but await to report status
     let emailOtpSent = false;
@@ -180,6 +239,9 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       blockedDates: user.blockedDates,
       blockedRanges: user.blockedRanges,
       profileCompletedAt: user.profileCompletedAt,
+      // Customer-specific fields
+      customerType: user.customerType,
+      location: user.location,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };
@@ -379,6 +441,9 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       companyBlockedDates: user.companyBlockedDates,
       companyBlockedRanges: user.companyBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
+      // Customer-specific fields
+      customerType: user.customerType,
+      location: user.location,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };

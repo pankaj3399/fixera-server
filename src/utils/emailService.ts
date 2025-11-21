@@ -908,3 +908,87 @@ export const sendProjectReactivatedEmail = async (
     return false;
   }
 };
+
+// Send booking request notification to professional
+export const sendBookingNotificationEmail = async (
+  professionalEmail: string,
+  professionalName: string,
+  customerName: string,
+  projectTitle: string,
+  preferredDate: string,
+  bookingId: string
+): Promise<boolean> => {
+  try {
+    console.log(`📧 Sending booking notification email to ${professionalEmail}`);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("New Booking Request! 🎉")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${professionalName}!</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            You've received a new booking request for your project "<strong>${projectTitle}</strong>"!
+          </p>
+
+          <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #2E7D32; margin: 0 0 15px 0; font-size: 18px;">📋 Booking Details</h3>
+            <ul style="color: #333; margin: 0; padding-left: 20px; line-height: 1.8;">
+              <li><strong>Customer:</strong> ${customerName}</li>
+              <li><strong>Project:</strong> ${projectTitle}</li>
+              <li><strong>Preferred Start Date:</strong> ${preferredDate}</li>
+              <li><strong>Status:</strong> Awaiting Your Quote</li>
+            </ul>
+          </div>
+
+          <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">⏰ What's Next?</h3>
+            <p style="color: #333; margin: 0; line-height: 1.6;">
+              Review the booking details and customer requirements, then provide your quote. We'll notify you when the customer responds and guide you through the payment process.
+            </p>
+          </div>
+
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
+               style="background: #667eea; color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 16px;">
+              View Booking Request
+            </a>
+          </div>
+
+          <div style="background: #e8f4fd; border: 2px solid #3b82f6; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #1565C0; margin: 0 0 15px 0; font-size: 18px;">💡 Tips for Success</h3>
+            <ul style="color: #333; margin: 0; padding-left: 20px; line-height: 1.8;">
+              <li>Respond within 24 hours for better conversion rates</li>
+              <li>Provide a detailed, professional quote</li>
+              <li>Include timeline and any relevant terms</li>
+              <li>Be transparent about pricing and expectations</li>
+            </ul>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            Good luck with your new booking! We're here to support you throughout the process.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email: professionalEmail }];
+    sendSmtpEmail.subject = "🎉 New Booking Request for Your Project!";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send booking notification email:', error);
+    return false;
+  }
+};

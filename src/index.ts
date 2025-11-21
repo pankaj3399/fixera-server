@@ -12,6 +12,8 @@ import publicRouter from './routes/Public';
 import meetingRouter from './routes/Meeting';
 import serviceCategoryRouter from './routes/ServiceCategory';
 import professionalRouter from './routes/Professional';
+import searchRouter from './routes/Search';
+import bookingRouter from './routes/Booking';
 
 dotenv.config();
 
@@ -50,6 +52,8 @@ app.use('/api/projects', projectRouter);
 app.use('/api/meetings', meetingRouter);
 app.use('/api/service-categories', serviceCategoryRouter);
 app.use('/api/professionals', professionalRouter);
+app.use('/api/search', searchRouter);
+app.use('/api/bookings', bookingRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);
