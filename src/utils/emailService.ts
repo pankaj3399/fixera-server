@@ -909,6 +909,79 @@ export const sendProjectReactivatedEmail = async (
   }
 };
 
+// Send password reset email
+export const sendPasswordResetEmail = async (
+  email: string,
+  userName: string,
+  resetToken: string
+): Promise<boolean> => {
+  try {
+    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}`;
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Reset Your Password")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${userName}!</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            We received a request to reset your Fixera account password. Click the button below to set a new password:
+          </p>
+
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetUrl}"
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 16px;">
+              Reset Password
+            </a>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
+            This link will expire in 1 hour for security reasons.
+          </p>
+
+          <div style="background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; margin: 25px 0;">
+            <p style="color: #666; margin: 0; font-size: 14px; line-height: 1.6;">
+              If the button doesn't work, copy and paste this link into your browser:
+            </p>
+            <p style="color: #667eea; margin: 10px 0 0 0; font-size: 14px; word-break: break-all;">
+              ${resetUrl}
+            </p>
+          </div>
+
+          <div style="background: #e8f4fd; border-left: 4px solid #667eea; padding: 15px; margin: 25px 0;">
+            <p style="color: #333; margin: 0; font-size: 14px;">
+              <strong>Security Tip:</strong> If you didn't request a password reset, please ignore this email. Your password will remain unchanged.
+            </p>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            If you continue to have issues accessing your account, please contact our support team.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Reset Your Fixera Password";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send password reset email:', error);
+    return false;
+  }
+};
+
 // Send booking request notification to professional
 export const sendBookingNotificationEmail = async (
   professionalEmail: string,
