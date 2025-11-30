@@ -247,7 +247,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
 
         if (resourceIds.length) {
-          const reason = `project-booking:${booking._id.toString()}`;
+          const reason = `project-booking:${(booking._id as mongoose.Types.ObjectId).toString()}`;
           console.log('🔒 Blocking resources:', resourceIds);
           console.log('🔒 Blocking period:', scheduleStart, 'to', bufferEnd);
 
