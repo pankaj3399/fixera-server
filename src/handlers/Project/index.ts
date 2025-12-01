@@ -1,9 +1,29 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import Project from "../../models/project";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
 import { getScheduleProposalsForProject } from "./scheduling";
 // import { seedServiceCategories } from '../../scripts/seedProject';
+
+const buildProfessionalOwnershipFilter = (professionalId: string) => {
+  const idStr = professionalId.toString();
+  const conditions: any[] = [
+    {
+      $expr: {
+        $eq: [{ $toString: "$professionalId" }, idStr],
+      },
+    },
+  ];
+
+  if (Types.ObjectId.isValid(idStr)) {
+    conditions.push({
+      professionalId: new Types.ObjectId(idStr),
+    });
+  }
+
+  return { $or: conditions };
+};
 
 export const seedData = async (req: Request, res: Response) => {
   try {
@@ -483,7 +503,16 @@ export const duplicateProject = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const original = await Project.findOne({ _id: id, professionalId });
+    const ownershipFilter = buildProfessionalOwnershipFilter(
+      professionalId.toString()
+    );
+    const projectId = Types.ObjectId.isValid(id)
+      ? new Types.ObjectId(id)
+      : id;
+    const original = await Project.findOne({
+      ...ownershipFilter,
+      _id: projectId,
+    });
     if (!original) {
       return res.status(404).json({ error: "Project not found" });
     }
@@ -505,9 +534,10 @@ export const duplicateProject = async (req: Request, res: Response) => {
       updatedAt: undefined,
     });
 
-    await duplicated.save();
+    await duplicated.save({ validateBeforeSave: false });
     res.json(duplicated);
   } catch (error) {
+    console.error("Duplicate project failed:", error);
     res.status(500).json({ error: "Failed to duplicate project" });
   }
 };
@@ -522,7 +552,16 @@ export const deleteProject = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const result = await Project.findOneAndDelete({ _id: id, professionalId });
+    const ownershipFilter = buildProfessionalOwnershipFilter(
+      professionalId.toString()
+    );
+    const projectId = Types.ObjectId.isValid(id)
+      ? new Types.ObjectId(id)
+      : id;
+    const result = await Project.findOneAndDelete({
+      ...ownershipFilter,
+      _id: projectId,
+    });
     if (!result) {
       return res.status(404).json({ error: "Project not found" });
     }
@@ -546,7 +585,16 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Invalid status" });
     }
 
-    const project = await Project.findOne({ _id: id, professionalId });
+    const ownershipFilter = buildProfessionalOwnershipFilter(
+      professionalId.toString()
+    );
+    const projectId = Types.ObjectId.isValid(id)
+      ? new Types.ObjectId(id)
+      : id;
+    const project = await Project.findOne({
+      ...ownershipFilter,
+      _id: projectId,
+    });
     if (!project) {
       return res.status(404).json({ error: "Project not found" });
     }
@@ -584,28 +632,38 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       100
     );
 
-    const filter: any = { professionalId };
+    const ownershipFilter = buildProfessionalOwnershipFilter(
+      professionalId.toString()
+    );
+    const filterConditions: any[] = [ownershipFilter];
+
     if (status && status !== "all") {
       if (status === "rejected") {
-        filter.status = "rejected";
+        filterConditions.push({ status: "rejected" });
       } else if (status === "cancelled") {
-        filter.status = "closed";
+        filterConditions.push({ status: "closed" });
       } else {
-        filter.status = status;
+        filterConditions.push({ status });
       }
     }
+
     if (category && category !== "all") {
-      // Match either the primary category field or within services[] selections
-      filter.$or = [{ category }, { "services.category": category }];
+      filterConditions.push({
+        $or: [{ category }, { "services.category": category }],
+      });
     }
+
     if (search) {
       const regex = new RegExp(search, "i");
-      filter.$and = (filter.$and || []).concat([
-        {
-          $or: [{ title: regex }, { description: regex }, { keywords: regex }],
-        },
-      ]);
+      filterConditions.push({
+        $or: [{ title: regex }, { description: regex }, { keywords: regex }],
+      });
     }
+
+    const filter =
+      filterConditions.length === 1
+        ? ownershipFilter
+        : { $and: filterConditions };
 
     const [items, total, counts] = await Promise.all([
       Project.find(filter)
@@ -615,8 +673,9 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       Project.countDocuments(filter),
       // Status counts for header cards
       (async () => {
+        const ownershipMatchStage = ownershipFilter;
         const pipeline = [
-          { $match: { professionalId } },
+          { $match: ownershipMatchStage },
           { $group: { _id: "$status", count: { $sum: 1 } } },
         ];
         const raw = await (Project as any).aggregate(pipeline);
@@ -629,14 +688,10 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         );
 
         // Derive rejected and cancelled for UI compatibility
-        const rejected = await Project.countDocuments({
-          professionalId,
-          status: "rejected",
-        });
-        const cancelled = await Project.countDocuments({
-          professionalId,
-          status: "closed",
-        });
+        const rejectionFilter = {
+          $and: [ownershipFilter, { status: "rejected" }],
+        };
+        const rejected = await Project.countDocuments(rejectionFilter);
 
         return {
           drafts: byStatus["draft"] || 0,
