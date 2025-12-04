@@ -383,6 +383,60 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
   }
 };
 
+// Public endpoint - Get professional working hours for a project
+export const getProjectProfessionalWorkingHours = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const project = await Project.findOne({
+      _id: id,
+      status: "published",
+    });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published",
+      });
+    }
+
+    // Get the professional or the first team member for working hours
+    let professionalId = project.professionalId;
+    if (project.resources && project.resources.length > 0) {
+      professionalId = project.resources[0] as any;
+    }
+
+    const professional = await User.findById(professionalId).select('availability');
+
+    if (!professional || !professional.availability) {
+      // Return default working hours if not set
+      return res.json({
+        success: true,
+        availability: {
+          monday: { available: true, startTime: "09:00", endTime: "17:00" },
+          tuesday: { available: true, startTime: "09:00", endTime: "17:00" },
+          wednesday: { available: true, startTime: "09:00", endTime: "17:00" },
+          thursday: { available: true, startTime: "09:00", endTime: "17:00" },
+          friday: { available: true, startTime: "09:00", endTime: "17:00" },
+          saturday: { available: false },
+          sunday: { available: false },
+        },
+      });
+    }
+
+    res.json({
+      success: true,
+      availability: professional.availability,
+    });
+  } catch (error) {
+    console.error("Error fetching professional working hours:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch professional working hours",
+    });
+  }
+};
+
 export const submitProject = async (req: Request, res: Response) => {
   try {
     console.log("🚀 SUBMIT PROJECT REQUEST RECEIVED");

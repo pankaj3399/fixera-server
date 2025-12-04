@@ -13,6 +13,7 @@ export interface IDistance {
   useCompanyAddress: boolean;
   maxKmRange: number;
   noBorders: boolean;
+  borderLevel?: 'none' | 'country' | 'province'; // Configurable border filtering level
 }
 
 export interface IIntakeMeeting {
@@ -237,6 +238,11 @@ const DistanceSchema = new Schema<IDistance>({
   useCompanyAddress: { type: Boolean, default: false },
   maxKmRange: { type: Number, required: true, min: 1, max: 200 },
   noBorders: { type: Boolean, default: false },
+  borderLevel: {
+    type: String,
+    enum: ['none', 'country', 'province'],
+    default: 'country' // Default to country-level for backward compatibility
+  },
 });
 
 // Intake Meeting Schema
