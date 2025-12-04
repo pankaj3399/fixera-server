@@ -70,6 +70,16 @@ export interface IBooking extends Document {
     attachments?: string[]; // S3 URLs for uploaded files
   };
 
+  // Project booking specific data
+  selectedSubprojectIndex?: number; // Index of selected subproject/package
+  estimatedUsage?: number; // For unit-based pricing
+  selectedExtraOptions?: {
+    index: number; // Index in project.extraOptions array
+    name: string;
+    description?: string;
+    price: number;
+  }[]; // Selected add-on options with their details
+
   // Quote from professional
   quote?: IQuote;
 
@@ -269,6 +279,37 @@ const BookingSchema = new Schema({
       type: String // S3 URLs
     }]
   },
+
+  // Project booking specific data
+  selectedSubprojectIndex: {
+    type: Number,
+    min: 0
+  },
+  estimatedUsage: {
+    type: Number,
+    min: 1
+  },
+  selectedExtraOptions: [{
+    index: {
+      type: Number,
+      required: true,
+      min: 0
+    },
+    name: {
+      type: String,
+      required: true,
+      maxlength: 100
+    },
+    description: {
+      type: String,
+      maxlength: 300
+    },
+    price: {
+      type: Number,
+      required: true,
+      min: 0
+    }
+  }],
 
   // Quote
   quote: {

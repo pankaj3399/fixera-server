@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getGoogleMapsConfig, validateAddress } from "../../handlers/User/googleMaps";
 import { validateVAT } from "../../handlers/User/validateVat";
-import { getPublishedProject, getProjectTeamAvailability, getProjectScheduleProposals } from "../../handlers/Project";
+import { getPublishedProject, getProjectTeamAvailability, getProjectScheduleProposals, getProjectProfessionalWorkingHours } from "../../handlers/Project";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -23,5 +23,8 @@ publicRouter.route("/projects/:id/availability").get(getProjectTeamAvailability)
 
 // Schedule proposals (public endpoint for suggested dates/times)
 publicRouter.route("/projects/:id/schedule-proposals").get(getProjectScheduleProposals);
+
+// Professional working hours (public endpoint for hours mode bookings)
+publicRouter.route("/projects/:id/working-hours").get(getProjectProfessionalWorkingHours);
 
 export default publicRouter;

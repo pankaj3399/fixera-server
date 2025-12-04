@@ -14,7 +14,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       projectId,
       rfqData, // Service type, description, answers, budget, etc.
       preferredStartDate,
-      urgency
+      urgency,
+      selectedExtraOptions,
+      selectedSubprojectIndex,
+      estimatedUsage
     } = req.body;
 
     // Validate required fields
@@ -46,9 +49,53 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    // Normalize budget: frontend may send a single number instead of an object
+    // Calculate total price including add-ons for project bookings
+    let calculatedTotal = 0;
+    let addOnsTotal = 0;
+
+    if (bookingType === 'project' && projectId) {
+      const project = await Project.findById(projectId);
+
+      if (project && typeof selectedSubprojectIndex === 'number') {
+        const subproject = project.subprojects[selectedSubprojectIndex];
+
+        if (subproject) {
+          // Calculate base price
+          if (subproject.pricing.type === 'fixed' && subproject.pricing.amount) {
+            calculatedTotal = subproject.pricing.amount;
+          } else if (subproject.pricing.type === 'unit' && subproject.pricing.amount && estimatedUsage) {
+            calculatedTotal = subproject.pricing.amount * estimatedUsage;
+          }
+
+          // Calculate add-ons total
+          if (selectedExtraOptions && Array.isArray(selectedExtraOptions) && selectedExtraOptions.length > 0) {
+            addOnsTotal = selectedExtraOptions.reduce((sum: number, idx: number) => {
+              const option = project.extraOptions?.[idx];
+              return sum + (option?.price || 0);
+            }, 0);
+
+            calculatedTotal += addOnsTotal;
+          }
+
+          console.log('[BOOKING] Price calculation:', {
+            basePrice: calculatedTotal - addOnsTotal,
+            addOnsTotal,
+            grandTotal: calculatedTotal,
+            selectedExtraOptions
+          });
+        }
+      }
+    }
+
+    // Normalize budget: use calculated total if available, otherwise use frontend-provided budget
     const normalizedBudget =
-      rfqData && typeof rfqData.budget === "number"
+      calculatedTotal > 0
+        ? {
+            min: calculatedTotal,
+            max: calculatedTotal,
+            currency: "EUR",
+          }
+        : rfqData && typeof rfqData.budget === "number"
         ? {
             min: rfqData.budget,
             max: rfqData.budget,
@@ -133,6 +180,24 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
             });
           }
         }
+
+        // Validate selected extra options if provided
+        if (selectedExtraOptions && Array.isArray(selectedExtraOptions)) {
+          if (selectedExtraOptions.length > 0) {
+            // Verify all selected option indices are valid
+            const maxIndex = project.extraOptions?.length || 0;
+            const invalidOptions = selectedExtraOptions.filter(
+              (idx: number) => typeof idx !== 'number' || idx < 0 || idx >= maxIndex
+            );
+
+            if (invalidOptions.length > 0) {
+              return res.status(400).json({
+                success: false,
+                msg: "Invalid extra option selection. Some selected options do not exist.",
+              });
+            }
+          }
+        }
       }
 
     // For project bookings, check if date is available before creating booking
@@ -170,6 +235,23 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     }
 
+    // Prepare selected extra options with full details for storage
+    let extraOptionsWithDetails: any[] = [];
+    if (bookingType === 'project' && selectedExtraOptions && Array.isArray(selectedExtraOptions) && selectedExtraOptions.length > 0) {
+      const project = await Project.findById(projectId);
+      if (project && project.extraOptions) {
+        extraOptionsWithDetails = selectedExtraOptions.map((idx: number) => {
+          const option = project.extraOptions[idx];
+          return {
+            index: idx,
+            name: option.name,
+            description: option.description,
+            price: option.price
+          };
+        });
+      }
+    }
+
     // Create booking
     const bookingData: any = {
       customer: userId,
@@ -201,6 +283,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       // For project bookings, set scheduledStartDate from preferred date
       if (preferredStartDate || rfqData.preferredStartDate) {
         bookingData.scheduledStartDate = new Date(preferredStartDate || rfqData.preferredStartDate);
+      }
+      // Store project booking specific data
+      if (typeof selectedSubprojectIndex === 'number') {
+        bookingData.selectedSubprojectIndex = selectedSubprojectIndex;
+      }
+      if (estimatedUsage) {
+        bookingData.estimatedUsage = estimatedUsage;
+      }
+      if (extraOptionsWithDetails.length > 0) {
+        bookingData.selectedExtraOptions = extraOptionsWithDetails;
       }
     }
 

@@ -351,6 +351,32 @@ const meetsOverlapRequirement = (
   return true;
 };
 
+/**
+ * Calculate the first available date for a project.
+ * This is a simplified calculation that returns the earliest date when work can start,
+ * considering preparation time and team member availability.
+ *
+ * @param project - The project to calculate availability for
+ * @returns The first available date as an ISO string, or null if cannot be determined
+ */
+export const calculateFirstAvailableDate = async (
+  project: IProject
+): Promise<string | null> => {
+  try {
+    const earliestBookableDate = await getEarliestBookableDate(project);
+
+    if (!earliestBookableDate) {
+      return null;
+    }
+
+    // Return the earliest bookable date as ISO string
+    return earliestBookableDate.toISOString();
+  } catch (error) {
+    console.error('Error calculating first available date for project:', error);
+    return null;
+  }
+};
+
 export const getScheduleProposalsForProject = async (
   projectId: string
 ): Promise<ScheduleProposals | null> => {
