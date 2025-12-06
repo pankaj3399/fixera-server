@@ -559,7 +559,7 @@ export const sendProjectApprovalEmail = async (
               Customers can now find and book your project. Start managing your bookings and connecting with clients.
             </p>
             <div style="text-align: center; margin-top: 20px;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professioanl/projects/${projectId}"
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${projectId}"
                   style="background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
                  View Project
                </a>
