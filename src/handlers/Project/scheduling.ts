@@ -252,18 +252,39 @@ const getExecutionContext = (project: IProject, options?: ScheduleOptions) => {
     reduceDurations(subprojects.map((sp) => sp.buffer));
 
   const resolvePreparation = () => {
-    if (subproject && typeof subproject.deliveryPreparation === 'number' && subproject.deliveryPreparation > 0) {
+    const getPreparationDuration = (candidate?: IProject['subprojects'][number]) => {
+      if (!candidate) {
+        return undefined;
+      }
+      if (typeof candidate.deliveryPreparation !== 'number' || candidate.deliveryPreparation <= 0) {
+        return undefined;
+      }
+      const unit = (candidate.deliveryPreparationUnit || 'days') as 'hours' | 'days';
+      return { value: candidate.deliveryPreparation, unit };
+    };
+
+    const directPreparation = getPreparationDuration(subproject);
+    if (directPreparation) {
       console.log(`[getExecutionContext] Using deliveryPreparation from subproject index ${options?.subprojectIndex}`);
-      return { value: subproject.deliveryPreparation, unit: 'days' as const };
+      return directPreparation;
     }
 
-    const maxSubprojectPrep = subprojects.reduce((max, current) => {
-      const prep = typeof current.deliveryPreparation === 'number' ? current.deliveryPreparation : 0;
-      return Math.max(max, prep);
-    }, 0);
+    const longestSubprojectPreparation = subprojects.reduce<
+      { value: number; unit: 'hours' | 'days'; hours: number } | undefined
+    >((longest, current) => {
+      const prep = getPreparationDuration(current);
+      if (!prep) {
+        return longest;
+      }
+      const prepHours = toHours(prep.value, prep.unit);
+      if (!longest || prepHours > longest.hours) {
+        return { value: prep.value, unit: prep.unit, hours: prepHours };
+      }
+      return longest;
+    }, undefined);
 
-    if (maxSubprojectPrep > 0) {
-      return { value: maxSubprojectPrep, unit: 'days' as const };
+    if (longestSubprojectPreparation) {
+      return { value: longestSubprojectPreparation.value, unit: longestSubprojectPreparation.unit };
     }
 
     if (project.preparationDuration && project.preparationDuration.value > 0) {

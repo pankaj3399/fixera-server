@@ -67,10 +67,23 @@ export async function getProjectServiceLocation(
   if (distance.address) {
     // Parse the address to extract components
     const parsed = parseAddressComponents(distance.address);
-    return {
+    const location: LocationInfo = {
       address: distance.address,
       ...parsed
     };
+
+    if (
+      distance.coordinates &&
+      typeof distance.coordinates.latitude === 'number' &&
+      typeof distance.coordinates.longitude === 'number'
+    ) {
+      location.coordinates = {
+        latitude: distance.coordinates.latitude,
+        longitude: distance.coordinates.longitude
+      };
+    }
+
+    return location;
   }
 
   // Fallback to professional's business info

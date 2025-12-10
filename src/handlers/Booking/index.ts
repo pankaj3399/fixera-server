@@ -4,6 +4,17 @@ import User, { IUser } from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
 import { addWorkingDays } from "../Project/scheduling";
+import {
+  getDistanceBetweenLocations,
+  checkBorderCrossing,
+  hasValidCoordinates
+} from "../../utils/geolocation";
+import {
+  extractLocationFromUserLocation,
+  getProjectServiceLocation,
+  enhanceLocationInfo,
+  resolveCoordinates
+} from "../../utils/geocoding";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -286,6 +297,84 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        // Validate distance: check if customer is within project's service range
+        if (project.distance && project.distance.maxKmRange) {
+          try {
+            // Get customer location
+            const customerLocation = extractLocationFromUserLocation(customer.location);
+            const enhancedCustomerLocation = enhanceLocationInfo(customerLocation);
+
+            // Get project service location
+            const professional = await User.findById(project.professionalId);
+            let projectLocation = await getProjectServiceLocation(project, professional);
+            let enhancedProjectLocation = enhanceLocationInfo(projectLocation);
+
+            // Try to resolve coordinates if not available
+            if (!hasValidCoordinates(enhancedProjectLocation)) {
+              const coords = await resolveCoordinates(enhancedProjectLocation);
+              if (coords) {
+                enhancedProjectLocation.coordinates = coords;
+              }
+            }
+
+            // Check if both locations have valid coordinates
+            if (hasValidCoordinates(enhancedProjectLocation) && hasValidCoordinates(enhancedCustomerLocation)) {
+              // Calculate distance
+              const distance = getDistanceBetweenLocations(
+                enhancedProjectLocation,
+                enhancedCustomerLocation
+              );
+
+              if (distance !== null) {
+                // Check distance against maximum range
+                if (distance > project.distance.maxKmRange) {
+                  return res.status(403).json({
+                    success: false,
+                    msg: `This service is only available within ${project.distance.maxKmRange}km. You are approximately ${Math.round(distance)}km away from the service area.`
+                  });
+                }
+
+                // Check border crossing restrictions
+                const borderOk = checkBorderCrossing(
+                  enhancedProjectLocation,
+                  enhancedCustomerLocation,
+                  project.distance.noBorders || false,
+                  project.distance.borderLevel || 'country'
+                );
+
+                if (!borderOk) {
+                  const borderLevel = project.distance.borderLevel || 'country';
+                  return res.status(403).json({
+                    success: false,
+                    msg: `This service does not operate across ${borderLevel} borders. Your location is outside the allowed service area.`
+                  });
+                }
+
+                console.log(`✅ Distance validation passed: ${Math.round(distance)}km (max: ${project.distance.maxKmRange}km)`);
+              } else {
+                console.warn('⚠️ Could not calculate distance between locations');
+              }
+            } else {
+              console.warn('⚠️ Missing coordinates for distance validation:', {
+                projectHasCoords: hasValidCoordinates(enhancedProjectLocation),
+                customerHasCoords: hasValidCoordinates(enhancedCustomerLocation)
+              });
+              // If project has distance restrictions but no coordinates, we should block the booking
+              // to prevent booking services that can't be delivered
+              if (project.distance.maxKmRange < 200) { // Only for local services
+                return res.status(400).json({
+                  success: false,
+                  msg: "Unable to verify service availability in your area. Please contact the professional directly."
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Error validating distance:', error);
+            // Continue with booking - don't block on validation errors for backward compatibility
+            // but log the error for investigation
+          }
+        }
+
         // Enforce preparation time rule: client cannot book before preparation time has passed.
         const preferredStart = resolvedPreferredStartDate;
         if (preferredStart) {
@@ -298,8 +387,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
             const subproject = project.subprojects[selectedSubprojectIndex];
             if (subproject.deliveryPreparation && subproject.deliveryPreparation > 0) {
               prepValue = subproject.deliveryPreparation;
-              prepUnit = 'days';
-              console.log(`[BOOKING VALIDATION] Using subproject deliveryPreparation: ${prepValue} days`);
+              prepUnit = (subproject.deliveryPreparationUnit || 'days') as 'hours' | 'days';
+              console.log(`[BOOKING VALIDATION] Using subproject deliveryPreparation: ${prepValue} ${prepUnit}`);
             }
           }
 
