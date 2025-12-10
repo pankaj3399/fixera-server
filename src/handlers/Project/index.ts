@@ -3,7 +3,8 @@ import { Types } from "mongoose";
 import Project from "../../models/project";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
-import { getScheduleProposalsForProject } from "./scheduling";
+import Booking from "../../models/booking";
+import { getScheduleProposalsForProject, calculateFirstAvailableDate } from "./scheduling";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 const buildProfessionalOwnershipFilter = (professionalId: string) => {
@@ -210,17 +211,48 @@ export const getProject = async (req: Request, res: Response) => {
     const { id } = req.params;
     const professionalId = req.user?.id;
 
-    const project = await Project.findOne({
-      _id: id,
-      professionalId,
+    console.log('🔍 getProject called:', {
+      projectId: id,
+      userId: professionalId,
+      userIdType: typeof professionalId
     });
 
+    if (!professionalId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const ownershipFilter = buildProfessionalOwnershipFilter(professionalId.toString());
+    console.log('🔐 Ownership filter:', JSON.stringify(ownershipFilter, null, 2));
+
+    const projectId = Types.ObjectId.isValid(id)
+      ? new Types.ObjectId(id)
+      : id;
+    const query = {
+      $and: [
+        { _id: projectId },
+        ownershipFilter
+      ]
+    };
+    console.log('🔎 Query:', JSON.stringify(query, null, 2));
+
+    const project = await Project.findOne(query);
+
+    console.log('📦 Project found:', !!project);
+
     if (!project) {
+      // Debug: Try to find the project without ownership check
+      const anyProject = await Project.findById(id);
+      console.log('🔍 Debug - Project exists:', !!anyProject);
+      if (anyProject) {
+        console.log('🔍 Debug - Project professionalId:', anyProject.professionalId);
+        console.log('🔍 Debug - User ID:', professionalId);
+      }
       return res.status(404).json({ error: "Project not found" });
     }
 
     res.json(project);
   } catch (error) {
+    console.error('❌ Error fetching project:', error);
     res.status(500).json({ error: "Failed to fetch project" });
   }
 };
@@ -242,9 +274,15 @@ export const getPublishedProject = async (req: Request, res: Response) => {
       });
     }
 
+    const projectData = project.toObject();
+    const firstAvailableDate = await calculateFirstAvailableDate(project);
+
     res.json({
       success: true,
-      project
+      project: {
+        ...projectData,
+        firstAvailableDate
+      }
     });
   } catch (error) {
     console.error('Error fetching published project:', error);
@@ -330,6 +368,78 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
     });
 
+    // Add existing bookings as blocked ranges (prevent double-booking)
+    const existingBookings = await Booking.find({
+      project: id,
+      status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] }
+    }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
+
+    console.log(`[AVAILABILITY] Found ${existingBookings.length} existing bookings for project ${id}`);
+
+    for (const booking of existingBookings) {
+      if (booking.scheduledStartDate && booking.scheduledEndDate) {
+        allBlockedRanges.push({
+          startDate: booking.scheduledStartDate.toISOString(),
+          endDate: booking.scheduledEndDate.toISOString(),
+          reason: 'Existing booking'
+        });
+        continue;
+      }
+
+      if (!booking.rfqData?.preferredStartDate) continue;
+
+      // Get execution duration from the selected subproject or project
+      let executionHours = 0;
+      if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
+        const subproject = project.subprojects[booking.selectedSubprojectIndex];
+        const execDuration = subproject.executionDuration;
+        if (execDuration) {
+          executionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
+        }
+      } else if (project.executionDuration) {
+        executionHours = project.executionDuration.unit === 'hours'
+          ? (project.executionDuration.value || 0)
+          : (project.executionDuration.value || 0) * 24;
+      }
+
+      if (executionHours <= 0) {
+        continue;
+      }
+
+      // For hours mode with specific start time
+      if (project.timeMode === 'hours' && booking.rfqData.preferredStartTime) {
+        const startDate = new Date(booking.rfqData.preferredStartDate);
+        const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+        startDate.setHours(hours, minutes, 0, 0);
+
+        const endDate = new Date(startDate);
+        endDate.setHours(endDate.getHours() + executionHours);
+
+        console.log(`[AVAILABILITY] Blocking time slot: ${startDate.toISOString()} to ${endDate.toISOString()} (${executionHours}h)`);
+
+        allBlockedRanges.push({
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          reason: 'Existing booking'
+        });
+      }
+      // For days mode, block the entire day(s)
+      else if (project.timeMode === 'days') {
+        const startDate = new Date(booking.rfqData.preferredStartDate);
+        startDate.setHours(0, 0, 0, 0);
+
+        const durationDays = Math.ceil(executionHours / 24);
+        const endDate = new Date(startDate);
+        endDate.setDate(endDate.getDate() + durationDays);
+
+        allBlockedRanges.push({
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          reason: 'Existing booking'
+        });
+      }
+    }
+
     res.json({
       success: true,
       blockedDates: Array.from(allBlockedDates),
@@ -348,6 +458,13 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 export const getProjectScheduleProposals = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const subprojectIndexParam = req.query.subprojectIndex as string | undefined;
+    const parsedSubprojectIndex =
+      typeof subprojectIndexParam === 'string' ? Number(subprojectIndexParam) : undefined;
+    const hasValidSubprojectIndex =
+      typeof parsedSubprojectIndex === 'number' &&
+      Number.isInteger(parsedSubprojectIndex) &&
+      parsedSubprojectIndex >= 0;
 
     const project = await Project.findOne({
       _id: id,
@@ -361,7 +478,10 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       });
     }
 
-    const proposals = await getScheduleProposalsForProject(id);
+    const proposals = await getScheduleProposalsForProject(
+      id,
+      hasValidSubprojectIndex ? { subprojectIndex: parsedSubprojectIndex } : undefined
+    );
 
     if (!proposals) {
       return res.status(404).json({

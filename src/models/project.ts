@@ -14,6 +14,10 @@ export interface IDistance {
   maxKmRange: number;
   noBorders: boolean;
   borderLevel?: 'none' | 'country' | 'province'; // Configurable border filtering level
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
 }
 
 export interface IIntakeMeeting {
@@ -84,6 +88,7 @@ export interface ISubproject {
   materialsIncluded: boolean;
   materials?: IMaterial[]; // List of materials if materialsIncluded is true
   deliveryPreparation: number;
+  deliveryPreparationUnit?: "hours" | "days";
   executionDuration: IExecutionDuration;
   buffer?: IBuffer;
   intakeDuration?: IIntakeDuration;
@@ -243,6 +248,18 @@ const DistanceSchema = new Schema<IDistance>({
     enum: ['none', 'country', 'province'],
     default: 'country' // Default to country-level for backward compatibility
   },
+  coordinates: {
+    latitude: {
+      type: Number,
+      min: -90,
+      max: 90
+    },
+    longitude: {
+      type: Number,
+      min: -180,
+      max: 180
+    }
+  },
 });
 
 // Intake Meeting Schema
@@ -330,6 +347,7 @@ const SubprojectSchema = new Schema<ISubproject>({
   materialsIncluded: { type: Boolean, default: false },
   materials: [MaterialSchema],
   deliveryPreparation: { type: Number, required: true, min: 0 },
+  deliveryPreparationUnit: { type: String, enum: ["hours", "days"], default: "days" },
   executionDuration: { type: ExecutionDurationSchema, required: true },
   buffer: BufferSchema,
   intakeDuration: IntakeDurationSchema,

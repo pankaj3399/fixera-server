@@ -61,6 +61,7 @@ export interface IBooking extends Document {
     description: string; // Detailed description of the work needed
     answers: IRFQAnswer[]; // Answers to project/professional-specific questions
     preferredStartDate?: Date;
+    preferredStartTime?: string; // Format: "HH:mm" (e.g., "14:30")
     urgency?: 'low' | 'medium' | 'high' | 'urgent';
     budget?: {
       min?: number;
@@ -260,6 +261,10 @@ const BookingSchema = new Schema({
     }],
     preferredStartDate: {
       type: Date
+    },
+    preferredStartTime: {
+      type: String,
+      match: /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/ // HH:mm format (e.g., "14:30")
     },
     urgency: {
       type: String,

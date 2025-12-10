@@ -1,8 +1,20 @@
 import { Request, Response, NextFunction } from "express";
 import Booking, { IBooking, BookingStatus } from "../../models/booking";
-import User from "../../models/user";
+import User, { IUser } from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
+import { addWorkingDays } from "../Project/scheduling";
+import {
+  getDistanceBetweenLocations,
+  checkBorderCrossing,
+  hasValidCoordinates
+} from "../../utils/geolocation";
+import {
+  extractLocationFromUserLocation,
+  getProjectServiceLocation,
+  enhanceLocationInfo,
+  resolveCoordinates
+} from "../../utils/geocoding";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -14,11 +26,137 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       projectId,
       rfqData, // Service type, description, answers, budget, etc.
       preferredStartDate,
+      preferredStartTime,
       urgency,
       selectedExtraOptions,
       selectedSubprojectIndex,
       estimatedUsage
     } = req.body;
+    const resolvedPreferredStartDate = preferredStartDate || rfqData?.preferredStartDate;
+    const resolvedPreferredStartTime = preferredStartTime || rfqData?.preferredStartTime;
+
+    const resolveDurationValue = (
+      source?: { value?: number; unit?: 'hours' | 'days' } | null
+    ): { value: number; unit: 'hours' | 'days' } => ({
+      value: source?.value || 0,
+      unit: (source?.unit || 'days') as 'hours' | 'days'
+    });
+
+    const computeSchedulePlan = async (
+      projectDoc: any,
+      subprojectIndex: number | null | undefined,
+      scheduledStart: Date,
+      teamMembers: IUser[]
+    ) => {
+      const subproject =
+        typeof subprojectIndex === 'number' && projectDoc.subprojects?.[subprojectIndex]
+          ? projectDoc.subprojects[subprojectIndex]
+          : null;
+
+      const execution = resolveDurationValue(subproject?.executionDuration || projectDoc.executionDuration);
+      if (execution.value <= 0) {
+        return null;
+      }
+
+      const bufferSource = subproject?.buffer || projectDoc.bufferDuration;
+      const buffer = bufferSource ? resolveDurationValue(bufferSource) : { value: 0, unit: execution.unit };
+
+      const scheduleStart = new Date(scheduledStart);
+      let scheduleEnd: Date;
+      if (execution.unit === 'hours') {
+        scheduleEnd = new Date(scheduleStart);
+        scheduleEnd.setHours(scheduleEnd.getHours() + execution.value);
+      } else {
+        if (teamMembers.length > 0) {
+          scheduleEnd = await addWorkingDays(scheduleStart, execution.value, teamMembers);
+        } else {
+          scheduleEnd = new Date(scheduleStart);
+          scheduleEnd.setDate(scheduleEnd.getDate() + execution.value);
+        }
+      }
+
+      let bufferEnd: Date;
+      if (buffer.unit === 'hours') {
+        bufferEnd = new Date(scheduleEnd);
+        bufferEnd.setHours(bufferEnd.getHours() + buffer.value);
+      } else if (buffer.value > 0) {
+        if (teamMembers.length > 0) {
+          bufferEnd = await addWorkingDays(scheduleEnd, buffer.value, teamMembers);
+        } else {
+          bufferEnd = new Date(scheduleEnd);
+          bufferEnd.setDate(bufferEnd.getDate() + buffer.value);
+        }
+      } else {
+        bufferEnd = new Date(scheduleEnd);
+      }
+
+      return {
+        scheduleStart,
+        scheduleEnd,
+        bufferEnd,
+        executionValue: execution.value,
+        executionUnit: execution.unit,
+        bufferValue: buffer.value,
+        bufferUnit: buffer.unit
+      };
+    };
+
+    const getBookingInterval = async (
+      bookingDoc: any,
+      projectDoc: any,
+      teamMembers: IUser[]
+    ): Promise<{ start: Date; end: Date } | null> => {
+      if (bookingDoc.scheduledStartDate && bookingDoc.scheduledEndDate) {
+        return {
+          start: new Date(bookingDoc.scheduledStartDate),
+          end: new Date(bookingDoc.scheduledEndDate)
+        };
+      }
+
+      if (!bookingDoc.rfqData?.preferredStartDate) {
+        return null;
+      }
+
+      const intervalStart = new Date(bookingDoc.rfqData.preferredStartDate);
+      if (bookingDoc.rfqData.preferredStartTime) {
+        const [hours, minutes] = bookingDoc.rfqData.preferredStartTime.split(':').map(Number);
+        if (!Number.isNaN(hours) && !Number.isNaN(minutes)) {
+          intervalStart.setHours(hours, minutes, 0, 0);
+        }
+      }
+
+      const subproject =
+        typeof bookingDoc.selectedSubprojectIndex === 'number' &&
+        projectDoc.subprojects?.[bookingDoc.selectedSubprojectIndex]
+          ? projectDoc.subprojects[bookingDoc.selectedSubprojectIndex]
+          : null;
+      const execution = resolveDurationValue(subproject?.executionDuration || projectDoc.executionDuration);
+      if (execution.value <= 0) {
+        return null;
+      }
+
+      let intervalEnd: Date;
+      if (execution.unit === 'hours') {
+        intervalEnd = new Date(intervalStart);
+        intervalEnd.setHours(intervalEnd.getHours() + execution.value);
+      } else {
+        if (teamMembers.length > 0) {
+          intervalEnd = await addWorkingDays(intervalStart, execution.value, teamMembers);
+        } else {
+          intervalEnd = new Date(intervalStart);
+          intervalEnd.setDate(intervalEnd.getDate() + execution.value);
+        }
+      }
+
+      return {
+        start: intervalStart,
+        end: intervalEnd
+      };
+    };
+
+    let projectDoc: any = null;
+    let projectResourceIds: string[] = [];
+    let projectTeamMembers: IUser[] = [];
 
     // Validate required fields
     if (!bookingType || (bookingType !== 'professional' && bookingType !== 'project')) {
@@ -159,25 +297,127 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        // Validate distance: check if customer is within project's service range
+        if (project.distance && project.distance.maxKmRange) {
+          try {
+            // Get customer location
+            const customerLocation = extractLocationFromUserLocation(customer.location);
+            const enhancedCustomerLocation = enhanceLocationInfo(customerLocation);
+
+            // Get project service location
+            const professional = await User.findById(project.professionalId);
+            let projectLocation = await getProjectServiceLocation(project, professional);
+            let enhancedProjectLocation = enhanceLocationInfo(projectLocation);
+
+            // Try to resolve coordinates if not available
+            if (!hasValidCoordinates(enhancedProjectLocation)) {
+              const coords = await resolveCoordinates(enhancedProjectLocation);
+              if (coords) {
+                enhancedProjectLocation.coordinates = coords;
+              }
+            }
+
+            // Check if both locations have valid coordinates
+            if (hasValidCoordinates(enhancedProjectLocation) && hasValidCoordinates(enhancedCustomerLocation)) {
+              // Calculate distance
+              const distance = getDistanceBetweenLocations(
+                enhancedProjectLocation,
+                enhancedCustomerLocation
+              );
+
+              if (distance !== null) {
+                // Check distance against maximum range
+                if (distance > project.distance.maxKmRange) {
+                  return res.status(403).json({
+                    success: false,
+                    msg: `This service is only available within ${project.distance.maxKmRange}km. You are approximately ${Math.round(distance)}km away from the service area.`
+                  });
+                }
+
+                // Check border crossing restrictions
+                const borderOk = checkBorderCrossing(
+                  enhancedProjectLocation,
+                  enhancedCustomerLocation,
+                  project.distance.noBorders || false,
+                  project.distance.borderLevel || 'country'
+                );
+
+                if (!borderOk) {
+                  const borderLevel = project.distance.borderLevel || 'country';
+                  return res.status(403).json({
+                    success: false,
+                    msg: `This service does not operate across ${borderLevel} borders. Your location is outside the allowed service area.`
+                  });
+                }
+
+                console.log(`✅ Distance validation passed: ${Math.round(distance)}km (max: ${project.distance.maxKmRange}km)`);
+              } else {
+                console.warn('⚠️ Could not calculate distance between locations');
+              }
+            } else {
+              console.warn('⚠️ Missing coordinates for distance validation:', {
+                projectHasCoords: hasValidCoordinates(enhancedProjectLocation),
+                customerHasCoords: hasValidCoordinates(enhancedCustomerLocation)
+              });
+              // If project has distance restrictions but no coordinates, we should block the booking
+              // to prevent booking services that can't be delivered
+              if (project.distance.maxKmRange < 200) { // Only for local services
+                return res.status(400).json({
+                  success: false,
+                  msg: "Unable to verify service availability in your area. Please contact the professional directly."
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Error validating distance:', error);
+            // Continue with booking - don't block on validation errors for backward compatibility
+            // but log the error for investigation
+          }
+        }
+
         // Enforce preparation time rule: client cannot book before preparation time has passed.
-        const preferredStart = preferredStartDate || rfqData?.preferredStartDate;
-        if (preferredStart && project.preparationDuration) {
+        const preferredStart = resolvedPreferredStartDate;
+        if (preferredStart) {
           const now = new Date();
-          const prepValue = project.preparationDuration.value || 0;
-          const prepUnit = project.preparationDuration.unit || "days";
-          const earliestBookable = new Date(now);
-          if (prepUnit === "hours") {
-            earliestBookable.setHours(earliestBookable.getHours() + prepValue);
-          } else {
-            earliestBookable.setDate(earliestBookable.getDate() + prepValue);
+          let prepValue = 0;
+          let prepUnit: 'hours' | 'days' = 'days';
+
+          // Check subproject deliveryPreparation first
+          if (typeof selectedSubprojectIndex === 'number' && project.subprojects?.[selectedSubprojectIndex]) {
+            const subproject = project.subprojects[selectedSubprojectIndex];
+            if (subproject.deliveryPreparation && subproject.deliveryPreparation > 0) {
+              prepValue = subproject.deliveryPreparation;
+              prepUnit = (subproject.deliveryPreparationUnit || 'days') as 'hours' | 'days';
+              console.log(`[BOOKING VALIDATION] Using subproject deliveryPreparation: ${prepValue} ${prepUnit}`);
+            }
           }
 
-          const preferred = new Date(preferredStart);
-          if (preferred < earliestBookable) {
-            return res.status(400).json({
-              success: false,
-              msg: "Selected start date is earlier than allowed by preparation time",
-            });
+          // Fall back to project-level preparationDuration
+          if (prepValue === 0 && project.preparationDuration && project.preparationDuration.value > 0) {
+            prepValue = project.preparationDuration.value;
+            prepUnit = project.preparationDuration.unit || 'days';
+            console.log(`[BOOKING VALIDATION] Using project preparationDuration: ${prepValue} ${prepUnit}`);
+          }
+
+          if (prepValue > 0) {
+            const earliestBookable = new Date(now);
+            if (prepUnit === "hours") {
+              earliestBookable.setHours(earliestBookable.getHours() + prepValue);
+            } else {
+              // Simple calendar days for validation (not working days)
+              earliestBookable.setDate(earliestBookable.getDate() + prepValue);
+            }
+
+            console.log(`[BOOKING VALIDATION] Earliest bookable date: ${earliestBookable.toISOString()}`);
+            console.log(`[BOOKING VALIDATION] User requested: ${preferredStart}`);
+
+            const preferred = new Date(preferredStart);
+            if (preferred < earliestBookable) {
+              return res.status(400).json({
+                success: false,
+                msg: `Selected start date is earlier than allowed. This project requires ${prepValue} ${prepUnit} of preparation time. Earliest available date is ${earliestBookable.toISOString().split('T')[0]}.`,
+              });
+            }
           }
         }
 
@@ -198,40 +438,136 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
             }
           }
         }
-      }
 
-    // For project bookings, check if date is available before creating booking
-    if (bookingType === 'project' && projectId && (preferredStartDate || rfqData.preferredStartDate)) {
-      const requestedDate = new Date(preferredStartDate || rfqData.preferredStartDate);
-      const project = await Project.findById(projectId);
-
-      if (project) {
-        // Get resources
-        const resourceIds: string[] = Array.isArray((project as any).resources)
+        projectDoc = project;
+        projectResourceIds = Array.isArray((project as any).resources)
           ? (project as any).resources.map((r: any) => r.toString())
           : [];
-        if (!resourceIds.length && (project as any).professionalId) {
-          resourceIds.push((project as any).professionalId.toString());
+        if (!projectResourceIds.length && (project as any).professionalId) {
+          projectResourceIds.push((project as any).professionalId.toString());
         }
+        if (projectResourceIds.length) {
+          projectTeamMembers = await User.find({ _id: { $in: projectResourceIds } });
+        }
+      }
 
-        if (resourceIds.length > 0) {
-          // Check if any resource has the date blocked
-          const users = await User.find({ _id: { $in: resourceIds } });
+    let scheduledStartDateTime: Date | null = null;
+    if (resolvedPreferredStartDate) {
+      scheduledStartDateTime = new Date(resolvedPreferredStartDate);
+      if (resolvedPreferredStartTime) {
+        const [hours, minutes] = resolvedPreferredStartTime.split(':').map(Number);
+        if (!Number.isNaN(hours) && !Number.isNaN(minutes)) {
+          scheduledStartDateTime.setHours(hours, minutes, 0, 0);
+        }
+      }
+    }
 
-          for (const user of users) {
-            // Check blocked ranges
-            if (user.blockedRanges) {
-              for (const range of user.blockedRanges) {
-                if (requestedDate >= range.startDate && requestedDate <= range.endDate) {
-                  return res.status(400).json({
-                    success: false,
-                    msg: `The selected date is not available. This resource is blocked from ${range.startDate.toISOString()} to ${range.endDate.toISOString()}.`
-                  });
-                }
-              }
-            }
+    let schedulePlan: Awaited<ReturnType<typeof computeSchedulePlan>> | null = null;
+    if (bookingType === 'project' && projectDoc && scheduledStartDateTime) {
+      schedulePlan = await computeSchedulePlan(
+        projectDoc,
+        typeof selectedSubprojectIndex === 'number' ? selectedSubprojectIndex : null,
+        new Date(scheduledStartDateTime),
+        projectTeamMembers
+      );
+    }
+
+    // For project bookings, check if date/time is available before creating booking
+    if (bookingType === 'project' && projectId && resolvedPreferredStartDate && projectDoc) {
+      let requestedInterval: { start: Date; end: Date } | null = null;
+
+      if (schedulePlan) {
+        requestedInterval = {
+          start: schedulePlan.scheduleStart,
+          end: schedulePlan.scheduleEnd
+        };
+      } else {
+        const fallbackStart = new Date(resolvedPreferredStartDate);
+        if (resolvedPreferredStartTime) {
+          const [hours, minutes] = resolvedPreferredStartTime.split(':').map(Number);
+          if (!Number.isNaN(hours) && !Number.isNaN(minutes)) {
+            fallbackStart.setHours(hours, minutes, 0, 0);
           }
         }
+
+        let executionHours = 0;
+        if (typeof selectedSubprojectIndex === 'number' && projectDoc.subprojects?.[selectedSubprojectIndex]) {
+          const subproject = projectDoc.subprojects[selectedSubprojectIndex];
+          executionHours =
+            subproject.executionDuration?.unit === 'hours'
+              ? subproject.executionDuration.value || 0
+              : (subproject.executionDuration?.value || 0) * 24;
+        } else if (projectDoc.executionDuration) {
+          executionHours =
+            projectDoc.executionDuration.unit === 'hours'
+              ? projectDoc.executionDuration.value || 0
+              : (projectDoc.executionDuration.value || 0) * 24;
+        }
+
+        if (projectDoc.timeMode === 'hours' && executionHours > 0) {
+          const fallbackEnd = new Date(fallbackStart);
+          fallbackEnd.setHours(fallbackEnd.getHours() + executionHours);
+          requestedInterval = { start: fallbackStart, end: fallbackEnd };
+        } else if (projectDoc.timeMode === 'days' && executionHours > 0) {
+          const executionDays = Math.ceil(executionHours / 24);
+          if (executionDays > 0) {
+            let fallbackEnd: Date;
+            if (projectTeamMembers.length > 0) {
+              fallbackEnd = await addWorkingDays(fallbackStart, executionDays, projectTeamMembers);
+            } else {
+              fallbackEnd = new Date(fallbackStart);
+              fallbackEnd.setDate(fallbackEnd.getDate() + executionDays);
+            }
+            requestedInterval = { start: fallbackStart, end: fallbackEnd };
+          }
+        }
+      }
+
+      if (requestedInterval) {
+        console.log('[BOOKING VALIDATION] Checking for conflicts:', {
+          requestedStart: requestedInterval.start.toISOString(),
+          requestedEnd: requestedInterval.end.toISOString()
+        });
+
+        const existingBookingsQuery: any = {
+          project: projectId,
+          status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] },
+          $or: []
+        };
+
+        const dayStart = new Date(requestedInterval.start);
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setDate(dayEnd.getDate() + 1);
+
+        existingBookingsQuery.$or.push({ scheduledStartDate: { $gte: dayStart, $lt: dayEnd } });
+        existingBookingsQuery.$or.push({ 'rfqData.preferredStartDate': { $gte: dayStart, $lt: dayEnd } });
+
+        const existingBookings = await Booking.find(existingBookingsQuery).select(
+          'rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate'
+        );
+
+        console.log(`[BOOKING VALIDATION] Found ${existingBookings.length} existing bookings on this date`);
+
+        for (const booking of existingBookings) {
+          const existingInterval = await getBookingInterval(booking, projectDoc, projectTeamMembers);
+          if (!existingInterval) continue;
+
+          console.log('[BOOKING VALIDATION] Checking overlap with existing booking:', {
+            existingStart: existingInterval.start.toISOString(),
+            existingEnd: existingInterval.end.toISOString()
+          });
+
+          if (requestedInterval.start < existingInterval.end && requestedInterval.end > existingInterval.start) {
+            console.log('[BOOKING VALIDATION] CONFLICT DETECTED! Time slot already booked');
+            return res.status(400).json({
+              success: false,
+              msg: 'This time slot is already booked. Please choose a different time or date.'
+            });
+          }
+        }
+
+        console.log('[BOOKING VALIDATION] No conflicts found, time slot is available');
       }
     }
 
@@ -269,7 +605,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         serviceType: rfqData.serviceType,
         description: rfqData.description,
         answers: rfqData.answers || [],
-        preferredStartDate: preferredStartDate || rfqData.preferredStartDate,
+        preferredStartDate: resolvedPreferredStartDate,
+        preferredStartTime: resolvedPreferredStartTime,
         urgency: urgency || rfqData.urgency || 'medium',
         budget: normalizedBudget,
         attachments: rfqData.attachments || []
@@ -280,11 +617,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.professional = professionalId;
     } else {
       bookingData.project = projectId;
-      // For project bookings, set scheduledStartDate from preferred date
-      if (preferredStartDate || rfqData.preferredStartDate) {
-        bookingData.scheduledStartDate = new Date(preferredStartDate || rfqData.preferredStartDate);
+      if (scheduledStartDateTime) {
+        bookingData.scheduledStartDate = new Date(scheduledStartDateTime);
       }
-      // Store project booking specific data
       if (typeof selectedSubprojectIndex === 'number') {
         bookingData.selectedSubprojectIndex = selectedSubprojectIndex;
       }
@@ -296,69 +631,39 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     }
 
+    if (schedulePlan && bookingType === 'project') {
+      bookingData.scheduledEndDate = schedulePlan.scheduleEnd;
+    }
+
     const booking = await Booking.create(bookingData);
 
     // For project bookings, block dates immediately when booking is created
     // This prevents double-booking even in RFQ stage
-    if (bookingType === 'project' && projectId && bookingData.scheduledStartDate) {
-      console.log('🔒 Blocking dates immediately for new project booking (RFQ stage)');
-      const project = await Project.findById(projectId);
+    if (bookingType === 'project' && projectId && schedulePlan) {
+      console.log('[BOOKING] Blocking dates immediately for new project booking (RFQ stage)');
 
-      if (project && project.executionDuration) {
-        const executionValue = project.executionDuration.value || 0;
-        const executionUnit = project.executionDuration.unit || 'days';
-        const bufferValue = project.bufferDuration?.value || 0;
-        const bufferUnit = project.bufferDuration?.unit || executionUnit;
+      if (projectResourceIds.length) {
+        const reason = `project-booking:${(booking._id as mongoose.Types.ObjectId).toString()}`;
+        console.log('[BOOKING] Blocking resources:', projectResourceIds);
+        console.log('[BOOKING] Blocking period:', schedulePlan.scheduleStart, 'to', schedulePlan.bufferEnd);
 
-        const scheduleStart = new Date(bookingData.scheduledStartDate);
-        let scheduleEnd = new Date(scheduleStart);
-
-        if (executionUnit === 'hours') {
-          scheduleEnd.setHours(scheduleEnd.getHours() + executionValue);
-        } else {
-          scheduleEnd.setDate(scheduleEnd.getDate() + executionValue);
-        }
-
-        let bufferEnd = new Date(scheduleEnd);
-        if (bufferUnit === 'hours') {
-          bufferEnd.setHours(bufferEnd.getHours() + bufferValue);
-        } else {
-          bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
-        }
-
-        // Update booking with calculated dates
-        booking.scheduledEndDate = scheduleEnd;
-        await booking.save();
-
-        // Block resources
-        const resourceIds: string[] = Array.isArray((project as any).resources)
-          ? (project as any).resources.map((r: any) => r.toString())
-          : [];
-        if (!resourceIds.length && (project as any).professionalId) {
-          resourceIds.push((project as any).professionalId.toString());
-        }
-
-        if (resourceIds.length) {
-          const reason = `project-booking:${(booking._id as mongoose.Types.ObjectId).toString()}`;
-          console.log('🔒 Blocking resources:', resourceIds);
-          console.log('🔒 Blocking period:', scheduleStart, 'to', bufferEnd);
-
-          await User.updateMany(
-            { _id: { $in: resourceIds } },
-            {
-              $push: {
-                blockedRanges: {
-                  startDate: scheduleStart,
-                  endDate: bufferEnd,
-                  reason,
-                  createdAt: new Date(),
-                },
+        await User.updateMany(
+          { _id: { $in: projectResourceIds } },
+          {
+            $push: {
+              blockedRanges: {
+                startDate: schedulePlan.scheduleStart,
+                endDate: schedulePlan.bufferEnd,
+                reason,
+                createdAt: new Date(),
               },
-            }
-          );
+            },
+          }
+        );
 
-          console.log('✅ Blocked dates immediately for new booking');
-        }
+        console.log('? Blocked dates immediately for new booking');
+      } else {
+        console.warn('[BOOKING] No resources available to block for this project.');
       }
     }
 
@@ -716,20 +1021,46 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
         });
 
         const scheduleStart = new Date(start);
-        let scheduleEnd = new Date(scheduleStart);
+        let scheduleEnd: Date;
+        let bufferEnd: Date;
+
+        // Get team members for working days calculation
+        const projectData = project as any;
+        const teamResourceIds: string[] = Array.isArray(projectData.resources)
+          ? projectData.resources.map((r: any) => r.toString())
+          : [];
+        if (!teamResourceIds.length && projectData.professionalId) {
+          teamResourceIds.push(projectData.professionalId.toString());
+        }
+        const teamMembers: IUser[] = teamResourceIds.length
+          ? await User.find({ _id: { $in: teamResourceIds } })
+          : [];
 
         if (executionUnit === 'hours') {
+          // Hours mode: just add hours
+          scheduleEnd = new Date(scheduleStart);
           scheduleEnd.setHours(scheduleEnd.getHours() + executionValue);
         } else {
-          scheduleEnd.setDate(scheduleEnd.getDate() + executionValue);
+          // Days mode: use working days calculation
+          if (teamMembers.length > 0) {
+            scheduleEnd = await addWorkingDays(scheduleStart, executionValue, teamMembers);
+          } else {
+            scheduleEnd = new Date(scheduleStart);
+            scheduleEnd.setDate(scheduleEnd.getDate() + executionValue);
+          }
         }
 
-        // Compute end including buffer
-        let bufferEnd = new Date(scheduleEnd);
+        // Compute buffer end
         if (bufferUnit === 'hours') {
+          bufferEnd = new Date(scheduleEnd);
           bufferEnd.setHours(bufferEnd.getHours() + bufferValue);
         } else {
-          bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
+          if (teamMembers.length > 0) {
+            bufferEnd = await addWorkingDays(scheduleEnd, bufferValue, teamMembers);
+          } else {
+            bufferEnd = new Date(scheduleEnd);
+            bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
+          }
         }
 
         console.log('📅 Calculated dates:', {
