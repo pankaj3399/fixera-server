@@ -6,7 +6,11 @@ import {
   LocationInfo,
   getDistanceBetweenLocations,
   checkBorderCrossing,
-  hasValidCoordinates
+  hasValidCoordinates,
+  validateLocationByTextData,
+  isSameCountry,
+  isSameProvince,
+  isSameCity
 } from "../../utils/geolocation";
 import {
   extractLocationFromUserLocation,
@@ -51,6 +55,7 @@ const buildProjectFacets = (projects: any[]): ProjectFacetCounts => {
       incrementFacetCount(facets.categories, project.category);
       incrementFacetCount(facets.services, project.service);
       incrementFacetCount(facets.areasOfWork, project.areaOfWork);
+      incrementFacetCount(facets.priceModels, project.priceModel);
       return;
     }
 
@@ -103,6 +108,11 @@ const buildProjectFacets = (projects: any[]): ProjectFacetCounts => {
       });
     });
 
+    const projectLevelPriceModel = normalizeFacetValue(project.priceModel);
+    if (projectLevelPriceModel) {
+      projectPriceModels.add(projectLevelPriceModel);
+    }
+
     // Now increment facet counts once per unique value per project
     projectCategories.forEach((value) => incrementFacetCount(facets.categories, value));
     projectServices.forEach((value) => incrementFacetCount(facets.services, value));
@@ -144,13 +154,14 @@ export const search = async (req: Request, res: Response) => {
       customerLat,
       customerLon,
       customerCity,
+      customerState,
       customerCountry,
       customerAddress,
     } = req.query;
     console.log('🔍 Search request:', {
       q, loc, type, priceMin, priceMax, category, availability, sortBy, page, limit,
       services, geographicArea, priceModel, projectTypes, includedItems, startDateFrom, startDateTo,
-      customerLat, customerLon, customerCity, customerCountry, customerAddress
+      customerLat, customerLon, customerCity, customerState, customerCountry, customerAddress
     });
     const pageNum = parseInt(page as string, 10);
     const limitNum = parseInt(limit as string, 10);
@@ -164,6 +175,7 @@ export const search = async (req: Request, res: Response) => {
           longitude: parseFloat(customerLon as string)
         },
         city: customerCity as string,
+        state: customerState as string | undefined,
         country: customerCountry as string,
         address: customerAddress as string
       };
@@ -172,11 +184,13 @@ export const search = async (req: Request, res: Response) => {
       // Try to get approximate coordinates
       const approxCoords = getApproximateCoordinates(
         customerCity as string,
-        customerCountry as string
+        customerCountry as string,
+        customerState as string | undefined
       );
       customerLocation = {
         coordinates: approxCoords || undefined,
         city: customerCity as string,
+        state: customerState as string | undefined,
         country: customerCountry as string,
         countryCode: getCountryCode(customerCountry as string),
         address: customerAddress as string
@@ -577,15 +591,36 @@ async function searchProjects(
             // Check distance filtering (only if both have coordinates)
             let distanceOk = true;
             let calculatedDistance: number | null = null;
+            const maxKmRange = project.distance?.maxKmRange || 50;
+
             if (hasValidCoordinates(enhancedProfLocation) && hasValidCoordinates(enhancedCustomerLocation)) {
               calculatedDistance = getDistanceBetweenLocations(
                 enhancedProfLocation,
                 enhancedCustomerLocation
               );
+
               if (calculatedDistance !== null && project.distance?.maxKmRange) {
-                distanceOk = calculatedDistance <= project.distance.maxKmRange;
-                console.log(`📏 Project ${project.title}: ${calculatedDistance}km (max: ${project.distance.maxKmRange}km) - ${distanceOk ? 'OK' : 'FILTERED'}`);
+                // If distance is WAY too large (> 500km when max is < 100km), it suggests bad coordinates
+                // In this case, fall back to text-based location matching
+                const likelyBadCoordinates = calculatedDistance > 500 && maxKmRange < 100;
+
+                if (likelyBadCoordinates) {
+                  console.log(`⚠️ Project ${project.title}: Distance ${calculatedDistance}km seems unreasonable for max ${maxKmRange}km - using text fallback`);
+                  // Fall back to text-based validation (city/state/country matching)
+                  const textValidation = validateLocationByTextData(enhancedProfLocation, enhancedCustomerLocation, maxKmRange);
+                  distanceOk = textValidation.isValid;
+                  console.log(`📍 Text-based validation: ${distanceOk ? 'OK' : 'FILTERED'} - ${textValidation.reason || 'matched by location text'}`);
+                } else {
+                  distanceOk = calculatedDistance <= project.distance.maxKmRange;
+                  console.log(`📏 Project ${project.title}: ${calculatedDistance}km (max: ${project.distance.maxKmRange}km) - ${distanceOk ? 'OK' : 'FILTERED'}`);
+                }
               }
+            } else {
+              // No valid coordinates - use text-based location matching as fallback
+              console.log(`⚠️ Project ${project.title}: Missing coordinates - using text-based fallback`);
+              const textValidation = validateLocationByTextData(enhancedProfLocation, enhancedCustomerLocation, maxKmRange);
+              distanceOk = textValidation.isValid;
+              console.log(`📍 Text-based validation: ${distanceOk ? 'OK' : 'FILTERED'} - ${textValidation.reason || 'matched by location text'}`);
             }
             // Check border filtering
             let borderOk = true;

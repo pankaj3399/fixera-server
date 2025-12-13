@@ -6,7 +6,8 @@ import {
   submitQuote,
   respondToQuote,
   updateBookingStatus,
-  cancelBooking
+  cancelBooking,
+  submitPostBookingAnswers
 } from '../../handlers/Booking';
 import { protect } from '../../middlewares/auth';
 
@@ -35,5 +36,8 @@ router.put('/:bookingId/status', updateBookingStatus);
 
 // Cancel booking
 router.post('/:bookingId/cancel', cancelBooking);
+
+// Submit post-booking answers - Customer only
+router.post('/:bookingId/post-booking-answers', submitPostBookingAnswers);
 
 export default router;

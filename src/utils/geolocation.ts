@@ -249,6 +249,115 @@ export function checkBorderCrossing(
 }
 
 /**
+ * Check if two locations are in the same city
+ * @param location1 - First location info
+ * @param location2 - Second location info
+ * @returns true if both locations are in the same city
+ */
+export function isSameCity(
+  location1: LocationInfo,
+  location2: LocationInfo
+): boolean {
+  // First check if they're in the same country
+  if (!isSameCountry(location1, location2)) {
+    return false;
+  }
+
+  // Compare cities
+  if (location1.city && location2.city) {
+    return normalizeCityName(location1.city) === normalizeCityName(location2.city);
+  }
+
+  // If we don't have city info, assume different cities (safer)
+  return false;
+}
+
+/**
+ * Normalize city name for comparison
+ */
+function normalizeCityName(name: string): string {
+  return name.trim().toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w\s]/g, ''); // Remove special characters
+}
+
+/**
+ * Check if location has sufficient text-based location data (city, state, country)
+ */
+export function hasLocationTextData(location: LocationInfo): boolean {
+  return !!(location.city || location.state || location.province || location.country);
+}
+
+/**
+ * Validate location match based on text data (city/state/country) when coordinates unavailable
+ * This is a fallback validation when coordinates cannot be determined
+ * @param projectLocation - Project/service provider location
+ * @param customerLocation - Customer's location
+ * @param maxKmRange - The max range setting (used to determine strictness)
+ * @returns Object with isValid flag and reason
+ */
+export function validateLocationByTextData(
+  projectLocation: LocationInfo,
+  customerLocation: LocationInfo,
+  maxKmRange: number
+): { isValid: boolean; reason?: string } {
+  // If neither has text data, we can't validate - allow booking
+  if (!hasLocationTextData(projectLocation) && !hasLocationTextData(customerLocation)) {
+    return { isValid: true, reason: 'No location data available for validation' };
+  }
+
+  // For very local services (< 50km range), require same city or nearby
+  if (maxKmRange < 50) {
+    // Must be same city for very local services
+    if (isSameCity(projectLocation, customerLocation)) {
+      return { isValid: true };
+    }
+    // If same province/state, might still be okay for services up to 50km
+    if (isSameProvince(projectLocation, customerLocation)) {
+      return { isValid: true };
+    }
+    // Different city/province - likely outside range
+    if (projectLocation.city && customerLocation.city) {
+      return {
+        isValid: false,
+        reason: `This service is only available locally. Your location (${customerLocation.city}) appears to be outside the service area (${projectLocation.city}).`
+      };
+    }
+  }
+
+  // For regional services (50-200km range), require same province/state
+  if (maxKmRange < 200) {
+    if (isSameProvince(projectLocation, customerLocation)) {
+      return { isValid: true };
+    }
+    // Same country but different province might be okay for larger ranges
+    if (isSameCountry(projectLocation, customerLocation)) {
+      return { isValid: true };
+    }
+    // Different country
+    if (projectLocation.country && customerLocation.country) {
+      return {
+        isValid: false,
+        reason: `This service is only available regionally. Your location appears to be outside the service area.`
+      };
+    }
+  }
+
+  // For national/international services (>= 200km), just check country
+  if (!isSameCountry(projectLocation, customerLocation)) {
+    if (projectLocation.country && customerLocation.country) {
+      return {
+        isValid: false,
+        reason: `This service is not available in your country (${customerLocation.country}).`
+      };
+    }
+  }
+
+  // Default: allow if we can't determine
+  return { isValid: true };
+}
+
+/**
  * Parse address string to extract location components
  * This is a basic parser - a geocoding service would be more accurate
  */
@@ -257,7 +366,7 @@ export function parseAddressComponents(address: string): Partial<LocationInfo> {
     return {};
   }
 
-  const parts = address.split(',').map(p => p.trim());
+  const parts = address.split(',').map(p => p.trim()).filter(Boolean);
   const result: Partial<LocationInfo> = {
     address: address.trim()
   };
@@ -269,14 +378,37 @@ export function parseAddressComponents(address: string): Partial<LocationInfo> {
     result.postalCode = postalMatch[0];
   }
 
-  // Last part is often country
-  if (parts.length > 1) {
-    result.country = parts[parts.length - 1];
+  const partCount = parts.length;
+  if (partCount === 0) {
+    return result;
   }
 
-  // Second to last might be city or state
-  if (parts.length > 2) {
-    result.city = parts[parts.length - 2];
+  const countryPart = partCount > 0 ? parts[partCount - 1] : undefined;
+  let statePart: string | undefined;
+  let cityPart: string | undefined;
+
+  if (partCount >= 3) {
+    statePart = parts[partCount - 2];
+    cityPart = parts[partCount - 3];
+  } else if (partCount === 2) {
+    cityPart = parts[0];
+    statePart = parts[1];
+  } else if (partCount === 1) {
+    cityPart = parts[0];
+  }
+
+  if (countryPart) {
+    result.country = countryPart;
+  }
+
+  if (statePart) {
+    result.state = statePart;
+    result.province = statePart;
+    result.region = statePart;
+  }
+
+  if (cityPart) {
+    result.city = cityPart;
   }
 
   return result;

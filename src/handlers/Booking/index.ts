@@ -7,7 +7,8 @@ import { addWorkingDays } from "../Project/scheduling";
 import {
   getDistanceBetweenLocations,
   checkBorderCrossing,
-  hasValidCoordinates
+  hasValidCoordinates,
+  validateLocationByTextData
 } from "../../utils/geolocation";
 import {
   extractLocationFromUserLocation,
@@ -359,14 +360,35 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
                 projectHasCoords: hasValidCoordinates(enhancedProjectLocation),
                 customerHasCoords: hasValidCoordinates(enhancedCustomerLocation)
               });
-              // If project has distance restrictions but no coordinates, we should block the booking
-              // to prevent booking services that can't be delivered
-              if (project.distance.maxKmRange < 200) { // Only for local services
-                return res.status(400).json({
+
+              // Fallback to text-based location validation (city, state, country)
+              console.log('ℹ️ Using text-based location validation as fallback');
+              console.log('Project location:', {
+                city: enhancedProjectLocation.city,
+                state: enhancedProjectLocation.state || enhancedProjectLocation.province,
+                country: enhancedProjectLocation.country
+              });
+              console.log('Customer location:', {
+                city: enhancedCustomerLocation.city,
+                state: enhancedCustomerLocation.state || enhancedCustomerLocation.province,
+                country: enhancedCustomerLocation.country
+              });
+
+              const textValidation = validateLocationByTextData(
+                enhancedProjectLocation,
+                enhancedCustomerLocation,
+                project.distance.maxKmRange
+              );
+
+              if (!textValidation.isValid) {
+                console.log('❌ Text-based location validation failed:', textValidation.reason);
+                return res.status(403).json({
                   success: false,
-                  msg: "Unable to verify service availability in your area. Please contact the professional directly."
+                  msg: textValidation.reason || "This service is not available in your area."
                 });
               }
+
+              console.log('✅ Text-based location validation passed');
             }
           } catch (error) {
             console.error('Error validating distance:', error);
@@ -774,7 +796,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email businessInfo hourlyRate availability')
-      .populate('project', 'title description pricing category service team')
+      .populate('project', 'title description pricing category service team postBookingQuestions')
       .populate('assignedTeamMembers', 'name email');
 
     if (!booking) {
@@ -1209,6 +1231,61 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
   } catch (error: any) {
     console.error('Cancel booking error:', error);
+    next(error);
+  }
+};
+
+// Submit post-booking answers
+export const submitPostBookingAnswers = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user?._id;
+    const { bookingId } = req.params;
+    const { answers } = req.body;
+
+    if (!answers || !Array.isArray(answers)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Answers are required and must be an array"
+      });
+    }
+
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        msg: "Booking not found"
+      });
+    }
+
+    // Only the customer who made the booking can submit answers
+    if (booking.customer.toString() !== userId) {
+      return res.status(403).json({
+        success: false,
+        msg: "You do not have permission to submit answers for this booking"
+      });
+    }
+
+    // Validate answer format
+    const validatedAnswers = answers.map((answer: any, index: number) => ({
+      questionId: answer.questionId || `q-${index}`,
+      question: answer.question || '',
+      answer: answer.answer || ''
+    })).filter((a: any) => a.question && a.answer);
+
+    // Update booking with post-booking data
+    booking.postBookingData = validatedAnswers;
+    await booking.save();
+
+    console.log('[BOOKING] Post-booking answers saved for booking:', bookingId);
+
+    return res.status(200).json({
+      success: true,
+      msg: "Post-booking answers submitted successfully",
+      booking
+    });
+
+  } catch (error: any) {
+    console.error('Submit post-booking answers error:', error);
     next(error);
   }
 };
