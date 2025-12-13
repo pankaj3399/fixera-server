@@ -323,6 +323,11 @@ export function validateLocationByTextData(
         reason: `This service is only available locally. Your location (${customerLocation.city}) appears to be outside the service area (${projectLocation.city}).`
       };
     }
+
+    return {
+      isValid: false,
+      reason: 'This service is only available locally. Precise city information is required to verify availability.'
+    };
   }
 
   // For regional services (50-200km range), require same province/state
