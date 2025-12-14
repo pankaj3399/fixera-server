@@ -755,6 +755,87 @@ export const getScheduleProposalsForProject = async (
     ? await User.find({ _id: { $in: resourceIds } })
     : [];
 
+  // Fetch existing bookings to block those dates from schedule proposals
+  const existingBookings = await Booking.find({
+    project: project._id,
+    status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] }
+  }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
+
+  // Helper to check if a day is blocked by an existing booking
+  const isDayBlockedByBooking = (day: Date): boolean => {
+    const dayStart = startOfDay(day);
+    const dayEnd = addDuration(dayStart, 1, 'days');
+
+    for (const booking of existingBookings) {
+      // Check scheduled dates first
+      if (booking.scheduledStartDate && booking.scheduledEndDate) {
+        const bookingStart = new Date(booking.scheduledStartDate);
+        const bookingEnd = new Date(booking.scheduledEndDate);
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          return true;
+        }
+        continue;
+      }
+
+      // Fall back to rfqData
+      if (!booking.rfqData?.preferredStartDate) continue;
+
+      // Get execution duration from the selected subproject or project
+      let bookingExecutionHours = 0;
+      if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
+        const subproject = project.subprojects[booking.selectedSubprojectIndex];
+        const execDuration = subproject.executionDuration;
+        if (execDuration) {
+          bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
+        }
+      } else if (project.executionDuration) {
+        bookingExecutionHours = project.executionDuration.unit === 'hours'
+          ? (project.executionDuration.value || 0)
+          : (project.executionDuration.value || 0) * 24;
+      }
+
+      if (bookingExecutionHours <= 0) continue;
+
+      // For days mode, check if the booking blocks this day
+      if (mode === 'days') {
+        const bookingStart = new Date(booking.rfqData.preferredStartDate);
+        bookingStart.setHours(0, 0, 0, 0);
+
+        const durationDays = Math.ceil(bookingExecutionHours / 24);
+        const bookingEnd = new Date(bookingStart);
+        bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          return true;
+        }
+      }
+      // For hours mode with specific start time
+      else if (mode === 'hours' && booking.rfqData.preferredStartTime) {
+        const bookingStart = new Date(booking.rfqData.preferredStartDate);
+        const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+        bookingStart.setHours(hours, minutes, 0, 0);
+
+        const bookingEnd = new Date(bookingStart);
+        bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
+
+        // For hours mode, only block if the entire day is taken
+        // This is a conservative check - the slot-level check happens elsewhere
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          // Check if the booking spans the entire working day
+          const dayAvailabilityStart = new Date(day);
+          dayAvailabilityStart.setHours(8, 0, 0, 0);
+          const dayAvailabilityEnd = new Date(day);
+          dayAvailabilityEnd.setHours(17, 0, 0, 0);
+
+          if (bookingStart <= dayAvailabilityStart && bookingEnd >= dayAvailabilityEnd) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
   if (!teamMembers.length) {
     // No team members with availability information; fall back to simple proposals.
     const fallbackStart = startOfDay(earliestBookableDate);
@@ -793,7 +874,11 @@ export const getScheduleProposalsForProject = async (
 
   for (let i = 0; i < MAX_SEARCH_DAYS; i++) {
     const day = addDuration(searchStart, i, "days");
-    const availableMembers = getAvailableMembersForDay(teamMembers, day, mode);
+    // If this day is blocked by an existing booking, mark it as unavailable
+    const isBlockedByBooking = isDayBlockedByBooking(day);
+    const availableMembers = isBlockedByBooking
+      ? []
+      : getAvailableMembersForDay(teamMembers, day, mode);
     availabilityByDay.push({
       date: day,
       availableMembers: availableMembers,
