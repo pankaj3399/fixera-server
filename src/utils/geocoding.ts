@@ -17,9 +17,11 @@ export function extractLocationFromBusinessInfo(businessInfo: any): LocationInfo
   return {
     address: businessInfo.address,
     city: businessInfo.city,
+    state: businessInfo.region,
     country: businessInfo.country,
     postalCode: businessInfo.postalCode,
-    region: businessInfo.region
+    region: businessInfo.region,
+    province: businessInfo.region
   };
 }
 
@@ -43,6 +45,7 @@ export function extractLocationFromUserLocation(location: any): LocationInfo {
     coordinates,
     address: location.address,
     city: location.city,
+    state: location.state || location.region || location.province,
     country: location.country,
     postalCode: location.postalCode
   };
@@ -227,6 +230,17 @@ export async function resolveCoordinates(location: LocationInfo): Promise<Coordi
     }
   }
 
+  if ((location.city || location.state || location.region) && location.country) {
+    const approx = getApproximateCoordinates(
+      location.city || location.state || location.region,
+      location.country,
+      location.state || location.region
+    );
+    if (approx) {
+      return approx;
+    }
+  }
+
   return null;
 }
 
@@ -237,9 +251,10 @@ export async function resolveCoordinates(location: LocationInfo): Promise<Coordi
  */
 export function getApproximateCoordinates(
   city?: string,
-  country?: string
+  country?: string,
+  stateOrRegion?: string
 ): Coordinates | null {
-  if (!city || !country) return null;
+  if (!country) return null;
 
   // Major city coordinates mapping
   const cityCoordinates: { [key: string]: Coordinates } = {
@@ -266,6 +281,26 @@ export function getApproximateCoordinates(
     'munich,de': { latitude: 48.1351, longitude: 11.5820 },
   };
 
-  const key = `${city.toLowerCase()},${getCountryCode(country)?.toLowerCase()}`;
-  return cityCoordinates[key] || null;
+  const normalizedCity = city?.toLowerCase().trim();
+  const normalizedState = stateOrRegion?.toLowerCase().trim();
+  const normalizedCountry = (getCountryCode(country)?.toLowerCase() || country?.toLowerCase()?.trim());
+
+  if (!normalizedCountry) {
+    return null;
+  }
+
+  const keysToTry = [
+    normalizedCity && normalizedState ? `${normalizedCity},${normalizedState},${normalizedCountry}` : null,
+    normalizedCity ? `${normalizedCity},${normalizedCountry}` : null,
+    normalizedState ? `${normalizedState},${normalizedCountry}` : null,
+    normalizedCity ? normalizedCity : null,
+  ].filter(Boolean) as string[];
+
+  for (const key of keysToTry) {
+    if (cityCoordinates[key]) {
+      return cityCoordinates[key];
+    }
+  }
+
+  return null;
 }
