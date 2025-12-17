@@ -84,18 +84,26 @@ const dayOverlapsRange = (day: Date, start: Date, end: Date): boolean => {
  * Add a number of working days to a start date, considering team member availability
  * This is used for DAYS mode to correctly calculate completion dates
  */
-const addWorkingDays = async (
+export const addWorkingDays = async (
   startDate: Date,
   daysToAdd: number,
   teamMembers: IUser[]
 ): Promise<Date> => {
   if (daysToAdd === 0) return startDate;
+  if (daysToAdd === 1) return startDate; 
 
   let workingDaysCount = 0;
   let currentDate = startOfDay(startDate);
   const maxIterations = daysToAdd * 5; // Safety limit (up to 5x expected for very sparse availability)
   let iterations = 0;
 
+  // First, check if startDate itself is a working day and count it
+  const startDayAvailable = getAvailableMembersForDay(teamMembers, currentDate, "days");
+  if (startDayAvailable.length > 0) {
+    workingDaysCount = 1; // Count the first day
+  }
+
+  // Now count remaining days (daysToAdd - 1 more working days needed)
   while (workingDaysCount < daysToAdd && iterations < maxIterations) {
     iterations++;
     currentDate = addDuration(currentDate, 1, 'days');
@@ -563,7 +571,7 @@ const getAvailableMembersForDay = (members: IUser[], day: Date, mode?: "hours" |
     } else {
       // Days mode: Apply 4-hour rule (if more than 4 hours blocked, day is unavailable)
       // This prevents fragmenting multi-day projects
-      if (blockedHours > 4) {
+      if (blockedHours >= 4) {
         return false;
       }
     }
@@ -1148,8 +1156,3 @@ export const getScheduleProposalsForProject = async (
   };
 };
 
-/**
- * Export addWorkingDays for use by booking handler
- * This allows proper calculation of working days for bookings
- */
-export { addWorkingDays };

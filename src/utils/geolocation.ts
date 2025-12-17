@@ -213,8 +213,9 @@ export function getDistanceBetweenLocations(
  * Check if location crosses borders based on border level
  * @param professionalLocation - Professional's service location
  * @param customerLocation - Customer's location
- * @param noBorders - Whether professional crosses borders
- * @param borderLevel - Level of border restriction
+ * @param noBorders - If true, professional does NOT cross borders (stays within their area)
+ *                    This corresponds to the UI checkbox "Don't cross country borders"
+ * @param borderLevel - Level of border restriction (country or province)
  * @returns true if the location is acceptable (doesn't violate border settings)
  */
 export function checkBorderCrossing(
@@ -223,15 +224,16 @@ export function checkBorderCrossing(
   noBorders: boolean,
   borderLevel: 'none' | 'country' | 'province' = 'country'
 ): boolean {
-  // If noBorders is true, professional crosses all borders
-  if (noBorders) {
+  // If noBorders is FALSE (checkbox unchecked), professional CAN cross borders freely
+  if (!noBorders) {
     return true;
   }
 
-  // If noBorders is false, check based on borderLevel
+  // If noBorders is TRUE (checkbox checked = "Don't cross country borders"),
+  // enforce border restrictions based on borderLevel
   switch (borderLevel) {
     case 'none':
-      // No border restrictions
+      // No border restrictions - allows crossing
       return true;
 
     case 'country':
