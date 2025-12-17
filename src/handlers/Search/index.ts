@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import User from "../../models/user";
 import Project from "../../models/project";
-import { calculateFirstAvailableDate } from "../Project/scheduling";
+import { calculateFirstAvailableDate, getScheduleProposalsForProject } from "../Project/scheduling";
 import {
   LocationInfo,
   getDistanceBetweenLocations,
@@ -672,16 +672,24 @@ async function searchProjects(
     let projectsWithAvailability = await Promise.all(
       filteredProjects.map(async (project: any) => {
         try {
-          const firstAvailableDate = await calculateFirstAvailableDate(project);
+          const [calculatedPrepDate, scheduleSummary] = await Promise.all([
+            calculateFirstAvailableDate(project),
+            getScheduleProposalsForProject(project._id?.toString())
+          ]);
+          const resolvedFirstAvailableDate = scheduleSummary?.earliestProposal?.start || calculatedPrepDate;
           return {
             ...project,
-            firstAvailableDate,
+            firstAvailableDate: resolvedFirstAvailableDate,
+            firstAvailableWindow: scheduleSummary?.earliestProposal || null,
+            shortestThroughputWindow: scheduleSummary?.shortestThroughputProposal || null,
           };
         } catch (error) {
           console.error('Error calculating first available date for project:', project._id, error);
           return {
             ...project,
             firstAvailableDate: null,
+            firstAvailableWindow: null,
+            shortestThroughputWindow: null,
           };
         }
       })
