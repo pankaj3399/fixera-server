@@ -378,7 +378,13 @@ export const LogOut = async (req: Request, res: Response, next: NextFunction) =>
 // Get current user endpoint
 export const getMe = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const token = req.cookies?.['auth-token'];
+    // Check for token in cookies first, then Authorization header
+    let token: string | undefined = req.cookies?.['auth-token'];
+
+    // If no cookie token, check Authorization header (Bearer token)
+    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+      token = req.headers.authorization.substring(7);
+    }
 
     if (!token) {
       return res.status(200).json({ success: true, authenticated: false, user: null });

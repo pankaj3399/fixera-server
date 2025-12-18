@@ -1,4 +1,4 @@
-import express, { Express, Request, Response} from 'express';
+import express, { Express, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -19,18 +19,28 @@ dotenv.config();
 
 const app: Express = express();
 
-// 🚨 Allow ALL origins but still allow credentials (cookies)
-app.use(cors({
-  origin: true, // Reflects the request's Origin header
-  credentials: true, // Allow cookies
-}));
+// CORS configuration - allow all origins with credentials
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    // or reflect the origin for any request
+    callback(null, origin || true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+  exposedHeaders: ['Set-Cookie'],
+};
+
+// Apply CORS middleware (automatically handles OPTIONS preflight)
+app.use(cors(corsOptions));
 
 // Body and cookie parsers
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cookieParser());
 
-// Health check and root routes
+// Health check and root routes (before DB middleware - no DB needed)
 app.get('/', (req: Request, res: Response) => {
   res.json({
     message: 'Fixera API Server is running',
@@ -41,6 +51,17 @@ app.get('/', (req: Request, res: Response) => {
 
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: "UP" });
+});
+
+// Database connection middleware for Vercel serverless (only for /api routes)
+app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    console.error('Database connection error:', error);
+    res.status(500).json({ success: false, msg: 'Database connection failed' });
+  }
 });
 
 // API routes
@@ -58,18 +79,22 @@ app.use('/api/bookings', bookingRouter);
 // Error handler (must be last)
 app.use(errorHandler);
 
-// Traditional server: connect once at startup, then listen
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+// Only start server locally (not on Vercel)
+const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true';
 
-connectDB()
-  .then(() => {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Server running on port ${PORT}`);
+if (!isVercel) {
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+
+  connectDB()
+    .then(() => {
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 Server running on port ${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error('Failed to connect to MongoDB at startup:', error);
+      process.exit(1);
     });
-  })
-  .catch((error) => {
-    console.error('Failed to connect to MongoDB at startup:', error);
-    process.exit(1);
-  });
+}
 
 export default app;
