@@ -32,11 +32,8 @@ const corsOptions: cors.CorsOptions = {
   exposedHeaders: ['Set-Cookie'],
 };
 
-// Apply CORS middleware
+// Apply CORS middleware (automatically handles OPTIONS preflight)
 app.use(cors(corsOptions));
-
-// Handle preflight requests explicitly for all routes
-app.options('*', cors(corsOptions));
 
 // Body and cookie parsers
 app.use(express.json({ limit: '50mb' }));
