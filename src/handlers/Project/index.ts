@@ -526,7 +526,7 @@ export const getProjectProfessionalWorkingHours = async (req: Request, res: Resp
       professionalId = project.resources[0] as any;
     }
 
-    const professional = await User.findById(professionalId).select('availability');
+    const professional = await User.findById(professionalId).select('availability businessInfo.timezone');
 
     if (!professional || !professional.availability) {
       // Return default working hours if not set
@@ -541,12 +541,14 @@ export const getProjectProfessionalWorkingHours = async (req: Request, res: Resp
           saturday: { available: false },
           sunday: { available: false },
         },
+        timezone: 'UTC',
       });
     }
 
     res.json({
       success: true,
       availability: professional.availability,
+      timezone: professional.businessInfo?.timezone || 'UTC',
     });
   } catch (error) {
     console.error("Error fetching professional working hours:", error);
