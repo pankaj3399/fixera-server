@@ -81,6 +81,142 @@ const dayOverlapsRange = (day: Date, start: Date, end: Date): boolean => {
 };
 
 /**
+ * Check if a day is blocked by an existing booking for the project.
+ * This is used during prep time calculation and availability checks.
+ */
+const PARTIAL_BLOCK_THRESHOLD_HOURS = 4;
+
+const isDayBlockedByBooking = (
+  day: Date,
+  existingBookings: Array<{
+    scheduledStartDate?: Date;
+    scheduledEndDate?: Date;
+    rfqData?: {
+      preferredStartDate?: Date;
+      preferredStartTime?: string;
+    };
+    selectedSubprojectIndex?: number;
+  }> | null | undefined,
+  project: IProject,
+  mode: "hours" | "days"
+): boolean => {
+  // Handle case when no bookings exist
+  if (!existingBookings || !Array.isArray(existingBookings) || existingBookings.length === 0) {
+    return false;
+  }
+
+  const dayStart = startOfDay(day);
+  const dayEnd = addDuration(dayStart, 1, "days");
+
+  // For hours mode, calculate total booked hours on this day
+  if (mode === 'hours') {
+    let totalBookedHours = 0;
+
+    for (const booking of existingBookings) {
+      // Check scheduled dates first
+      if (booking.scheduledStartDate && booking.scheduledEndDate) {
+        const bookingStart = new Date(booking.scheduledStartDate);
+        const bookingEnd = new Date(booking.scheduledEndDate);
+
+        // Check if booking overlaps with this day
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          // Calculate hours booked on this specific day
+          const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+          const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+          const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+          totalBookedHours += hoursOnThisDay;
+        }
+        continue;
+      }
+
+      // Fall back to rfqData
+      if (!booking.rfqData?.preferredStartDate) continue;
+
+      // Get execution duration from the selected subproject or project
+      let bookingExecutionHours = 0;
+      if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
+        const subproject = project.subprojects[booking.selectedSubprojectIndex];
+        const execDuration = subproject.executionDuration;
+        if (execDuration) {
+          bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
+        }
+      } else if (project.executionDuration) {
+        bookingExecutionHours = project.executionDuration.unit === 'hours'
+          ? (project.executionDuration.value || 0)
+          : (project.executionDuration.value || 0) * 24;
+      }
+
+      if (bookingExecutionHours <= 0) continue;
+
+      if (booking.rfqData.preferredStartTime) {
+        const bookingStart = new Date(booking.rfqData.preferredStartDate);
+        const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+        bookingStart.setHours(hours, minutes, 0, 0);
+
+        const bookingEnd = new Date(bookingStart);
+        bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
+
+        // Check if booking overlaps with this day
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+          const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+          const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+          totalBookedHours += hoursOnThisDay;
+        }
+      }
+    }
+
+    // Only block day if total booked hours exceed threshold
+    return totalBookedHours > PARTIAL_BLOCK_THRESHOLD_HOURS;
+  }
+
+  // For days mode, block if any booking overlaps with this day
+  for (const booking of existingBookings) {
+    // Check scheduled dates first
+    if (booking.scheduledStartDate && booking.scheduledEndDate) {
+      const bookingStart = new Date(booking.scheduledStartDate);
+      const bookingEnd = new Date(booking.scheduledEndDate);
+      if (dayStart < bookingEnd && dayEnd > bookingStart) {
+        return true;
+      }
+      continue;
+    }
+
+    // Fall back to rfqData
+    if (!booking.rfqData?.preferredStartDate) continue;
+
+    // Get execution duration from the selected subproject or project
+    let bookingExecutionHours = 0;
+    if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
+      const subproject = project.subprojects[booking.selectedSubprojectIndex];
+      const execDuration = subproject.executionDuration;
+      if (execDuration) {
+        bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
+      }
+    } else if (project.executionDuration) {
+      bookingExecutionHours = project.executionDuration.unit === 'hours'
+        ? (project.executionDuration.value || 0)
+        : (project.executionDuration.value || 0) * 24;
+    }
+
+    if (bookingExecutionHours <= 0) continue;
+
+    const bookingStart = new Date(booking.rfqData.preferredStartDate);
+    bookingStart.setHours(0, 0, 0, 0);
+
+    const durationDays = Math.ceil(bookingExecutionHours / 24);
+    const bookingEnd = new Date(bookingStart);
+    bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+
+    if (dayStart < bookingEnd && dayEnd > bookingStart) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+/**
  * Add a number of working days to a start date, considering team member availability
  * This is used for DAYS mode to correctly calculate completion dates
  */
@@ -312,8 +448,9 @@ const getExecutionContext = (project: IProject, options?: ScheduleOptions) => {
   };
 };
 
-const getEarliestBookableDate = async (project: IProject, options?: ScheduleOptions): Promise<Date> => {
+export const getEarliestBookableDate = async (project: IProject, options?: ScheduleOptions): Promise<Date> => {
   const now = new Date();
+  const mode: "hours" | "days" = project.timeMode || project.executionDuration?.unit || "days";
 
   const executionContext = getExecutionContext(project, options);
   const prepValue = executionContext.preparation.value;
@@ -322,20 +459,13 @@ const getEarliestBookableDate = async (project: IProject, options?: ScheduleOpti
     ? toHours(executionContext.executionDuration.value, executionContext.executionDuration.unit)
     : 0;
 
-  // If no preparation time at all, return now
-  if (prepValue === 0) {
-    console.log(`[getEarliestBookableDate] No preparation time, earliest date is now`);
-    return now;
-  }
+  // Fetch existing bookings to check during prep calculation
+  const existingBookings = await Booking.find({
+    project: project._id,
+    status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] }
+  }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
 
-  // If preparation is in hours, just add the hours (no working day logic for hourly)
-  if (prepUnit === 'hours') {
-    const result = addDuration(now, prepValue, 'hours');
-    console.log(`[getEarliestBookableDate] Added ${prepValue} hours to now: ${result.toISOString()}`);
-    return result;
-  }
-
-  // For days-based preparation, count only working days
+  console.log(`[getEarliestBookableDate] Found ${existingBookings.length} existing bookings for project ${project._id}`);
 
   // Get team members to determine working days
   const resourceIds: string[] = Array.isArray(project.resources)
@@ -346,130 +476,190 @@ const getEarliestBookableDate = async (project: IProject, options?: ScheduleOpti
     resourceIds.push(project.professionalId.toString());
   }
 
-  if (!resourceIds.length) {
-    // No team members defined, fallback to simple addition
-    return addDuration(now, prepValue, 'days');
-  }
+  const teamMembers: IUser[] = resourceIds.length
+    ? await User.find({ _id: { $in: resourceIds } })
+    : [];
 
-  const teamMembers: IUser[] = await User.find({ _id: { $in: resourceIds } });
+  // Helper to calculate total blocked hours from ranges on a specific day
+  const calculateBlockedHoursFromRanges = (date: Date, ranges: Array<{ startDate: Date; endDate: Date }>): number => {
+    const dayStart = startOfDay(date);
+    const dayEnd = addDuration(dayStart, 1, "days");
+    let totalBlockedHours = 0;
 
-  if (!teamMembers.length) {
-    // No team members found, fallback to simple addition
-    return addDuration(now, prepValue, 'days');
-  }
+    for (const range of ranges) {
+      const rangeStart = new Date(range.startDate);
+      const rangeEnd = new Date(range.endDate);
 
-  // Count working days for preparation
-  let workingDaysCount = 0;
-  let currentDate = startOfDay(now);
-  const maxIterations = prepValue * 3; // Safety limit (3x expected)
-  let iterations = 0;
+      // Check if range overlaps with this day
+      if (rangeStart < dayEnd && rangeEnd > dayStart) {
+        const overlapStart = rangeStart > dayStart ? rangeStart : dayStart;
+        const overlapEnd = rangeEnd < dayEnd ? rangeEnd : dayEnd;
+        const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+        totalBlockedHours += hoursOnThisDay;
+      }
+    }
 
-  while (workingDaysCount < prepValue && iterations < maxIterations) {
-    iterations++;
-    currentDate = addDuration(currentDate, 1, 'days');
+    return totalBlockedHours;
+  };
 
-    // Check if at least one team member is available on this day
+  // Helper to check if a day is available (team + not blocked by booking)
+  const isDayAvailable = (date: Date): boolean => {
+    // Check if blocked by existing booking
+    if (isDayBlockedByBooking(date, existingBookings, project, mode)) {
+      return false;
+    }
+
+    // If no team members, day is available
+    if (!teamMembers.length) {
+      return true;
+    }
+
+    // Check if at least one team member is available
     const availableMembers = teamMembers.filter((member) => {
-      const dayKey = getWeekdayKey(currentDate);
+      const dayKey = getWeekdayKey(date);
       const availability = member.availability || undefined;
       const dayAvailability = availability?.[dayKey];
 
-      // Not available on this weekday
       if (!dayAvailability || !dayAvailability.available) {
         return false;
       }
 
-      // Check if blocked on this specific date
       const hasBlockedDate =
-        (member.blockedDates || []).some((b) => isSameDay(b.date, currentDate)) ||
-        (member.companyBlockedDates || []).some((b) => isSameDay(b.date, currentDate));
+        (member.blockedDates || []).some((b) => isSameDay(b.date, date)) ||
+        (member.companyBlockedDates || []).some((b) => isSameDay(b.date, date));
 
       if (hasBlockedDate) {
         return false;
       }
 
-      // Check if any blocked range overlaps this day
       const allRanges = [
         ...(member.blockedRanges || []),
         ...(member.companyBlockedRanges || []),
       ];
 
+      // For hours mode, apply the 4-hour threshold
+      if (mode === 'hours') {
+        const totalBlockedHours = calculateBlockedHoursFromRanges(date, allRanges);
+        return totalBlockedHours <= PARTIAL_BLOCK_THRESHOLD_HOURS;
+      }
+
+      // For days mode, any overlap blocks the day
       const hasBlockedRange = allRanges.some((r) =>
-        dayOverlapsRange(currentDate, r.startDate, r.endDate)
+        dayOverlapsRange(date, r.startDate, r.endDate)
       );
 
-      if (hasBlockedRange) {
-        return false;
-      }
-
-      return true;
+      return !hasBlockedRange;
     });
 
-    // If at least one team member is available, count it as a working day
-    if (availableMembers.length > 0) {
-      workingDaysCount++;
-    }
-  }
+    return availableMembers.length > 0;
+  };
 
-  console.log(`[getEarliestBookableDate] After ${prepValue} working days preparation, earliest date: ${currentDate.toISOString()}`);
-
-  // For hours mode, continue searching until we find a date with available time slots
-  if (project.timeMode === 'hours') {
-    console.log(`[getEarliestBookableDate] Hours mode - searching for date with available time slots`);
-    console.log(`[getEarliestBookableDate] Starting search from: ${currentDate.toISOString()}`);
-
+  // If no preparation time, find first available day from now
+  if (prepValue === 0) {
+    console.log(`[getEarliestBookableDate] No preparation time, finding first available date`);
+    let currentDate = startOfDay(now);
     const maxSearchDays = 120;
-    let searchIterations = 0;
 
-    while (searchIterations < maxSearchDays) {
-      const availableMembers = teamMembers.filter((member) => {
-        const dayKey = getWeekdayKey(currentDate);
-        const availability = member.availability || undefined;
-        const dayAvailability = availability?.[dayKey];
+    for (let i = 0; i < maxSearchDays; i++) {
+      currentDate = addDuration(startOfDay(now), i, 'days');
 
-        if (!dayAvailability || !dayAvailability.available) {
-          return false;
-        }
+      if (!isDayAvailable(currentDate)) {
+        continue;
+      }
 
-        const hasBlockedDate =
-          (member.blockedDates || []).some((b) => isSameDay(b.date, currentDate)) ||
-          (member.companyBlockedDates || []).some((b) => isSameDay(b.date, currentDate));
-
-        if (hasBlockedDate) {
-          return false;
-        }
-
-        const allRanges = [
-          ...(member.blockedRanges || []),
-          ...(member.companyBlockedRanges || []),
-        ];
-
-        const hasBlockedRange = allRanges.some((r) =>
-          dayOverlapsRange(currentDate, r.startDate, r.endDate)
-        );
-
-        return !hasBlockedRange;
-      });
-
-      console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Available members: ${availableMembers.length}`);
-
-      if (availableMembers.length > 0) {
-        // Check if there are available time slots
+      // For hours mode, also check time slots
+      if (mode === 'hours') {
         const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours);
-        console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Has time slots: ${hasSlots}`);
-        if (hasSlots) {
-          console.log(`[getEarliestBookableDate] ✅ Found date with available slots: ${currentDate.toISOString()}`);
-          return currentDate;
+        if (!hasSlots) {
+          continue;
         }
       }
 
-      currentDate = addDuration(currentDate, 1, 'days');
-      searchIterations++;
+      console.log(`[getEarliestBookableDate] ✅ First available date (no prep): ${currentDate.toISOString()}`);
+      return currentDate;
     }
 
-    console.warn(`[getEarliestBookableDate] ⚠️ No date with available time slots found in ${maxSearchDays} days`);
+    // Fallback to tomorrow if nothing found
+    return addDuration(now, 1, 'days');
   }
 
+  // If preparation is in hours, add hours then find first available day
+  if (prepUnit === 'hours') {
+    const afterPrepTime = addDuration(now, prepValue, 'hours');
+    let currentDate = startOfDay(afterPrepTime);
+    const maxSearchDays = 120;
+
+    for (let i = 0; i < maxSearchDays; i++) {
+      if (!isDayAvailable(currentDate)) {
+        currentDate = addDuration(currentDate, 1, 'days');
+        continue;
+      }
+
+      // For hours mode, also check time slots
+      if (mode === 'hours') {
+        const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours);
+        if (!hasSlots) {
+          currentDate = addDuration(currentDate, 1, 'days');
+          continue;
+        }
+      }
+
+      console.log(`[getEarliestBookableDate] ✅ First available date (after ${prepValue}h prep): ${currentDate.toISOString()}`);
+      return currentDate;
+    }
+
+    return afterPrepTime;
+  }
+
+  // For days-based preparation, count only working days (not blocked by bookings or team)
+  let workingDaysCount = 0;
+  let currentDate = startOfDay(now);
+  const maxIterations = prepValue * 5; // Safety limit
+  let iterations = 0;
+
+  console.log(`[getEarliestBookableDate] Counting ${prepValue} working days for preparation...`);
+
+  while (workingDaysCount < prepValue && iterations < maxIterations) {
+    iterations++;
+    currentDate = addDuration(currentDate, 1, 'days');
+
+    if (isDayAvailable(currentDate)) {
+      workingDaysCount++;
+      console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Working day ${workingDaysCount}/${prepValue}`);
+    } else {
+      console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Blocked/unavailable, skipping`);
+    }
+  }
+
+  console.log(`[getEarliestBookableDate] After ${prepValue} working days prep: ${currentDate.toISOString()}`);
+
+  // After prep time, find the first available day for actual work
+  const maxSearchDays = 120;
+  let searchIterations = 0;
+
+  while (searchIterations < maxSearchDays) {
+    if (!isDayAvailable(currentDate)) {
+      currentDate = addDuration(currentDate, 1, 'days');
+      searchIterations++;
+      continue;
+    }
+
+    // For hours mode, also check time slots
+    if (mode === 'hours') {
+      const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours);
+      if (!hasSlots) {
+        console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - No time slots available`);
+        currentDate = addDuration(currentDate, 1, 'days');
+        searchIterations++;
+        continue;
+      }
+    }
+
+    console.log(`[getEarliestBookableDate] ✅ First available date: ${currentDate.toISOString()}`);
+    return currentDate;
+  }
+
+  console.warn(`[getEarliestBookableDate] ⚠️ No available date found in ${maxSearchDays} days after prep`);
   return currentDate;
 };
 
@@ -770,12 +960,72 @@ export const getScheduleProposalsForProject = async (
   }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
 
   // Helper to check if a day is blocked by an existing booking
-  const isDayBlockedByBooking = (day: Date): boolean => {
+  // For hours mode, uses 4-hour threshold (day is blocked only if >4 hours are booked)
+  const isDayBlockedByBookingLocal = (day: Date): boolean => {
     const dayStart = startOfDay(day);
     const dayEnd = addDuration(dayStart, 1, 'days');
 
+    // For hours mode, calculate total booked hours on this day
+    if (mode === 'hours') {
+      let totalBookedHours = 0;
+
+      for (const booking of existingBookings) {
+        // Check scheduled dates first
+        if (booking.scheduledStartDate && booking.scheduledEndDate) {
+          const bookingStart = new Date(booking.scheduledStartDate);
+          const bookingEnd = new Date(booking.scheduledEndDate);
+
+          // Check if booking overlaps with this day
+          if (dayStart < bookingEnd && dayEnd > bookingStart) {
+            const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+            const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+            const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+            totalBookedHours += hoursOnThisDay;
+          }
+          continue;
+        }
+
+        // Fall back to rfqData
+        if (!booking.rfqData?.preferredStartDate || !booking.rfqData.preferredStartTime) continue;
+
+        // Get execution duration
+        let bookingExecutionHours = 0;
+        if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
+          const subproject = project.subprojects[booking.selectedSubprojectIndex];
+          const execDuration = subproject.executionDuration;
+          if (execDuration) {
+            bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
+          }
+        } else if (project.executionDuration) {
+          bookingExecutionHours = project.executionDuration.unit === 'hours'
+            ? (project.executionDuration.value || 0)
+            : (project.executionDuration.value || 0) * 24;
+        }
+
+        if (bookingExecutionHours <= 0) continue;
+
+        const bookingStart = new Date(booking.rfqData.preferredStartDate);
+        const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+        bookingStart.setHours(hours, minutes, 0, 0);
+
+        const bookingEnd = new Date(bookingStart);
+        bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
+
+        // Check if booking overlaps with this day
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+          const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+          const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+          totalBookedHours += hoursOnThisDay;
+        }
+      }
+
+      // Only block day if total booked hours exceed threshold (4 hours)
+      return totalBookedHours > PARTIAL_BLOCK_THRESHOLD_HOURS;
+    }
+
+    // For days mode, block if any booking overlaps with this day
     for (const booking of existingBookings) {
-      // Check scheduled dates first
       if (booking.scheduledStartDate && booking.scheduledEndDate) {
         const bookingStart = new Date(booking.scheduledStartDate);
         const bookingEnd = new Date(booking.scheduledEndDate);
@@ -785,10 +1035,8 @@ export const getScheduleProposalsForProject = async (
         continue;
       }
 
-      // Fall back to rfqData
       if (!booking.rfqData?.preferredStartDate) continue;
 
-      // Get execution duration from the selected subproject or project
       let bookingExecutionHours = 0;
       if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
         const subproject = project.subprojects[booking.selectedSubprojectIndex];
@@ -804,43 +1052,18 @@ export const getScheduleProposalsForProject = async (
 
       if (bookingExecutionHours <= 0) continue;
 
-      // For days mode, check if the booking blocks this day
-      if (mode === 'days') {
-        const bookingStart = new Date(booking.rfqData.preferredStartDate);
-        bookingStart.setHours(0, 0, 0, 0);
+      const bookingStart = new Date(booking.rfqData.preferredStartDate);
+      bookingStart.setHours(0, 0, 0, 0);
 
-        const durationDays = Math.ceil(bookingExecutionHours / 24);
-        const bookingEnd = new Date(bookingStart);
-        bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+      const durationDays = Math.ceil(bookingExecutionHours / 24);
+      const bookingEnd = new Date(bookingStart);
+      bookingEnd.setDate(bookingEnd.getDate() + durationDays);
 
-        if (dayStart < bookingEnd && dayEnd > bookingStart) {
-          return true;
-        }
-      }
-      // For hours mode with specific start time
-      else if (mode === 'hours' && booking.rfqData.preferredStartTime) {
-        const bookingStart = new Date(booking.rfqData.preferredStartDate);
-        const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
-        bookingStart.setHours(hours, minutes, 0, 0);
-
-        const bookingEnd = new Date(bookingStart);
-        bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
-
-        // For hours mode, only block if the entire day is taken
-        // This is a conservative check - the slot-level check happens elsewhere
-        if (dayStart < bookingEnd && dayEnd > bookingStart) {
-          // Check if the booking spans the entire working day
-          const dayAvailabilityStart = new Date(day);
-          dayAvailabilityStart.setHours(8, 0, 0, 0);
-          const dayAvailabilityEnd = new Date(day);
-          dayAvailabilityEnd.setHours(17, 0, 0, 0);
-
-          if (bookingStart <= dayAvailabilityStart && bookingEnd >= dayAvailabilityEnd) {
-            return true;
-          }
-        }
+      if (dayStart < bookingEnd && dayEnd > bookingStart) {
+        return true;
       }
     }
+
     return false;
   };
 
@@ -883,7 +1106,7 @@ export const getScheduleProposalsForProject = async (
   for (let i = 0; i < MAX_SEARCH_DAYS; i++) {
     const day = addDuration(searchStart, i, "days");
     // If this day is blocked by an existing booking, mark it as unavailable
-    const isBlockedByBooking = isDayBlockedByBooking(day);
+    const isBlockedByBooking = isDayBlockedByBookingLocal(day);
     const availableMembers = isBlockedByBooking
       ? []
       : getAvailableMembersForDay(teamMembers, day, mode);

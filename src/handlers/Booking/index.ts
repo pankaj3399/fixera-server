@@ -3,7 +3,7 @@ import Booking, { IBooking, BookingStatus } from "../../models/booking";
 import User, { IUser } from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
-import { addWorkingDays } from "../Project/scheduling";
+import { addWorkingDays, getEarliestBookableDate } from "../Project/scheduling";
 import {
   getDistanceBetweenLocations,
   checkBorderCrossing,
@@ -397,49 +397,34 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           }
         }
 
-        // Enforce preparation time rule: client cannot book before preparation time has passed.
+        // Validate that preferred start date is not earlier than the earliest bookable date
+        // This accounts for preparation time, blocked dates, and existing bookings
         const preferredStart = resolvedPreferredStartDate;
         if (preferredStart) {
-          const now = new Date();
-          let prepValue = 0;
-          let prepUnit: 'hours' | 'days' = 'days';
+          try {
+            const options = typeof selectedSubprojectIndex === 'number'
+              ? { subprojectIndex: selectedSubprojectIndex }
+              : undefined;
 
-          // Check subproject deliveryPreparation first
-          if (typeof selectedSubprojectIndex === 'number' && project.subprojects?.[selectedSubprojectIndex]) {
-            const subproject = project.subprojects[selectedSubprojectIndex];
-            if (subproject.deliveryPreparation && subproject.deliveryPreparation > 0) {
-              prepValue = subproject.deliveryPreparation;
-              prepUnit = (subproject.deliveryPreparationUnit || 'days') as 'hours' | 'days';
-              console.log(`[BOOKING VALIDATION] Using subproject deliveryPreparation: ${prepValue} ${prepUnit}`);
-            }
-          }
-
-          // Fall back to project-level preparationDuration
-          if (prepValue === 0 && project.preparationDuration && project.preparationDuration.value > 0) {
-            prepValue = project.preparationDuration.value;
-            prepUnit = project.preparationDuration.unit || 'days';
-            console.log(`[BOOKING VALIDATION] Using project preparationDuration: ${prepValue} ${prepUnit}`);
-          }
-
-          if (prepValue > 0) {
-            const earliestBookable = new Date(now);
-            if (prepUnit === "hours") {
-              earliestBookable.setHours(earliestBookable.getHours() + prepValue);
-            } else {
-              // Simple calendar days for validation (not working days)
-              earliestBookable.setDate(earliestBookable.getDate() + prepValue);
-            }
-
-            console.log(`[BOOKING VALIDATION] Earliest bookable date: ${earliestBookable.toISOString()}`);
-            console.log(`[BOOKING VALIDATION] User requested: ${preferredStart}`);
-
+            const earliestBookable = await getEarliestBookableDate(project, options);
             const preferred = new Date(preferredStart);
-            if (preferred < earliestBookable) {
+
+            // Compare dates only (not timestamps) by normalizing to start of day
+            const earliestBookableDate = new Date(earliestBookable.getFullYear(), earliestBookable.getMonth(), earliestBookable.getDate());
+            const preferredDate = new Date(preferred.getFullYear(), preferred.getMonth(), preferred.getDate());
+
+            console.log(`[BOOKING VALIDATION] Earliest bookable date: ${earliestBookableDate.toISOString().split('T')[0]}`);
+            console.log(`[BOOKING VALIDATION] User requested: ${preferredDate.toISOString().split('T')[0]}`);
+
+            if (preferredDate < earliestBookableDate) {
               return res.status(400).json({
                 success: false,
-                msg: `Selected start date is earlier than allowed. This project requires ${prepValue} ${prepUnit} of preparation time. Earliest available date is ${earliestBookable.toISOString().split('T')[0]}.`,
+                msg: `Selected start date is earlier than available. Earliest available date is ${earliestBookableDate.toISOString().split('T')[0]}.`,
               });
             }
+          } catch (validationError) {
+            console.error('[BOOKING VALIDATION] Error checking earliest bookable date:', validationError);
+            // Continue with booking - don't block on validation errors
           }
         }
 
@@ -861,7 +846,7 @@ export const submitQuote = async (req: Request, res: Response, next: NextFunctio
     }
 
     // Check if user is the professional for this booking
-    if (booking.professional?.toString() !== userId) {
+    if (booking.professional?.toString() !== userId?.toString()) {
       return res.status(403).json({
         success: false,
         msg: "Only the assigned professional can submit a quote"
@@ -931,7 +916,7 @@ export const respondToQuote = async (req: Request, res: Response, next: NextFunc
     }
 
     // Check if user is the customer
-    if (booking.customer.toString() !== userId) {
+    if (booking.customer.toString() !== userId?.toString()) {
       return res.status(403).json({
         success: false,
         msg: "Only the customer can respond to quotes"
@@ -1258,7 +1243,7 @@ export const submitPostBookingAnswers = async (req: Request, res: Response, next
     }
 
     // Only the customer who made the booking can submit answers
-    if (booking.customer.toString() !== userId) {
+    if (booking.customer.toString() !== userId?.toString()) {
       return res.status(403).json({
         success: false,
         msg: "You do not have permission to submit answers for this booking"
