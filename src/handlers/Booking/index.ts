@@ -82,10 +82,12 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         bufferEnd.setHours(bufferEnd.getHours() + buffer.value);
       } else if (buffer.value > 0) {
         if (teamMembers.length > 0) {
-          bufferEnd = await addWorkingDays(scheduleEnd, buffer.value, teamMembers);
+          const lastBufferDay = await addWorkingDays(scheduleEnd, buffer.value + 1, teamMembers);
+          bufferEnd = new Date(lastBufferDay);
+          bufferEnd.setDate(bufferEnd.getDate() + 1); // Make end exclusive
         } else {
           bufferEnd = new Date(scheduleEnd);
-          bufferEnd.setDate(bufferEnd.getDate() + buffer.value);
+          bufferEnd.setDate(bufferEnd.getDate() + buffer.value + 1); // +1 for exclusive end
         }
       } else {
         bufferEnd = new Date(scheduleEnd);
@@ -1061,13 +1063,17 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
         if (bufferUnit === 'hours') {
           bufferEnd = new Date(scheduleEnd);
           bufferEnd.setHours(bufferEnd.getHours() + bufferValue);
-        } else {
+        } else if (bufferValue > 0) {
           if (teamMembers.length > 0) {
-            bufferEnd = await addWorkingDays(scheduleEnd, bufferValue, teamMembers);
+            const lastBufferDay = await addWorkingDays(scheduleEnd, bufferValue + 1, teamMembers);
+            bufferEnd = new Date(lastBufferDay);
+            bufferEnd.setDate(bufferEnd.getDate() + 1); // Make end exclusive
           } else {
             bufferEnd = new Date(scheduleEnd);
-            bufferEnd.setDate(bufferEnd.getDate() + bufferValue);
+            bufferEnd.setDate(bufferEnd.getDate() + bufferValue + 1); // +1 for exclusive end
           }
+        } else {
+          bufferEnd = new Date(scheduleEnd);
         }
 
         console.log('📅 Calculated dates:', {

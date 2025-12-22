@@ -80,6 +80,50 @@ const dayOverlapsRange = (day: Date, start: Date, end: Date): boolean => {
   return start < dayEnd && end > dayStart;
 };
 
+const isWeekend = (date: Date): boolean => {
+  const day = date.getDay();
+  return day === 0 || day === 6; // Sunday = 0, Saturday = 6
+};
+
+const isDayAvailableForPrepTime = (
+  date: Date,
+  teamMembers: IUser[]
+): boolean => {
+  // Weekend days are not available for prep time
+  if (isWeekend(date)) {
+    return false;
+  }
+
+  if (teamMembers.length === 0) {
+    return true;
+  }
+
+  const allMembersHaveHoliday = teamMembers.every((member) => {
+    const companyBlockedDates = member.companyBlockedDates || [];
+    return companyBlockedDates.some(
+      (b) => isSameDay(b.date, date) && b.isHoliday === true
+    );
+  });
+
+  if (allMembersHaveHoliday) {
+    return false;
+  }
+
+  // Also check company blocked ranges that are holidays
+  const allMembersHaveHolidayRange = teamMembers.every((member) => {
+    const companyBlockedRanges = member.companyBlockedRanges || [];
+    return companyBlockedRanges.some(
+      (r) => dayOverlapsRange(date, r.startDate, r.endDate) && r.isHoliday === true
+    );
+  });
+
+  if (allMembersHaveHolidayRange) {
+    return false;
+  }
+
+  return true;
+};
+
 /**
  * Check if a day is blocked by an existing booking for the project.
  * This is used during prep time calculation and availability checks.
@@ -623,7 +667,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
     iterations++;
     currentDate = addDuration(currentDate, 1, 'days');
 
-    if (isDayAvailable(currentDate)) {
+    if (isDayAvailableForPrepTime(currentDate, teamMembers)) {
       workingDaysCount++;
       console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Working day ${workingDaysCount}/${prepValue}`);
     } else {
