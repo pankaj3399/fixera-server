@@ -305,12 +305,13 @@ const hasAvailableTimeSlots = async (
   project: IProject,
   date: Date,
   teamMembers: IUser[],
-  executionHours: number
+  executionHours: number,
+  mode: "hours" | "days"
 ): Promise<boolean> => {
   const dateStr = date.toISOString().split('T')[0];
 
   // Only check time slots for hours mode
-  if (project.timeMode !== 'hours') {
+  if (mode !== 'hours') {
     return true;
   }
 
@@ -492,11 +493,16 @@ const getExecutionContext = (project: IProject, options?: ScheduleOptions) => {
   };
 };
 
+// Helper to determine mode from execution duration unit
+const getModeFromExecutionContext = (executionContext: ReturnType<typeof getExecutionContext>): "hours" | "days" => {
+  return executionContext.executionDuration?.unit || "days";
+};
+
 export const getEarliestBookableDate = async (project: IProject, options?: ScheduleOptions): Promise<Date> => {
-  const now = new Date();
-  const mode: "hours" | "days" = project.timeMode || project.executionDuration?.unit || "days";
+  let now = new Date();
 
   const executionContext = getExecutionContext(project, options);
+  const mode: "hours" | "days" = getModeFromExecutionContext(executionContext);
   const prepValue = executionContext.preparation.value;
   const prepUnit = executionContext.preparation.unit;
   const executionHours = executionContext.executionDuration
@@ -523,6 +529,44 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
   const teamMembers: IUser[] = resourceIds.length
     ? await User.find({ _id: { $in: resourceIds } })
     : [];
+
+  // Check if current day is "over" based on professional's working hours
+  const dayKey = getWeekdayKey(now);
+  let dayIsOver = false;
+
+  if (teamMembers.length > 0) {
+    // Get the latest end time among team members for today
+    let latestEndHour = 17; // Default 5 PM if no availability set
+    let latestEndMin = 0;
+
+    for (const member of teamMembers) {
+      const dayAvailability = member.availability?.[dayKey];
+      if (dayAvailability?.available && dayAvailability.endTime) {
+        const [endHour, endMin] = dayAvailability.endTime.split(':').map(Number);
+        if (endHour > latestEndHour || (endHour === latestEndHour && endMin > latestEndMin)) {
+          latestEndHour = endHour;
+          latestEndMin = endMin;
+        }
+      }
+    }
+
+    // Check if current time is past the working hours end time
+    const currentHour = now.getHours();
+    const currentMin = now.getMinutes();
+    if (currentHour > latestEndHour || (currentHour === latestEndHour && currentMin >= latestEndMin)) {
+      dayIsOver = true;
+    }
+  } else {
+    // No team members - use default 5 PM cutoff
+    if (now.getHours() >= 17) {
+      dayIsOver = true;
+    }
+  }
+
+  if (dayIsOver) {
+    now = startOfDay(addDuration(now, 1, "days"));
+    console.log(`[getEarliestBookableDate] Current day is over, starting from: ${now.toISOString()}`);
+  }
 
   // Helper to calculate total blocked hours from ranges on a specific day
   const calculateBlockedHoursFromRanges = (date: Date, ranges: Array<{ startDate: Date; endDate: Date }>): number => {
@@ -613,7 +657,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
 
       // For hours mode, also check time slots
       if (mode === 'hours') {
-        const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours);
+        const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours, mode);
         if (!hasSlots) {
           continue;
         }
@@ -641,7 +685,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
 
       // For hours mode, also check time slots
       if (mode === 'hours') {
-        const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours);
+        const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours, mode);
         if (!hasSlots) {
           currentDate = addDuration(currentDate, 1, 'days');
           continue;
@@ -656,6 +700,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
   }
 
   // For days-based preparation, count only working days (not blocked by bookings or team)
+  // Today counts as prep day 1 if it's a working day (and working hours haven't ended - checked above)
   let workingDaysCount = 0;
   let currentDate = startOfDay(now);
   const maxIterations = prepValue * 5; // Safety limit
@@ -663,6 +708,13 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
 
   console.log(`[getEarliestBookableDate] Counting ${prepValue} working days for preparation...`);
 
+  // Check if today counts as prep day 1
+  if (isDayAvailableForPrepTime(currentDate, teamMembers)) {
+    workingDaysCount = 1;
+    console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Today counts as prep day 1/${prepValue}`);
+  }
+
+  // Count remaining prep days from tomorrow
   while (workingDaysCount < prepValue && iterations < maxIterations) {
     iterations++;
     currentDate = addDuration(currentDate, 1, 'days');
@@ -675,7 +727,9 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
     }
   }
 
-  console.log(`[getEarliestBookableDate] After ${prepValue} working days prep: ${currentDate.toISOString()}`);
+  // Move to next day after prep is complete (earliest bookable is day AFTER prep ends)
+  currentDate = addDuration(currentDate, 1, 'days');
+  console.log(`[getEarliestBookableDate] After ${prepValue} working days prep, earliest bookable: ${currentDate.toISOString()}`);
 
   // After prep time, find the first available day for actual work
   const maxSearchDays = 120;
@@ -690,7 +744,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
 
     // For hours mode, also check time slots
     if (mode === 'hours') {
-      const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours);
+      const hasSlots = await hasAvailableTimeSlots(project, currentDate, teamMembers, executionHours, mode);
       if (!hasSlots) {
         console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - No time slots available`);
         currentDate = addDuration(currentDate, 1, 'days');
@@ -938,9 +992,11 @@ export const calculateFirstAvailableDate = async (
   project: IProject
 ): Promise<string | null> => {
   try {
+    const executionContext = getExecutionContext(project);
+    const mode = getModeFromExecutionContext(executionContext);
     console.log(`[calculateFirstAvailableDate] Starting for project ${project._id}`);
-    console.log(`[calculateFirstAvailableDate] Time mode: ${project.timeMode}`);
-    console.log(`[calculateFirstAvailableDate] Preparation duration:`, project.preparationDuration);
+    console.log(`[calculateFirstAvailableDate] Mode (from execution unit): ${mode}`);
+    console.log(`[calculateFirstAvailableDate] Preparation duration:`, executionContext.preparation);
 
     // Get schedule proposals which include throughput-constrained suggestions
     const proposals = await getScheduleProposalsForProject(
@@ -983,10 +1039,9 @@ export const getScheduleProposalsForProject = async (
   const project = await Project.findById(projectId);
   if (!project) return null;
 
-  const mode: "hours" | "days" =
-    project.timeMode || project.executionDuration?.unit || "days";
-
   const executionContext = getExecutionContext(project, options);
+  const mode: "hours" | "days" = getModeFromExecutionContext(executionContext);
+
   const earliestBookableDate = await getEarliestBookableDate(project, options);
 
   if (!executionContext.executionDuration) {
@@ -1001,12 +1056,15 @@ export const getScheduleProposalsForProject = async (
     executionContext.executionDuration.unit
   );
 
-  // Buffer duration is optional, default to 0 if not set
+  // Buffer duration - blocks professional's calendar but NOT shown in client completion
   const bufferHours = executionContext.bufferDuration
     ? toHours(executionContext.bufferDuration.value, executionContext.bufferDuration.unit)
     : 0;
 
-  const totalHours = executionHours + bufferHours;
+  // Client sees completion based on execution only (not buffer)
+  // Buffer is used internally for calendar blocking
+  const clientVisibleHours = executionHours;
+  const totalHoursForCalendarBlocking = executionHours + bufferHours;
 
   // Separate execution and buffer for formula calculations
   const executionDays = Math.max(1, Math.ceil(executionHours / HOURS_PER_DAY));
@@ -1145,6 +1203,7 @@ export const getScheduleProposalsForProject = async (
 
   if (!teamMembers.length) {
     // No team members with availability information; fall back to simple proposals.
+    // Client sees completion based on execution only (buffer is internal)
     const fallbackStart = startOfDay(earliestBookableDate);
     if (mode === "hours") {
       return {
@@ -1152,22 +1211,22 @@ export const getScheduleProposalsForProject = async (
         earliestBookableDate,
         earliestProposal: {
           start: fallbackStart,
-          end: addDuration(fallbackStart, totalHours, "hours"),
+          end: addDuration(fallbackStart, clientVisibleHours, "hours"),
         },
       };
     }
 
-    const durationDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
+    const clientVisibleDays = Math.max(1, Math.ceil(clientVisibleHours / HOURS_PER_DAY));
     return {
       mode,
       earliestBookableDate,
       earliestProposal: {
         start: fallbackStart,
-        end: addDuration(fallbackStart, durationDays, "days"),
+        end: addDuration(fallbackStart, clientVisibleDays, "days"),
       },
       shortestThroughputProposal: {
         start: fallbackStart,
-        end: addDuration(fallbackStart, durationDays, "days"),
+        end: addDuration(fallbackStart, clientVisibleDays, "days"),
       },
     };
   }
@@ -1198,7 +1257,8 @@ export const getScheduleProposalsForProject = async (
   if (mode === "hours") {
     // Hours mode: All resources must be available for the entire project duration.
     // We look for the earliest window where ALL minResources are continuously available.
-    const requiredDurationHours = totalHours;
+    // Use totalHoursForCalendarBlocking to ensure buffer time is blocked on professional's calendar
+    const requiredDurationHours = totalHoursForCalendarBlocking;
     const requiredDays = Math.max(
       1,
       Math.ceil(requiredDurationHours / HOURS_PER_DAY)
@@ -1241,10 +1301,11 @@ export const getScheduleProposalsForProject = async (
       const [startHour, startMin] = earliestStartTime.split(':').map(Number);
       startDate.setHours(startHour, startMin, 0, 0);
 
-      const end = addDuration(startDate, requiredDurationHours, "hours");
-      earliestWindow = { start: startDate, end };
+      // Client sees end based on execution only (buffer is internal for calendar blocking)
+      const clientVisibleEnd = addDuration(startDate, clientVisibleHours, "hours");
+      earliestWindow = { start: startDate, end: clientVisibleEnd };
       console.log(
-        `[getScheduleProposals] Hours mode window: start=${startDate.toISOString()}, end=${end.toISOString()}, durationHours=${requiredDurationHours}`
+        `[getScheduleProposals] Hours mode window: start=${startDate.toISOString()}, clientEnd=${clientVisibleEnd.toISOString()}, executionHours=${clientVisibleHours}, bufferHours=${bufferHours}`
       );
       break;
     }
@@ -1268,7 +1329,8 @@ export const getScheduleProposalsForProject = async (
   // Throughput = calendar days from start to completion (including gaps)
   // Earliest: max throughput = execution × 2 (100% flexibility)
   // Shortest: max throughput = execution × 1.2 (20% flexibility)
-  const totalDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
+  // Use clientVisibleHours for client-facing completion (buffer is internal)
+  const totalDays = Math.max(1, Math.ceil(clientVisibleHours / HOURS_PER_DAY));
   const maxThroughputEarliest = executionDays * 2; // execution × 2
   const maxThroughputShortest = Math.max(
     executionDays,
