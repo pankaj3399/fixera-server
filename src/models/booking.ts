@@ -549,7 +549,6 @@ BookingSchema.index({ 'location.coordinates': '2dsphere' }); // Geospatial queri
 BookingSchema.index({ createdAt: -1 }); // Sort by creation date
 BookingSchema.index({ scheduledStartDate: 1 }); // Upcoming bookings
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
-BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 
 // Pre-save middleware to generate booking number
 BookingSchema.pre('save', async function(next) {
