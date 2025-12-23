@@ -501,12 +501,6 @@ const getModeFromExecutionContext = (executionContext: ReturnType<typeof getExec
 export const getEarliestBookableDate = async (project: IProject, options?: ScheduleOptions): Promise<Date> => {
   let now = new Date();
 
-  // Consider current day as "over" after 5 PM - start from next day
-  const CUTOFF_HOUR = 17; // 5 PM
-  if (now.getHours() >= CUTOFF_HOUR) {
-    now = startOfDay(addDuration(now, 1, "days"));
-  }
-
   const executionContext = getExecutionContext(project, options);
   const mode: "hours" | "days" = getModeFromExecutionContext(executionContext);
   const prepValue = executionContext.preparation.value;
@@ -535,6 +529,44 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
   const teamMembers: IUser[] = resourceIds.length
     ? await User.find({ _id: { $in: resourceIds } })
     : [];
+
+  // Check if current day is "over" based on professional's working hours
+  const dayKey = getWeekdayKey(now);
+  let dayIsOver = false;
+
+  if (teamMembers.length > 0) {
+    // Get the latest end time among team members for today
+    let latestEndHour = 17; // Default 5 PM if no availability set
+    let latestEndMin = 0;
+
+    for (const member of teamMembers) {
+      const dayAvailability = member.availability?.[dayKey];
+      if (dayAvailability?.available && dayAvailability.endTime) {
+        const [endHour, endMin] = dayAvailability.endTime.split(':').map(Number);
+        if (endHour > latestEndHour || (endHour === latestEndHour && endMin > latestEndMin)) {
+          latestEndHour = endHour;
+          latestEndMin = endMin;
+        }
+      }
+    }
+
+    // Check if current time is past the working hours end time
+    const currentHour = now.getHours();
+    const currentMin = now.getMinutes();
+    if (currentHour > latestEndHour || (currentHour === latestEndHour && currentMin >= latestEndMin)) {
+      dayIsOver = true;
+    }
+  } else {
+    // No team members - use default 5 PM cutoff
+    if (now.getHours() >= 17) {
+      dayIsOver = true;
+    }
+  }
+
+  if (dayIsOver) {
+    now = startOfDay(addDuration(now, 1, "days"));
+    console.log(`[getEarliestBookableDate] Current day is over, starting from: ${now.toISOString()}`);
+  }
 
   // Helper to calculate total blocked hours from ranges on a specific day
   const calculateBlockedHoursFromRanges = (date: Date, ranges: Array<{ startDate: Date; endDate: Date }>): number => {
@@ -668,6 +700,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
   }
 
   // For days-based preparation, count only working days (not blocked by bookings or team)
+  // Today counts as prep day 1 if it's a working day (and working hours haven't ended - checked above)
   let workingDaysCount = 0;
   let currentDate = startOfDay(now);
   const maxIterations = prepValue * 5; // Safety limit
@@ -675,6 +708,13 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
 
   console.log(`[getEarliestBookableDate] Counting ${prepValue} working days for preparation...`);
 
+  // Check if today counts as prep day 1
+  if (isDayAvailableForPrepTime(currentDate, teamMembers)) {
+    workingDaysCount = 1;
+    console.log(`[getEarliestBookableDate] ${currentDate.toISOString().split('T')[0]} - Today counts as prep day 1/${prepValue}`);
+  }
+
+  // Count remaining prep days from tomorrow
   while (workingDaysCount < prepValue && iterations < maxIterations) {
     iterations++;
     currentDate = addDuration(currentDate, 1, 'days');
@@ -687,7 +727,9 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
     }
   }
 
-  console.log(`[getEarliestBookableDate] After ${prepValue} working days prep: ${currentDate.toISOString()}`);
+  // Move to next day after prep is complete (earliest bookable is day AFTER prep ends)
+  currentDate = addDuration(currentDate, 1, 'days');
+  console.log(`[getEarliestBookableDate] After ${prepValue} working days prep, earliest bookable: ${currentDate.toISOString()}`);
 
   // After prep time, find the first available day for actual work
   const maxSearchDays = 120;
