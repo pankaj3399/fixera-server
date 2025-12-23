@@ -214,14 +214,23 @@ const isDayBlockedByBooking = (
     return totalBookedHours > PARTIAL_BLOCK_THRESHOLD_HOURS;
   }
 
-  // For days mode, block if any booking overlaps with this day
+  // For days mode, also apply the 4-hour threshold
+  // A day is only blocked if total booked hours exceed 4 hours
+  let totalBookedHours = 0;
+
   for (const booking of existingBookings) {
     // Check scheduled dates first
     if (booking.scheduledStartDate && booking.scheduledEndDate) {
       const bookingStart = new Date(booking.scheduledStartDate);
       const bookingEnd = new Date(booking.scheduledEndDate);
+
+      // Check if booking overlaps with this day
       if (dayStart < bookingEnd && dayEnd > bookingStart) {
-        return true;
+        // Calculate hours booked on this specific day
+        const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+        const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+        const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+        totalBookedHours += hoursOnThisDay;
       }
       continue;
     }
@@ -245,19 +254,41 @@ const isDayBlockedByBooking = (
 
     if (bookingExecutionHours <= 0) continue;
 
+    // For days mode bookings without time, assume full-day block
+    if (!booking.rfqData.preferredStartTime) {
+      const bookingStart = new Date(booking.rfqData.preferredStartDate);
+      bookingStart.setHours(0, 0, 0, 0);
+
+      const durationDays = Math.ceil(bookingExecutionHours / 24);
+      const bookingEnd = new Date(bookingStart);
+      bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+
+      if (dayStart < bookingEnd && dayEnd > bookingStart) {
+        // Full-day booking blocks the entire day
+        return true;
+      }
+      continue;
+    }
+
+    // Hours-based booking with specific time
     const bookingStart = new Date(booking.rfqData.preferredStartDate);
-    bookingStart.setHours(0, 0, 0, 0);
+    const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+    bookingStart.setHours(hours, minutes, 0, 0);
 
-    const durationDays = Math.ceil(bookingExecutionHours / 24);
     const bookingEnd = new Date(bookingStart);
-    bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+    bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
 
+    // Check if booking overlaps with this day
     if (dayStart < bookingEnd && dayEnd > bookingStart) {
-      return true;
+      const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+      const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+      const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+      totalBookedHours += hoursOnThisDay;
     }
   }
 
-  return false;
+  // Only block day if total booked hours exceed threshold (4 hours)
+  return totalBookedHours > PARTIAL_BLOCK_THRESHOLD_HOURS;
 };
 
 /**
@@ -1158,13 +1189,22 @@ export const getScheduleProposalsForProject = async (
       return totalBookedHours > PARTIAL_BLOCK_THRESHOLD_HOURS;
     }
 
-    // For days mode, block if any booking overlaps with this day
+    // For days mode, also apply the 4-hour threshold
+    // A day is only blocked if total booked hours exceed 4 hours
+    let totalBookedHours = 0;
+
     for (const booking of existingBookings) {
       if (booking.scheduledStartDate && booking.scheduledEndDate) {
         const bookingStart = new Date(booking.scheduledStartDate);
         const bookingEnd = new Date(booking.scheduledEndDate);
+
+        // Check if booking overlaps with this day
         if (dayStart < bookingEnd && dayEnd > bookingStart) {
-          return true;
+          // Calculate hours booked on this specific day
+          const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+          const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+          const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+          totalBookedHours += hoursOnThisDay;
         }
         continue;
       }
@@ -1186,19 +1226,41 @@ export const getScheduleProposalsForProject = async (
 
       if (bookingExecutionHours <= 0) continue;
 
+      // For days mode bookings without time, assume full-day block
+      if (!booking.rfqData.preferredStartTime) {
+        const bookingStart = new Date(booking.rfqData.preferredStartDate);
+        bookingStart.setHours(0, 0, 0, 0);
+
+        const durationDays = Math.ceil(bookingExecutionHours / 24);
+        const bookingEnd = new Date(bookingStart);
+        bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+
+        if (dayStart < bookingEnd && dayEnd > bookingStart) {
+          // Full-day booking blocks the entire day
+          return true;
+        }
+        continue;
+      }
+
+      // Hours-based booking with specific time
       const bookingStart = new Date(booking.rfqData.preferredStartDate);
-      bookingStart.setHours(0, 0, 0, 0);
+      const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+      bookingStart.setHours(hours, minutes, 0, 0);
 
-      const durationDays = Math.ceil(bookingExecutionHours / 24);
       const bookingEnd = new Date(bookingStart);
-      bookingEnd.setDate(bookingEnd.getDate() + durationDays);
+      bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
 
+      // Check if booking overlaps with this day
       if (dayStart < bookingEnd && dayEnd > bookingStart) {
-        return true;
+        const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
+        const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
+        const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
+        totalBookedHours += hoursOnThisDay;
       }
     }
 
-    return false;
+    // Only block day if total booked hours exceed threshold (4 hours)
+    return totalBookedHours > PARTIAL_BLOCK_THRESHOLD_HOURS;
   };
 
   if (!teamMembers.length) {
