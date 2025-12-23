@@ -697,6 +697,25 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
         searchIterations++;
         continue;
       }
+
+      // For hours mode, set the actual start time based on professional's working hours
+      const dayKey = getWeekdayKey(currentDate);
+      let earliestStartTime = "09:00"; // Default
+
+      for (const member of teamMembers) {
+        const dayAvailability = member.availability?.[dayKey];
+        if (dayAvailability?.available && dayAvailability.startTime) {
+          if (dayAvailability.startTime < earliestStartTime) {
+            earliestStartTime = dayAvailability.startTime;
+          }
+        }
+      }
+
+      const [startHour, startMin] = earliestStartTime.split(':').map(Number);
+      currentDate.setHours(startHour, startMin, 0, 0);
+
+      console.log(`[getEarliestBookableDate] ✅ First available date/time: ${currentDate.toISOString()}`);
+      return currentDate;
     }
 
     console.log(`[getEarliestBookableDate] ✅ First available date: ${currentDate.toISOString()}`);
@@ -911,10 +930,7 @@ const meetsOverlapRequirement = (
 };
 
 /**
- * Calculate the first available date for a project.
- * This is a simplified calculation that returns the earliest date when work can start,
- * considering preparation time and team member availability.
- *
+
  * @param project - The project to calculate availability for
  * @returns The first available date as an ISO string, or null if cannot be determined
  */
@@ -926,18 +942,34 @@ export const calculateFirstAvailableDate = async (
     console.log(`[calculateFirstAvailableDate] Time mode: ${project.timeMode}`);
     console.log(`[calculateFirstAvailableDate] Preparation duration:`, project.preparationDuration);
 
-    const earliestBookableDate = await getEarliestBookableDate(project);
+    // Get schedule proposals which include throughput-constrained suggestions
+    const proposals = await getScheduleProposalsForProject(
+      (project._id as any).toString()
+    );
 
-    if (!earliestBookableDate) {
-      console.warn(`[calculateFirstAvailableDate] ⚠️ No earliest bookable date found for project ${project._id}`);
-      return null;
+    if (!proposals) {
+      console.warn(`[calculateFirstAvailableDate] ⚠️ Could not get schedule proposals for project ${project._id}`);
+      // Fallback to basic earliest bookable date
+      const earliestBookableDate = await getEarliestBookableDate(project);
+      return earliestBookableDate?.toISOString() || null;
     }
 
-    const isoDate = earliestBookableDate.toISOString();
-    console.log(`[calculateFirstAvailableDate] ✅ Earliest bookable date: ${isoDate}`);
+    // Use earliestProposal.start if available (this respects throughput limits)
+    if (proposals.earliestProposal?.start) {
+      const isoDate = proposals.earliestProposal.start.toISOString();
+      console.log(`[calculateFirstAvailableDate] ✅ Using earliestProposal.start: ${isoDate}`);
+      return isoDate;
+    }
 
-    // Return the earliest bookable date as ISO string
-    return isoDate;
+    // Fallback to earliestBookableDate if no proposal found
+    if (proposals.earliestBookableDate) {
+      const isoDate = proposals.earliestBookableDate.toISOString();
+      console.log(`[calculateFirstAvailableDate] ✅ Fallback to earliestBookableDate: ${isoDate}`);
+      return isoDate;
+    }
+
+    console.warn(`[calculateFirstAvailableDate] ⚠️ No available date found for project ${project._id}`);
+    return null;
   } catch (error) {
     console.error('Error calculating first available date for project:', error);
     return null;
@@ -1189,49 +1221,132 @@ export const getScheduleProposalsForProject = async (
       // Check if we have enough resources available for entire duration
       if (availableAcrossAllDays.length < minResources) continue;
 
-      const start = windowDays[0].date;
-      const end = addDuration(start, requiredDurationHours, "hours");
-      earliestWindow = { start, end };
+      // For hours mode, set the start time to the professional's working hours start time
+      const startDate = new Date(windowDays[0].date);
+      const dayKey = getWeekdayKey(startDate);
+
+      // Get the earliest start time from available members
+      let earliestStartTime = "09:00"; // Default
+      for (const member of availableAcrossAllDays) {
+        const dayAvailability = member.availability?.[dayKey];
+        if (dayAvailability?.available && dayAvailability.startTime) {
+          // Use the earliest start time among available members
+          if (dayAvailability.startTime < earliestStartTime) {
+            earliestStartTime = dayAvailability.startTime;
+          }
+        }
+      }
+
+      // Set the actual start time
+      const [startHour, startMin] = earliestStartTime.split(':').map(Number);
+      startDate.setHours(startHour, startMin, 0, 0);
+
+      const end = addDuration(startDate, requiredDurationHours, "hours");
+      earliestWindow = { start: startDate, end };
+      console.log(
+        `[getScheduleProposals] Hours mode window: start=${startDate.toISOString()}, end=${end.toISOString()}, durationHours=${requiredDurationHours}`
+      );
       break;
+    }
+
+    if (!earliestWindow) {
+      console.log(
+        "[getScheduleProposals] Hours mode: no continuous window found for required resources"
+      );
     }
 
     return {
       mode,
       earliestBookableDate,
       earliestProposal: earliestWindow,
+      // Hours mode requires continuous work, so earliest == shortest throughput.
+      shortestThroughputProposal: earliestWindow,
     };
   }
 
   // Days mode: compute duration and throughput limits.
-  // NEW FORMULA: (execution + X%) + buffer
-  // Earliest: (execution + 100%) + buffer
-  // Shortest: (execution + 20%) + buffer
+  // Throughput = calendar days from start to completion (including gaps)
+  // Earliest: max throughput = execution × 2 (100% flexibility)
+  // Shortest: max throughput = execution × 1.2 (20% flexibility)
   const totalDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
-  const maxThroughputEarliest = (executionDays * 2) + bufferDays; // (execution + 100%) + buffer
+  const maxThroughputEarliest = executionDays * 2; // execution × 2
   const maxThroughputShortest = Math.max(
+    executionDays,
+    Math.floor(executionDays * 1.2)
+  ); // execution × 1.2
+
+  console.log(`[getScheduleProposals] Days mode parameters:`, {
+    executionDays,
+    bufferDays,
     totalDays,
-    Math.floor(executionDays * 1.2) + bufferDays
-  ); // (execution + 20%) + buffer
+    maxThroughputEarliest,
+    maxThroughputShortest,
+    minResources,
+    teamMembersCount: teamMembers.length,
+  });
 
   let earliestProposal: TimeWindow | undefined;
   let shortestThroughputProposal: TimeWindow | undefined;
 
-  // EARLIEST POSSIBLE: Find earliest contiguous block where primary person (earliest availability)
-  // and other resources meet overlap requirements
+  // Helper to calculate completion date and throughput for a given start date
+  // Returns { completionDate, throughput } where throughput is calendar days
+  const calculateCompletionForStart = (
+    startIndex: number,
+    requiredWorkingDays: number
+  ): { completionDate: Date; throughput: number } | null => {
+    let workingDaysCount = 0;
+    let currentIndex = startIndex;
+
+    // First, check if start day is available and count it
+    if (availabilityByDay[currentIndex]?.availableMembers.length >= minResources) {
+      workingDaysCount = 1;
+    } else {
+      // Start day must be available
+      return null;
+    }
+
+    // Count remaining working days
+    while (workingDaysCount < requiredWorkingDays && currentIndex < availabilityByDay.length - 1) {
+      currentIndex++;
+      if (availabilityByDay[currentIndex]?.availableMembers.length >= minResources) {
+        workingDaysCount++;
+      }
+    }
+
+    if (workingDaysCount < requiredWorkingDays) {
+      return null;
+    }
+
+    const startDate = availabilityByDay[startIndex].date;
+    const completionDate = availabilityByDay[currentIndex].date;
+    const throughput = Math.round(
+      (completionDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
+    ) + 1; // +1 because both start and end are included
+
+    return { completionDate, throughput };
+  };
+
+  // EARLIEST POSSIBLE: Find earliest start date where throughput ≤ execution × 2
   if (minResources === 1) {
     // Single resource - simple case
-    for (let i = 0; i <= MAX_SEARCH_DAYS - totalDays; i++) {
-      const windowDays = availabilityByDay.slice(i, i + totalDays);
-      const allDaysHaveResource = windowDays.every(
-        (d) => d.availableMembers.length >= 1
-      );
+    for (let i = 0; i < availabilityByDay.length; i++) {
+      // Skip if this day is not available
+      if (availabilityByDay[i].availableMembers.length < 1) continue;
 
-      if (!allDaysHaveResource) continue;
+      const result = calculateCompletionForStart(i, executionDays);
+      if (!result) continue;
 
-      const start = windowDays[0].date;
-      const end = addDuration(start, totalDays, "days");
-      earliestProposal = { start, end };
-      break;
+      // Check if throughput is within limit
+      if (result.throughput <= maxThroughputEarliest) {
+        const start = availabilityByDay[i].date;
+        // End date is completion + buffer days (add 1 for exclusive end)
+        const end = addDuration(result.completionDate, bufferDays + 1, "days");
+        earliestProposal = { start, end };
+        console.log(`[getScheduleProposals] Found earliestProposal: start=${start.toISOString().split('T')[0]}, throughput=${result.throughput}, max=${maxThroughputEarliest}`);
+        break;
+      } else {
+        console.log(`[getScheduleProposals] Skipping ${availabilityByDay[i].date.toISOString().split('T')[0]}: throughput=${result.throughput} > max=${maxThroughputEarliest}`);
+      }
     }
   } else {
     // Multiple resources - need primary person selection and overlap calculation
@@ -1264,81 +1379,82 @@ export const getScheduleProposalsForProject = async (
         (m) => (m._id as any).toString() !== (primaryMember!._id as any).toString()
       );
 
-      // Search for earliest window where primary + others meet overlap requirements
-      for (let length = totalDays; length <= maxThroughputEarliest; length++) {
-        let found = false;
-        for (let i = 0; i <= MAX_SEARCH_DAYS - length; i++) {
-          const windowDays = availabilityByDay.slice(i, i + length);
-          const windowDates = windowDays.map((d) => d.date);
+      // Search for earliest start where throughput ≤ maxThroughputEarliest
+      for (let i = 0; i < availabilityByDay.length; i++) {
+        // Skip if not enough resources on this day
+        if (availabilityByDay[i].availableMembers.length < minResources) continue;
 
-          // Check if primary member is available enough days
-          const primaryAvailableDays = windowDays.filter((d) =>
-            d.availableMembers.some(
-              (m) => (m._id as any).toString() === (primaryMember!._id as any).toString()
-            )
-          );
+        const result = calculateCompletionForStart(i, executionDays);
+        if (!result) continue;
 
-          if (primaryAvailableDays.length < totalDays) continue;
+        // Check throughput limit
+        if (result.throughput > maxThroughputEarliest) continue;
 
-          // Check if we have enough total resources per day
-          const hasEnoughResources = windowDays.every((d) => {
-            const count = d.availableMembers.filter((m) => {
-              const mId = (m._id as any).toString();
-              const primaryId = (primaryMember!._id as any).toString();
-              return (
-                mId === primaryId ||
-                otherMembers.some((om) => (om._id as any).toString() === mId)
-              );
-            }).length;
-            return count >= minResources;
-          });
+        // Get the window for overlap checking
+        const windowEnd = Math.min(
+          i + result.throughput,
+          availabilityByDay.length
+        );
+        const windowDays = availabilityByDay.slice(i, windowEnd);
+        const windowDates = windowDays.map((d) => d.date);
 
-          if (!hasEnoughResources) continue;
-
-          // Check overlap requirement with other members
-          if (
-            otherMembers.length > 0 &&
-            !meetsOverlapRequirement(
-              primaryMember!,
-              otherMembers,
-              windowDates,
-              minOverlapPercentage,
-              mode
-            )
-          ) {
-            continue;
-          }
-
-          const start = windowDays[0].date;
-          const end = addDuration(start, length, "days");
-          earliestProposal = { start, end };
-          found = true;
-          break;
+        // Check overlap requirement with other members
+        if (
+          otherMembers.length > 0 &&
+          !meetsOverlapRequirement(
+            primaryMember!,
+            otherMembers,
+            windowDates,
+            minOverlapPercentage,
+            mode
+          )
+        ) {
+          continue;
         }
-        if (found) break;
+
+        const start = availabilityByDay[i].date;
+        const end = addDuration(result.completionDate, bufferDays + 1, "days");
+        earliestProposal = { start, end };
+        console.log(`[getScheduleProposals] Found earliestProposal (multi): start=${start.toISOString().split('T')[0]}, throughput=${result.throughput}`);
+        break;
       }
     }
   }
 
+  // SHORTEST THROUGHPUT: Find start date with the minimum possible throughput
+  // Prefer dates where throughput ≤ execution × 1.2, but if none exist, find the absolute minimum
   if (minResources === 1) {
     // Single resource - simple case
-    for (let length = totalDays; length <= maxThroughputShortest; length++) {
-      let found = false;
-      for (let i = 0; i <= MAX_SEARCH_DAYS - length; i++) {
-        const windowDays = availabilityByDay.slice(i, i + length);
-        const allDaysHaveResource = windowDays.every(
-          (d) => d.availableMembers.length >= 1
-        );
+    let bestThroughput = Infinity;
+    let bestStart: Date | undefined;
+    let bestEnd: Date | undefined;
 
-        if (!allDaysHaveResource) continue;
+    for (let i = 0; i < availabilityByDay.length; i++) {
+      // Skip if this day is not available
+      if (availabilityByDay[i].availableMembers.length < 1) continue;
 
-        const start = windowDays[0].date;
-        const end = addDuration(start, length, "days");
-        shortestThroughputProposal = { start, end };
-        found = true;
-        break;
+      const result = calculateCompletionForStart(i, executionDays);
+      if (!result) continue;
+
+      // Track the shortest throughput found (regardless of limit)
+      if (result.throughput < bestThroughput) {
+        bestThroughput = result.throughput;
+        bestStart = availabilityByDay[i].date;
+        bestEnd = addDuration(result.completionDate, bufferDays + 1, "days");
+        console.log(`[getScheduleProposals] Found candidate shortestThroughput: start=${bestStart.toISOString().split('T')[0]}, throughput=${result.throughput}, max=${maxThroughputShortest}`);
+
+        // If we found a perfect match (throughput = execution), no need to search further
+        if (result.throughput === executionDays) {
+          break;
+        }
       }
-      if (found) break;
+    }
+
+    if (bestStart && bestEnd) {
+      shortestThroughputProposal = { start: bestStart, end: bestEnd };
+      console.log(`[getScheduleProposals] Final shortestThroughputProposal: start=${bestStart.toISOString().split('T')[0]}, throughput=${bestThroughput}, withinLimit=${bestThroughput <= maxThroughputShortest}`);
+    } else {
+      console.log(`[getScheduleProposals] No shortestThroughputProposal found. executionDays=${executionDays}`);
     }
   } else {
     // Multiple resources - select primary person with MOST availability
@@ -1359,61 +1475,106 @@ export const getScheduleProposalsForProject = async (
         (m) => (m._id as any).toString() !== (primaryMember!._id as any).toString()
       );
 
-      // Search for shortest window where primary + others meet overlap requirements
-      for (let length = totalDays; length <= maxThroughputShortest; length++) {
-        let found = false;
-        for (let i = 0; i <= MAX_SEARCH_DAYS - length; i++) {
-          const windowDays = availabilityByDay.slice(i, i + length);
-          const windowDates = windowDays.map((d) => d.date);
+      // Search for shortest throughput where throughput ≤ maxThroughputShortest.
+      // If no option fits under that ceiling, fall back to the absolute best throughput window.
+      let bestWithinLimit:
+        | { throughput: number; start: Date; end: Date }
+        | undefined;
+      let bestOverall:
+        | { throughput: number; start: Date; end: Date }
+        | undefined;
 
-          // Check if primary member is available enough days
-          const primaryAvailableDays = windowDays.filter((d) =>
-            d.availableMembers.some(
-              (m) => (m._id as any).toString() === (primaryMember!._id as any).toString()
-            )
-          );
+      for (let i = 0; i < availabilityByDay.length; i++) {
+        // Skip if not enough resources on this day
+        if (availabilityByDay[i].availableMembers.length < minResources) continue;
 
-          if (primaryAvailableDays.length < totalDays) continue;
+        const result = calculateCompletionForStart(i, executionDays);
+        if (!result) continue;
 
-          // Check if we have enough total resources per day
-          const hasEnoughResources = windowDays.every((d) => {
-            const count = d.availableMembers.filter((m) => {
-              const mId = (m._id as any).toString();
-              const primaryId = (primaryMember!._id as any).toString();
-              return (
-                mId === primaryId ||
-                otherMembers.some((om) => (om._id as any).toString() === mId)
-              );
-            }).length;
-            return count >= minResources;
-          });
+        const candidate = {
+          throughput: result.throughput,
+          start: availabilityByDay[i].date,
+          end: addDuration(result.completionDate, bufferDays + 1, "days"),
+        };
+        const exceedsLimit = candidate.throughput > maxThroughputShortest;
+        const worseThanBestWithinLimit =
+          !exceedsLimit &&
+          bestWithinLimit &&
+          candidate.throughput >= bestWithinLimit.throughput;
 
-          if (!hasEnoughResources) continue;
+        if (worseThanBestWithinLimit) {
+          continue;
+        }
 
-          // Check overlap requirement with other members
+        // Get the window for overlap checking
+        const windowEnd = Math.min(
+          i + result.throughput,
+          availabilityByDay.length
+        );
+        const windowDays = availabilityByDay.slice(i, windowEnd);
+        const windowDates = windowDays.map((d) => d.date);
+
+        // Check overlap requirement with other members
+        if (
+          otherMembers.length > 0 &&
+          !meetsOverlapRequirement(
+            primaryMember!,
+            otherMembers,
+            windowDates,
+            minOverlapPercentage,
+            mode
+          )
+        ) {
+          continue;
+        }
+
+        if (!bestOverall || candidate.throughput < bestOverall.throughput) {
+          bestOverall = candidate;
+        }
+
+        if (!exceedsLimit) {
           if (
-            otherMembers.length > 0 &&
-            !meetsOverlapRequirement(
-              primaryMember!,
-              otherMembers,
-              windowDates,
-              minOverlapPercentage,
-              mode
-            )
+            !bestWithinLimit ||
+            candidate.throughput < bestWithinLimit.throughput
           ) {
-            continue;
+            bestWithinLimit = candidate;
           }
+        }
 
-          const start = windowDays[0].date;
-          const end = addDuration(start, length, "days");
-          shortestThroughputProposal = { start, end };
-          found = true;
+        // If we found a perfect match (throughput = execution), no need to search further
+        if (candidate.throughput === executionDays) {
           break;
         }
-        if (found) break;
+      }
+
+      const chosenCandidate = bestWithinLimit || bestOverall;
+
+      if (chosenCandidate) {
+        shortestThroughputProposal = {
+          start: chosenCandidate.start,
+          end: chosenCandidate.end,
+        };
+        console.log(
+          `[getScheduleProposals] Final shortestThroughputProposal (multi): start=${chosenCandidate.start
+            .toISOString()
+            .split("T")[0]}, throughput=${chosenCandidate.throughput}, withinLimit=${
+            chosenCandidate.throughput <= maxThroughputShortest
+          }`
+        );
+      } else {
+        console.log(
+          `[getScheduleProposals] No shortestThroughputProposal found (multi). maxThroughputShortest=${maxThroughputShortest}, executionDays=${executionDays}`
+        );
       }
     }
   }
+
+  console.log(`[getScheduleProposals] Returning proposals:`, {
+    mode,
+    earliestBookableDate: earliestBookableDate?.toISOString().split('T')[0],
+    earliestProposal: earliestProposal ? `${earliestProposal.start.toISOString().split('T')[0]} -> ${earliestProposal.end.toISOString().split('T')[0]}` : null,
+    shortestThroughputProposal: shortestThroughputProposal ? `${shortestThroughputProposal.start.toISOString().split('T')[0]} -> ${shortestThroughputProposal.end.toISOString().split('T')[0]}` : null,
+  });
 
   return {
     mode,
