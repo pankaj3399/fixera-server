@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { IUser } from "../models/user";
+import { normalizeBlockedRangesForShortBookings } from "../utils/blockedRanges";
 // Handler to get current authenticated user
 export const GetCurrentUser = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -43,7 +44,7 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         serviceCategories: user.serviceCategories,
         availability: user.availability,
         blockedDates: user.blockedDates,
-        blockedRanges: user.blockedRanges,
+        blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
         companyAvailability: user.companyAvailability,
         companyBlockedDates: user.companyBlockedDates,
         companyBlockedRanges: user.companyBlockedRanges,

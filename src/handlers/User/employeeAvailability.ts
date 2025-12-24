@@ -3,6 +3,7 @@ import User from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
+import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
 
 // They can only block specific dates
 export const updateEmployeeAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {
@@ -103,7 +104,7 @@ export const updateEmployeeAvailability = async (req: Request, res: Response, ne
       msg: "Blocked dates updated successfully",
       data: {
         blockedDates: user.blockedDates,
-        blockedRanges: user.blockedRanges
+        blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges)
       }
     });
 
@@ -164,7 +165,7 @@ export const getEmployeeEffectiveAvailability = async (req: Request, res: Respon
       data: {
         availability: professional.companyAvailability || {},
         blockedDates: user.blockedDates || [],
-        blockedRanges: user.blockedRanges || [],
+        blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges) || [],
         companyBlockedDates: professional.companyBlockedDates || [],
         companyBlockedRanges: professional.companyBlockedRanges || []
       }

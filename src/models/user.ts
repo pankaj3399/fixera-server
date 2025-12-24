@@ -72,6 +72,7 @@ export interface IUser extends Document {
         endDate: Date;
         reason?: string;
         createdAt?: Date;
+        executionEndDate?: Date;
     }[];
     // Company-wide availability (for team members to inherit)
     companyAvailability?: {
@@ -94,6 +95,7 @@ export interface IUser extends Document {
         reason?: string;
         isHoliday?: boolean;
         createdAt?: Date;
+        executionEndDate?: Date;
     }[];
     profileCompletedAt?: Date;
     // Loyalty system fields
@@ -295,7 +297,8 @@ const UserSchema = new Schema({
         startDate: { type: Date, required: true },
         endDate: { type: Date, required: true },
         reason: { type: String, required: false, maxlength: 200 },
-        createdAt: { type: Date, default: Date.now }
+        createdAt: { type: Date, default: Date.now },
+        executionEndDate: { type: Date }
     }],
     companyAvailability: {
         monday: {
@@ -344,7 +347,8 @@ const UserSchema = new Schema({
         endDate: { type: Date, required: true },
         reason: { type: String, required: false, maxlength: 200 },
         isHoliday: { type: Boolean, default: false },
-        createdAt: { type: Date, default: Date.now }
+        createdAt: { type: Date, default: Date.now },
+        executionEndDate: { type: Date }
     }],
     profileCompletedAt: {
         type: Date,

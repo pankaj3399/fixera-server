@@ -6,6 +6,7 @@ import bcrypt from 'bcrypt';
 import { sendTeamMemberInvitationEmail } from "../../utils/emailService";
 import crypto from 'crypto';
 import mongoose from 'mongoose';
+import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
 
 // Generate random password
 const generatePassword = (): string => {
@@ -257,7 +258,7 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
                     managedByCompany: member.employee?.managedByCompany,
                     availability: member.availability,
                     blockedDates: member.blockedDates,
-                    blockedRanges: member.blockedRanges
+                    blockedRanges: normalizeBlockedRangesForShortBookings(member.blockedRanges)
                 })),
                 totalCount: employees.length
             }

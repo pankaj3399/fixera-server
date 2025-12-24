@@ -131,11 +131,70 @@ const isDayAvailableForPrepTime = (
  */
 const PARTIAL_BLOCK_THRESHOLD_HOURS = 4;
 
+const getBookingExecutionHours = (
+  booking: { selectedSubprojectIndex?: number },
+  project: IProject
+): number => {
+  if (
+    typeof booking.selectedSubprojectIndex === "number" &&
+    project.subprojects?.[booking.selectedSubprojectIndex]
+  ) {
+    const subproject = project.subprojects[booking.selectedSubprojectIndex];
+    const execDuration = subproject?.executionDuration;
+    if (execDuration?.value) {
+      const unit = (execDuration.unit || "days") as "hours" | "days";
+      return toHours(execDuration.value, unit);
+    }
+  }
+
+  const projectExecution = project.executionDuration;
+  if (projectExecution?.value) {
+    const unit = (projectExecution.unit || "days") as "hours" | "days";
+    return toHours(projectExecution.value, unit);
+  }
+
+  return 0;
+};
+
+const getScheduledExecutionRange = (
+  booking: {
+    scheduledStartDate?: Date;
+    scheduledEndDate?: Date;
+    scheduledExecutionEndDate?: Date;
+    selectedSubprojectIndex?: number;
+  },
+  project: IProject
+): { start: Date; end: Date } | null => {
+  if (!booking.scheduledStartDate) {
+    return null;
+  }
+
+  const bookingStart = new Date(booking.scheduledStartDate);
+  if (booking.scheduledExecutionEndDate) {
+    return { start: bookingStart, end: new Date(booking.scheduledExecutionEndDate) };
+  }
+
+  const executionHours = getBookingExecutionHours(booking, project);
+
+  if (executionHours > 0) {
+    const executionEnd = new Date(bookingStart);
+    executionEnd.setHours(executionEnd.getHours() + executionHours);
+    return { start: bookingStart, end: executionEnd };
+  }
+
+  if (booking.scheduledEndDate) {
+    return { start: bookingStart, end: new Date(booking.scheduledEndDate) };
+  }
+
+  return null;
+};
+
 const isDayBlockedByBooking = (
   day: Date,
   existingBookings: Array<{
     scheduledStartDate?: Date;
     scheduledEndDate?: Date;
+    scheduledExecutionEndDate?: Date;
     rfqData?: {
       preferredStartDate?: Date;
       preferredStartTime?: string;
@@ -158,14 +217,10 @@ const isDayBlockedByBooking = (
     let totalBookedHours = 0;
 
     for (const booking of existingBookings) {
-      // Check scheduled dates first
-      if (booking.scheduledStartDate && booking.scheduledEndDate) {
-        const bookingStart = new Date(booking.scheduledStartDate);
-        const bookingEnd = new Date(booking.scheduledEndDate);
-
-        // Check if booking overlaps with this day
+      const scheduledRange = getScheduledExecutionRange(booking, project);
+      if (scheduledRange) {
+        const { start: bookingStart, end: bookingEnd } = scheduledRange;
         if (dayStart < bookingEnd && dayEnd > bookingStart) {
-          // Calculate hours booked on this specific day
           const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
           const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
           const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
@@ -174,23 +229,9 @@ const isDayBlockedByBooking = (
         continue;
       }
 
-      // Fall back to rfqData
       if (!booking.rfqData?.preferredStartDate) continue;
 
-      // Get execution duration from the selected subproject or project
-      let bookingExecutionHours = 0;
-      if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
-        const subproject = project.subprojects[booking.selectedSubprojectIndex];
-        const execDuration = subproject.executionDuration;
-        if (execDuration) {
-          bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
-        }
-      } else if (project.executionDuration) {
-        bookingExecutionHours = project.executionDuration.unit === 'hours'
-          ? (project.executionDuration.value || 0)
-          : (project.executionDuration.value || 0) * 24;
-      }
-
+      const bookingExecutionHours = getBookingExecutionHours(booking, project);
       if (bookingExecutionHours <= 0) continue;
 
       if (booking.rfqData.preferredStartTime) {
@@ -201,7 +242,6 @@ const isDayBlockedByBooking = (
         const bookingEnd = new Date(bookingStart);
         bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
 
-        // Check if booking overlaps with this day
         if (dayStart < bookingEnd && dayEnd > bookingStart) {
           const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
           const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
@@ -220,14 +260,10 @@ const isDayBlockedByBooking = (
   let totalBookedHours = 0;
 
   for (const booking of existingBookings) {
-    // Check scheduled dates first
-    if (booking.scheduledStartDate && booking.scheduledEndDate) {
-      const bookingStart = new Date(booking.scheduledStartDate);
-      const bookingEnd = new Date(booking.scheduledEndDate);
-
-      // Check if booking overlaps with this day
+    const scheduledRange = getScheduledExecutionRange(booking, project);
+    if (scheduledRange) {
+      const { start: bookingStart, end: bookingEnd } = scheduledRange;
       if (dayStart < bookingEnd && dayEnd > bookingStart) {
-        // Calculate hours booked on this specific day
         const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
         const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
         const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
@@ -236,27 +272,16 @@ const isDayBlockedByBooking = (
       continue;
     }
 
-    // Fall back to rfqData
     if (!booking.rfqData?.preferredStartDate) continue;
 
-    // Get execution duration from the selected subproject or project
-    let bookingExecutionHours = 0;
-    if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
-      const subproject = project.subprojects[booking.selectedSubprojectIndex];
-      const execDuration = subproject.executionDuration;
-      if (execDuration) {
-        bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
-      }
-    } else if (project.executionDuration) {
-      bookingExecutionHours = project.executionDuration.unit === 'hours'
-        ? (project.executionDuration.value || 0)
-        : (project.executionDuration.value || 0) * 24;
-    }
-
+    const bookingExecutionHours = getBookingExecutionHours(booking, project);
     if (bookingExecutionHours <= 0) continue;
 
-    // For days mode bookings without time, assume full-day block
     if (!booking.rfqData.preferredStartTime) {
+      if (bookingExecutionHours <= PARTIAL_BLOCK_THRESHOLD_HOURS) {
+        continue;
+      }
+
       const bookingStart = new Date(booking.rfqData.preferredStartDate);
       bookingStart.setHours(0, 0, 0, 0);
 
@@ -265,13 +290,11 @@ const isDayBlockedByBooking = (
       bookingEnd.setDate(bookingEnd.getDate() + durationDays);
 
       if (dayStart < bookingEnd && dayEnd > bookingStart) {
-        // Full-day booking blocks the entire day
         return true;
       }
       continue;
     }
 
-    // Hours-based booking with specific time
     const bookingStart = new Date(booking.rfqData.preferredStartDate);
     const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
     bookingStart.setHours(hours, minutes, 0, 0);
@@ -279,7 +302,6 @@ const isDayBlockedByBooking = (
     const bookingEnd = new Date(bookingStart);
     bookingEnd.setHours(bookingEnd.getHours() + bookingExecutionHours);
 
-    // Check if booking overlaps with this day
     if (dayStart < bookingEnd && dayEnd > bookingStart) {
       const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
       const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
@@ -545,7 +567,7 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
   const existingBookings = await Booking.find({
     project: project._id,
     status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] }
-  }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
+  }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate scheduledExecutionEndDate');
 
   console.log(`[getEarliestBookableDate] Found ${existingBookings.length} existing bookings for project ${project._id}`);
 
@@ -600,15 +622,47 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
     console.log(`[getEarliestBookableDate] Current day is over, starting from: ${now.toISOString()}`);
   }
 
+  const bookingExecutionRanges = new Map<string, { start: Date; end: Date }>();
+  for (const booking of existingBookings as any[]) {
+    const bookingId = booking?._id?.toString();
+    if (!bookingId) continue;
+    const range = getScheduledExecutionRange(booking, project);
+    if (range) {
+      bookingExecutionRanges.set(bookingId, range);
+    }
+  }
+
   // Helper to calculate total blocked hours from ranges on a specific day
-  const calculateBlockedHoursFromRanges = (date: Date, ranges: Array<{ startDate: Date; endDate: Date }>): number => {
+  const calculateBlockedHoursFromRanges = (
+    date: Date,
+    ranges: Array<{
+      startDate: Date;
+      endDate: Date;
+      reason?: string;
+      executionEndDate?: Date;
+    }>
+  ): number => {
     const dayStart = startOfDay(date);
     const dayEnd = addDuration(dayStart, 1, "days");
     let totalBlockedHours = 0;
 
     for (const range of ranges) {
       const rangeStart = new Date(range.startDate);
-      const rangeEnd = new Date(range.endDate);
+      let rangeEnd = range.executionEndDate
+        ? new Date(range.executionEndDate)
+        : new Date(range.endDate);
+
+      if (
+        !range.executionEndDate &&
+        typeof range.reason === "string" &&
+        range.reason.startsWith("project-booking:")
+      ) {
+        const bookingId = range.reason.split(":")[1];
+        const override = bookingExecutionRanges.get(bookingId);
+        if (override) {
+          rangeEnd = new Date(override.end);
+        }
+      }
 
       // Check if range overlaps with this day
       if (rangeStart < dayEnd && rangeEnd > dayStart) {
@@ -812,7 +866,11 @@ export const getEarliestBookableDate = async (project: IProject, options?: Sched
   return currentDate;
 };
 
-const calculateBlockedHoursForDay = (member: IUser, day: Date): number => {
+const calculateBlockedHoursForDay = (
+  member: IUser,
+  day: Date,
+  bookingRangeOverrides?: Map<string, { start: Date; end: Date }>
+): number => {
   const dayKey = getWeekdayKey(day);
   const availability = member.availability || undefined;
   const dayAvailability = availability?.[dayKey];
@@ -859,7 +917,22 @@ const calculateBlockedHoursForDay = (member: IUser, day: Date): number => {
 
     // Calculate overlap between range and this day's working hours
     const rangeStart = new Date(range.startDate);
-    const rangeEnd = new Date(range.endDate);
+    let rangeEnd = range.executionEndDate
+      ? new Date(range.executionEndDate)
+      : new Date(range.endDate);
+
+    if (
+      !range.executionEndDate &&
+      bookingRangeOverrides &&
+      typeof range.reason === "string" &&
+      range.reason.startsWith("project-booking:")
+    ) {
+      const bookingId = range.reason.split(":")[1];
+      const override = bookingRangeOverrides.get(bookingId);
+      if (override) {
+        rangeEnd = new Date(override.end);
+      }
+    }
 
     // Clamp range to this day's working hours
     const overlapStart = new Date(Math.max(dayStart.getTime(), rangeStart.getTime()));
@@ -881,7 +954,12 @@ const calculateBlockedHoursForDay = (member: IUser, day: Date): number => {
  * - For DAYS mode: More than 4 hours are blocked on that day
  * - For HOURS mode: Check if there are any available hours at all
  */
-const getAvailableMembersForDay = (members: IUser[], day: Date, mode?: "hours" | "days"): IUser[] => {
+const getAvailableMembersForDay = (
+  members: IUser[],
+  day: Date,
+  mode?: "hours" | "days",
+  bookingRangeOverrides?: Map<string, { start: Date; end: Date }>
+): IUser[] => {
   const dayKey = getWeekdayKey(day);
 
   return members.filter((member) => {
@@ -894,7 +972,7 @@ const getAvailableMembersForDay = (members: IUser[], day: Date, mode?: "hours" |
     }
 
     // Calculate blocked hours
-    const blockedHours = calculateBlockedHoursForDay(member, day);
+    const blockedHours = calculateBlockedHoursForDay(member, day, bookingRangeOverrides);
 
     // Parse working hours for the day to get total available hours
     const startTime = dayAvailability.startTime || "08:00";
@@ -910,7 +988,7 @@ const getAvailableMembersForDay = (members: IUser[], day: Date, mode?: "hours" |
     } else {
       // Days mode: Apply 4-hour rule (if more than 4 hours blocked, day is unavailable)
       // This prevents fragmenting multi-day projects
-      if (blockedHours >= 4) {
+      if (blockedHours > PARTIAL_BLOCK_THRESHOLD_HOURS) {
         return false;
       }
     }
@@ -926,14 +1004,15 @@ const findEarliestAvailabilityPerMember = (
   members: IUser[],
   searchStart: Date,
   maxDays: number,
-  mode: "hours" | "days"
+  mode: "hours" | "days",
+  bookingRangeOverrides?: Map<string, { start: Date; end: Date }>
 ): Map<string, Date> => {
   const result = new Map<string, Date>();
 
   for (const member of members) {
     for (let i = 0; i < maxDays; i++) {
       const day = addDuration(searchStart, i, "days");
-      const availableMembers = getAvailableMembersForDay([member], day, mode);
+      const availableMembers = getAvailableMembersForDay([member], day, mode, bookingRangeOverrides);
 
       if (availableMembers.length > 0) {
         result.set((member._id as any).toString(), day);
@@ -952,14 +1031,15 @@ const countAvailableDays = (
   member: IUser,
   startDate: Date,
   endDate: Date,
-  mode: "hours" | "days"
+  mode: "hours" | "days",
+  bookingRangeOverrides?: Map<string, { start: Date; end: Date }>
 ): number => {
   let count = 0;
   let currentDate = startOfDay(startDate);
   const endDay = startOfDay(endDate);
 
   while (currentDate <= endDay) {
-    const availableMembers = getAvailableMembersForDay([member], currentDate, mode);
+    const availableMembers = getAvailableMembersForDay([member], currentDate, mode, bookingRangeOverrides);
     if (availableMembers.length > 0) {
       count++;
     }
@@ -977,19 +1057,20 @@ const calculateOverlapPercentage = (
   primaryMember: IUser,
   otherMember: IUser,
   windowDays: Date[],
-  mode: "hours" | "days"
+  mode: "hours" | "days",
+  bookingRangeOverrides?: Map<string, { start: Date; end: Date }>
 ): number => {
   if (windowDays.length === 0) return 0;
 
   const primaryAvailableDays = windowDays.filter((day) => {
-    const available = getAvailableMembersForDay([primaryMember], day, mode);
+    const available = getAvailableMembersForDay([primaryMember], day, mode, bookingRangeOverrides);
     return available.length > 0;
   });
 
   if (primaryAvailableDays.length === 0) return 0;
 
   const overlapDays = primaryAvailableDays.filter((day) => {
-    const available = getAvailableMembersForDay([otherMember], day, mode);
+    const available = getAvailableMembersForDay([otherMember], day, mode, bookingRangeOverrides);
     return available.length > 0;
   });
 
@@ -1004,10 +1085,17 @@ const meetsOverlapRequirement = (
   otherMembers: IUser[],
   windowDays: Date[],
   minOverlapPercentage: number,
-  mode: "hours" | "days"
+  mode: "hours" | "days",
+  bookingRangeOverrides?: Map<string, { start: Date; end: Date }>
 ): boolean => {
   for (const otherMember of otherMembers) {
-    const overlap = calculateOverlapPercentage(primaryMember, otherMember, windowDays, mode);
+    const overlap = calculateOverlapPercentage(
+      primaryMember,
+      otherMember,
+      windowDays,
+      mode,
+      bookingRangeOverrides
+    );
     if (overlap < minOverlapPercentage) {
       return false;
     }
@@ -1123,7 +1211,17 @@ export const getScheduleProposalsForProject = async (
   const existingBookings = await Booking.find({
     project: project._id,
     status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] }
-  }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
+  }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate scheduledExecutionEndDate');
+
+  const bookingExecutionRanges = new Map<string, { start: Date; end: Date }>();
+  for (const booking of existingBookings as any[]) {
+    const bookingId = booking?._id?.toString();
+    if (!bookingId) continue;
+    const range = getScheduledExecutionRange(booking, project);
+    if (range) {
+      bookingExecutionRanges.set(bookingId, range);
+    }
+  }
 
   // Helper to check if a day is blocked by an existing booking
   // For hours mode, uses 4-hour threshold (day is blocked only if >4 hours are booked)
@@ -1136,12 +1234,9 @@ export const getScheduleProposalsForProject = async (
       let totalBookedHours = 0;
 
       for (const booking of existingBookings) {
-        // Check scheduled dates first
-        if (booking.scheduledStartDate && booking.scheduledEndDate) {
-          const bookingStart = new Date(booking.scheduledStartDate);
-          const bookingEnd = new Date(booking.scheduledEndDate);
-
-          // Check if booking overlaps with this day
+        const scheduledRange = getScheduledExecutionRange(booking, project);
+        if (scheduledRange) {
+          const { start: bookingStart, end: bookingEnd } = scheduledRange;
           if (dayStart < bookingEnd && dayEnd > bookingStart) {
             const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
             const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
@@ -1151,23 +1246,9 @@ export const getScheduleProposalsForProject = async (
           continue;
         }
 
-        // Fall back to rfqData
         if (!booking.rfqData?.preferredStartDate || !booking.rfqData.preferredStartTime) continue;
 
-        // Get execution duration
-        let bookingExecutionHours = 0;
-        if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
-          const subproject = project.subprojects[booking.selectedSubprojectIndex];
-          const execDuration = subproject.executionDuration;
-          if (execDuration) {
-            bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
-          }
-        } else if (project.executionDuration) {
-          bookingExecutionHours = project.executionDuration.unit === 'hours'
-            ? (project.executionDuration.value || 0)
-            : (project.executionDuration.value || 0) * 24;
-        }
-
+        const bookingExecutionHours = getBookingExecutionHours(booking, project);
         if (bookingExecutionHours <= 0) continue;
 
         const bookingStart = new Date(booking.rfqData.preferredStartDate);
@@ -1195,13 +1276,10 @@ export const getScheduleProposalsForProject = async (
     let totalBookedHours = 0;
 
     for (const booking of existingBookings) {
-      if (booking.scheduledStartDate && booking.scheduledEndDate) {
-        const bookingStart = new Date(booking.scheduledStartDate);
-        const bookingEnd = new Date(booking.scheduledEndDate);
-
-        // Check if booking overlaps with this day
+      const scheduledRange = getScheduledExecutionRange(booking, project);
+      if (scheduledRange) {
+        const { start: bookingStart, end: bookingEnd } = scheduledRange;
         if (dayStart < bookingEnd && dayEnd > bookingStart) {
-          // Calculate hours booked on this specific day
           const overlapStart = bookingStart > dayStart ? bookingStart : dayStart;
           const overlapEnd = bookingEnd < dayEnd ? bookingEnd : dayEnd;
           const hoursOnThisDay = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
@@ -1212,23 +1290,15 @@ export const getScheduleProposalsForProject = async (
 
       if (!booking.rfqData?.preferredStartDate) continue;
 
-      let bookingExecutionHours = 0;
-      if (typeof booking.selectedSubprojectIndex === 'number' && project.subprojects?.[booking.selectedSubprojectIndex]) {
-        const subproject = project.subprojects[booking.selectedSubprojectIndex];
-        const execDuration = subproject.executionDuration;
-        if (execDuration) {
-          bookingExecutionHours = execDuration.unit === 'hours' ? (execDuration.value || 0) : (execDuration.value || 0) * 24;
-        }
-      } else if (project.executionDuration) {
-        bookingExecutionHours = project.executionDuration.unit === 'hours'
-          ? (project.executionDuration.value || 0)
-          : (project.executionDuration.value || 0) * 24;
-      }
-
+      const bookingExecutionHours = getBookingExecutionHours(booking, project);
       if (bookingExecutionHours <= 0) continue;
 
       // For days mode bookings without time, assume full-day block
       if (!booking.rfqData.preferredStartTime) {
+        if (bookingExecutionHours <= PARTIAL_BLOCK_THRESHOLD_HOURS) {
+          continue;
+        }
+
         const bookingStart = new Date(booking.rfqData.preferredStartDate);
         bookingStart.setHours(0, 0, 0, 0);
 
@@ -1312,7 +1382,7 @@ export const getScheduleProposalsForProject = async (
     const isBlockedByBooking = isDayBlockedByBookingLocal(day);
     const availableMembers = isBlockedByBooking
       ? []
-      : getAvailableMembersForDay(teamMembers, day, mode);
+      : getAvailableMembersForDay(teamMembers, day, mode, bookingExecutionRanges);
     availabilityByDay.push({
       date: day,
       availableMembers: availableMembers,
@@ -1488,7 +1558,8 @@ export const getScheduleProposalsForProject = async (
       teamMembers,
       searchStart,
       MAX_SEARCH_DAYS,
-      mode
+      mode,
+      bookingExecutionRanges
     );
 
     // Select primary person: the one with earliest availability
@@ -1539,7 +1610,8 @@ export const getScheduleProposalsForProject = async (
             otherMembers,
             windowDates,
             minOverlapPercentage,
-            mode
+            mode,
+            bookingExecutionRanges
           )
         ) {
           continue;
@@ -1599,7 +1671,13 @@ export const getScheduleProposalsForProject = async (
     let maxAvailableDays = 0;
 
     for (const member of teamMembers) {
-      const availableDays = countAvailableDays(member, searchStart, searchEnd, mode);
+      const availableDays = countAvailableDays(
+        member,
+        searchStart,
+        searchEnd,
+        mode,
+        bookingExecutionRanges
+      );
       if (availableDays > maxAvailableDays) {
         maxAvailableDays = availableDays;
         primaryMember = member;
@@ -1659,7 +1737,8 @@ export const getScheduleProposalsForProject = async (
             otherMembers,
             windowDates,
             minOverlapPercentage,
-            mode
+            mode,
+            bookingExecutionRanges
           )
         ) {
           continue;
