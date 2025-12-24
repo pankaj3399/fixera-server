@@ -4,7 +4,8 @@ import Booking from "../../models/booking";
 
 interface TimeWindow {
   start: Date;
-  end: Date;
+  end: Date; // Buffer end (for professional calendar blocking)
+  executionEnd: Date; // Execution end (for customer display)
 }
 
 interface ScheduleProposals {
@@ -1268,27 +1269,32 @@ export const getScheduleProposalsForProject = async (
     // Client sees completion based on execution only (buffer is internal)
     const fallbackStart = startOfDay(earliestBookableDate);
     if (mode === "hours") {
+      const hoursEnd = addDuration(fallbackStart, clientVisibleHours, "hours");
       return {
         mode,
         earliestBookableDate,
         earliestProposal: {
           start: fallbackStart,
-          end: addDuration(fallbackStart, clientVisibleHours, "hours"),
+          end: hoursEnd,
+          executionEnd: hoursEnd,
         },
       };
     }
 
     const clientVisibleDays = Math.max(1, Math.ceil(clientVisibleHours / HOURS_PER_DAY));
+    const fallbackEnd = addDuration(fallbackStart, clientVisibleDays, "days");
     return {
       mode,
       earliestBookableDate,
       earliestProposal: {
         start: fallbackStart,
-        end: addDuration(fallbackStart, clientVisibleDays, "days"),
+        end: fallbackEnd,
+        executionEnd: fallbackEnd,
       },
       shortestThroughputProposal: {
         start: fallbackStart,
-        end: addDuration(fallbackStart, clientVisibleDays, "days"),
+        end: fallbackEnd,
+        executionEnd: fallbackEnd,
       },
     };
   }
@@ -1365,7 +1371,8 @@ export const getScheduleProposalsForProject = async (
 
       // Client sees end based on execution only (buffer is internal for calendar blocking)
       const clientVisibleEnd = addDuration(startDate, clientVisibleHours, "hours");
-      earliestWindow = { start: startDate, end: clientVisibleEnd };
+      // For hours mode, executionEnd == end (no separate buffer in TimeWindow for hours)
+      earliestWindow = { start: startDate, end: clientVisibleEnd, executionEnd: clientVisibleEnd };
       console.log(
         `[getScheduleProposals] Hours mode window: start=${startDate.toISOString()}, clientEnd=${clientVisibleEnd.toISOString()}, executionHours=${clientVisibleHours}, bufferHours=${bufferHours}`
       );
@@ -1463,10 +1470,12 @@ export const getScheduleProposalsForProject = async (
       // Check if throughput is within limit
       if (result.throughput <= maxThroughputEarliest) {
         const start = availabilityByDay[i].date;
-        // End date is completion + buffer days (add 1 for exclusive end)
+        // executionEnd is the actual last day of execution (inclusive)
+        const executionEnd = result.completionDate;
+        // end (bufferEnd) is completion + buffer days (add 1 for exclusive end)
         const end = addDuration(result.completionDate, bufferDays + 1, "days");
-        earliestProposal = { start, end };
-        console.log(`[getScheduleProposals] Found earliestProposal: start=${start.toISOString().split('T')[0]}, throughput=${result.throughput}, max=${maxThroughputEarliest}`);
+        earliestProposal = { start, end, executionEnd };
+        console.log(`[getScheduleProposals] Found earliestProposal: start=${start.toISOString().split('T')[0]}, executionEnd=${executionEnd.toISOString().split('T')[0]}, bufferEnd=${end.toISOString().split('T')[0]}, throughput=${result.throughput}, max=${maxThroughputEarliest}`);
         break;
       } else {
         console.log(`[getScheduleProposals] Skipping ${availabilityByDay[i].date.toISOString().split('T')[0]}: throughput=${result.throughput} > max=${maxThroughputEarliest}`);
@@ -1537,9 +1546,10 @@ export const getScheduleProposalsForProject = async (
         }
 
         const start = availabilityByDay[i].date;
+        const executionEnd = result.completionDate;
         const end = addDuration(result.completionDate, bufferDays + 1, "days");
-        earliestProposal = { start, end };
-        console.log(`[getScheduleProposals] Found earliestProposal (multi): start=${start.toISOString().split('T')[0]}, throughput=${result.throughput}`);
+        earliestProposal = { start, end, executionEnd };
+        console.log(`[getScheduleProposals] Found earliestProposal (multi): start=${start.toISOString().split('T')[0]}, executionEnd=${executionEnd.toISOString().split('T')[0]}, throughput=${result.throughput}`);
         break;
       }
     }
@@ -1552,6 +1562,7 @@ export const getScheduleProposalsForProject = async (
     let bestThroughput = Infinity;
     let bestStart: Date | undefined;
     let bestEnd: Date | undefined;
+    let bestExecutionEnd: Date | undefined;
 
     for (let i = 0; i < availabilityByDay.length; i++) {
       // Skip if this day is not available
@@ -1564,8 +1575,9 @@ export const getScheduleProposalsForProject = async (
       if (result.throughput < bestThroughput) {
         bestThroughput = result.throughput;
         bestStart = availabilityByDay[i].date;
+        bestExecutionEnd = result.completionDate;
         bestEnd = addDuration(result.completionDate, bufferDays + 1, "days");
-        console.log(`[getScheduleProposals] Found candidate shortestThroughput: start=${bestStart.toISOString().split('T')[0]}, throughput=${result.throughput}, max=${maxThroughputShortest}`);
+        console.log(`[getScheduleProposals] Found candidate shortestThroughput: start=${bestStart.toISOString().split('T')[0]}, executionEnd=${bestExecutionEnd.toISOString().split('T')[0]}, throughput=${result.throughput}, max=${maxThroughputShortest}`);
 
         // If we found a perfect match (throughput = execution), no need to search further
         if (result.throughput === executionDays) {
@@ -1574,9 +1586,9 @@ export const getScheduleProposalsForProject = async (
       }
     }
 
-    if (bestStart && bestEnd) {
-      shortestThroughputProposal = { start: bestStart, end: bestEnd };
-      console.log(`[getScheduleProposals] Final shortestThroughputProposal: start=${bestStart.toISOString().split('T')[0]}, throughput=${bestThroughput}, withinLimit=${bestThroughput <= maxThroughputShortest}`);
+    if (bestStart && bestEnd && bestExecutionEnd) {
+      shortestThroughputProposal = { start: bestStart, end: bestEnd, executionEnd: bestExecutionEnd };
+      console.log(`[getScheduleProposals] Final shortestThroughputProposal: start=${bestStart.toISOString().split('T')[0]}, executionEnd=${bestExecutionEnd.toISOString().split('T')[0]}, throughput=${bestThroughput}, withinLimit=${bestThroughput <= maxThroughputShortest}`);
     } else {
       console.log(`[getScheduleProposals] No shortestThroughputProposal found. executionDays=${executionDays}`);
     }
@@ -1602,10 +1614,10 @@ export const getScheduleProposalsForProject = async (
       // Search for shortest throughput where throughput ≤ maxThroughputShortest.
       // If no option fits under that ceiling, fall back to the absolute best throughput window.
       let bestWithinLimit:
-        | { throughput: number; start: Date; end: Date }
+        | { throughput: number; start: Date; executionEnd: Date; end: Date }
         | undefined;
       let bestOverall:
-        | { throughput: number; start: Date; end: Date }
+        | { throughput: number; start: Date; executionEnd: Date; end: Date }
         | undefined;
 
       for (let i = 0; i < availabilityByDay.length; i++) {
@@ -1618,6 +1630,7 @@ export const getScheduleProposalsForProject = async (
         const candidate = {
           throughput: result.throughput,
           start: availabilityByDay[i].date,
+          executionEnd: result.completionDate,
           end: addDuration(result.completionDate, bufferDays + 1, "days"),
         };
         const exceedsLimit = candidate.throughput > maxThroughputShortest;
@@ -1677,9 +1690,12 @@ export const getScheduleProposalsForProject = async (
         shortestThroughputProposal = {
           start: chosenCandidate.start,
           end: chosenCandidate.end,
+          executionEnd: chosenCandidate.executionEnd,
         };
         console.log(
           `[getScheduleProposals] Final shortestThroughputProposal (multi): start=${chosenCandidate.start
+            .toISOString()
+            .split("T")[0]}, executionEnd=${chosenCandidate.executionEnd
             .toISOString()
             .split("T")[0]}, throughput=${chosenCandidate.throughput}, withinLimit=${
             chosenCandidate.throughput <= maxThroughputShortest
@@ -1710,15 +1726,19 @@ export const getScheduleProposalsForProject = async (
       Math.max(0, executionDays - 1),
       "days"
     );
+    const fallbackExecutionEnd = completionDate;
     const fallbackEnd = addDuration(completionDate, bufferDays + 1, "days");
     shortestThroughputProposal = {
       start: fallbackStart,
       end: fallbackEnd,
+      executionEnd: fallbackExecutionEnd,
     };
     console.log(
       `[getScheduleProposals] Applied fallback shortestThroughputProposal: start=${shortestThroughputProposal.start
         .toISOString()
-        .split("T")[0]}, end=${shortestThroughputProposal.end
+        .split("T")[0]}, executionEnd=${shortestThroughputProposal.executionEnd
+        .toISOString()
+        .split("T")[0]}, bufferEnd=${shortestThroughputProposal.end
         .toISOString()
         .split("T")[0]}`
     );

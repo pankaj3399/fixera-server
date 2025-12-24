@@ -641,7 +641,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     if (schedulePlan && bookingType === 'project') {
-      bookingData.scheduledEndDate = schedulePlan.scheduleEnd;
+      bookingData.scheduledEndDate = schedulePlan.bufferEnd;
     }
 
     const booking = await Booking.create(bookingData);
@@ -1084,7 +1084,8 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
         });
 
         booking.scheduledStartDate = scheduleStart;
-        booking.scheduledEndDate = scheduleEnd;
+        // Use bufferEnd for scheduledEndDate so professional's calendar is blocked including buffer time
+        booking.scheduledEndDate = bufferEnd;
         await booking.save();
 
         // Block execution + buffer in team calendars via blockedRanges with a reason tag.
