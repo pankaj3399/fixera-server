@@ -1693,6 +1693,37 @@ export const getScheduleProposalsForProject = async (
     }
   }
 
+  const buildFallbackStart = (): Date => {
+    if (earliestProposal?.start) {
+      return earliestProposal.start;
+    }
+    const firstAvailableDay = availabilityByDay.find(
+      (day) => day.availableMembers.length >= minResources
+    )?.date;
+    return firstAvailableDay || startOfDay(earliestBookableDate);
+  };
+
+  if (!shortestThroughputProposal) {
+    const fallbackStart = buildFallbackStart();
+    const completionDate = addDuration(
+      fallbackStart,
+      Math.max(0, executionDays - 1),
+      "days"
+    );
+    const fallbackEnd = addDuration(completionDate, bufferDays + 1, "days");
+    shortestThroughputProposal = {
+      start: fallbackStart,
+      end: fallbackEnd,
+    };
+    console.log(
+      `[getScheduleProposals] Applied fallback shortestThroughputProposal: start=${shortestThroughputProposal.start
+        .toISOString()
+        .split("T")[0]}, end=${shortestThroughputProposal.end
+        .toISOString()
+        .split("T")[0]}`
+    );
+  }
+
   console.log(`[getScheduleProposals] Returning proposals:`, {
     mode,
     earliestBookableDate: earliestBookableDate?.toISOString().split('T')[0],
