@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import Meeting from '../../models/meeting';
 import User from '../../models/user';
 import Project from '../../models/project';
+import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
 
 /**
  * Get employees' availability for a specific date range
@@ -70,7 +71,9 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
             }) || [];
 
             // Get blocked ranges that overlap with the requested range
-            const blockedRangesInRange = member.blockedRanges?.filter(range => {
+            const blockedRangesInRange = normalizeBlockedRangesForShortBookings(
+                member.blockedRanges
+            )?.filter(range => {
                 const rangeStart = new Date(range.startDate);
                 const rangeEnd = new Date(range.endDate);
                 return rangeStart <= end && rangeEnd >= start;
@@ -107,7 +110,9 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
                         const blockedDate = new Date(blocked.date);
                         return blockedDate >= start && blockedDate <= end;
                     }) || [],
-                    blockedRanges: professional?.companyBlockedRanges?.filter(range => {
+                    blockedRanges: normalizeBlockedRangesForShortBookings(
+                        professional?.companyBlockedRanges
+                    )?.filter(range => {
                         const rangeStart = new Date(range.startDate);
                         const rangeEnd = new Date(range.endDate);
                         return rangeStart <= end && rangeEnd >= start;

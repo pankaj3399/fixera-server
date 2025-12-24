@@ -642,6 +642,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
 
     if (schedulePlan && bookingType === 'project') {
       bookingData.scheduledEndDate = schedulePlan.bufferEnd;
+      bookingData.scheduledExecutionEndDate = schedulePlan.scheduleEnd;
     }
 
     const booking = await Booking.create(bookingData);
@@ -663,6 +664,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
               blockedRanges: {
                 startDate: schedulePlan.scheduleStart,
                 endDate: schedulePlan.bufferEnd,
+                executionEndDate: schedulePlan.scheduleEnd,
                 reason,
                 createdAt: new Date(),
               },
@@ -1086,6 +1088,7 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
         booking.scheduledStartDate = scheduleStart;
         // Use bufferEnd for scheduledEndDate so professional's calendar is blocked including buffer time
         booking.scheduledEndDate = bufferEnd;
+        booking.scheduledExecutionEndDate = scheduleEnd;
         await booking.save();
 
         // Block execution + buffer in team calendars via blockedRanges with a reason tag.
@@ -1117,6 +1120,7 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
                   blockedRanges: {
                     startDate: scheduleStart,
                     endDate: bufferEnd,
+                    executionEndDate: scheduleEnd,
                     reason,
                     createdAt: new Date(),
                   },

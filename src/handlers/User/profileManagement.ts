@@ -4,6 +4,7 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
+import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
 
 // Upload ID proof
 export const uploadIdProof = async (req: Request, res: Response, next: NextFunction) => {
@@ -373,7 +374,7 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       serviceCategories: user.serviceCategories,
       availability: user.availability,
       blockedDates: user.blockedDates,
-      blockedRanges: user.blockedRanges,
+      blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
       companyAvailability: user.companyAvailability,
       companyBlockedDates: user.companyBlockedDates,
       companyBlockedRanges: user.companyBlockedRanges,

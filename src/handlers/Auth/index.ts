@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import generateToken from "../../utils/functions";
+import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
 import { generateOTP, sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail } from "../../utils/emailService";
 import twilio from 'twilio';
 import mongoose from "mongoose";
@@ -238,7 +239,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       serviceCategories: user.serviceCategories,
       availability: user.availability,
       blockedDates: user.blockedDates,
-      blockedRanges: user.blockedRanges,
+      blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
       profileCompletedAt: user.profileCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,
@@ -443,7 +444,7 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       serviceCategories: user.serviceCategories,
       availability: user.availability,
       blockedDates: user.blockedDates,
-      blockedRanges: user.blockedRanges,
+      blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
       companyAvailability: user.companyAvailability,
       companyBlockedDates: user.companyBlockedDates,
       companyBlockedRanges: user.companyBlockedRanges,

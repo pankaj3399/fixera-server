@@ -330,6 +330,122 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const allBlockedDates = new Set<string>();
     const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
 
+    const PARTIAL_BLOCK_THRESHOLD_HOURS = 4;
+    const bookingIds = new Set<string>();
+
+    teamMembers.forEach((member) => {
+      (member.blockedRanges || []).forEach((range) => {
+        if (typeof range.reason === 'string' && range.reason.startsWith('project-booking:')) {
+          bookingIds.add(range.reason.split(':')[1]);
+        }
+      });
+
+      (member.companyBlockedRanges || []).forEach((range) => {
+        if (typeof range.reason === 'string' && range.reason.startsWith('project-booking:')) {
+          bookingIds.add(range.reason.split(':')[1]);
+        }
+      });
+    });
+
+    const bookingExecutionInfo = new Map<string, { executionHours: number; executionEnd?: Date }>();
+    if (bookingIds.size > 0) {
+      const bookingObjectIds = Array.from(bookingIds)
+        .filter((id) => id)
+        .map((id) => new Types.ObjectId(id));
+
+      const relatedBookings = await Booking.find({ _id: { $in: bookingObjectIds } })
+        .select('project selectedSubprojectIndex scheduledStartDate scheduledExecutionEndDate scheduledEndDate rfqData');
+
+      const relatedProjectIds = Array.from(
+        new Set(
+          relatedBookings
+            .map((b) => b.project?.toString())
+            .filter((id): id is string => Boolean(id))
+        )
+      ).map((id) => new Types.ObjectId(id));
+
+      const relatedProjects = relatedProjectIds.length
+        ? await Project.find({ _id: { $in: relatedProjectIds } })
+            .select('executionDuration subprojects')
+        : [];
+
+      const projectById = new Map(
+        relatedProjects.map((p) => [(p._id as any).toString(), p])
+      );
+
+      const getExecutionHours = (booking: any, bookingProject: any): number => {
+        if (booking.scheduledStartDate && booking.scheduledExecutionEndDate) {
+          const start = new Date(booking.scheduledStartDate);
+          const end = new Date(booking.scheduledExecutionEndDate);
+          const diffHours = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+          if (diffHours > 0) {
+            return diffHours;
+          }
+        }
+
+        if (
+          typeof booking.selectedSubprojectIndex === 'number' &&
+          bookingProject?.subprojects?.[booking.selectedSubprojectIndex]
+        ) {
+          const execDuration = bookingProject.subprojects[booking.selectedSubprojectIndex].executionDuration;
+          if (execDuration?.value) {
+            return execDuration.unit === 'hours'
+              ? execDuration.value
+              : execDuration.value * 24;
+          }
+        }
+
+        if (bookingProject?.executionDuration?.value) {
+          return bookingProject.executionDuration.unit === 'hours'
+            ? bookingProject.executionDuration.value
+            : bookingProject.executionDuration.value * 24;
+        }
+
+        return 0;
+      };
+
+      for (const booking of relatedBookings) {
+        const bookingProject = booking.project
+          ? projectById.get(booking.project.toString())
+          : undefined;
+        if (!bookingProject) {
+          continue;
+        }
+
+        const executionHours = getExecutionHours(booking, bookingProject);
+        let executionEnd: Date | undefined;
+
+        if (booking.scheduledExecutionEndDate) {
+          executionEnd = new Date(booking.scheduledExecutionEndDate);
+        } else {
+          let start: Date | undefined;
+          if (booking.scheduledStartDate) {
+            start = new Date(booking.scheduledStartDate);
+          } else if (booking.rfqData?.preferredStartDate) {
+            start = new Date(booking.rfqData.preferredStartDate);
+            if (booking.rfqData.preferredStartTime) {
+              const [hours, minutes] = booking.rfqData.preferredStartTime.split(':').map(Number);
+              start.setHours(hours, minutes, 0, 0);
+            }
+          }
+
+          if (start && executionHours > 0) {
+            const end = new Date(start);
+            end.setHours(end.getHours() + executionHours);
+            executionEnd = end;
+          } else if (booking.scheduledEndDate) {
+            executionEnd = new Date(booking.scheduledEndDate);
+          }
+        }
+
+        const bookingId = (booking as { _id: Types.ObjectId | string })._id;
+        if (!bookingId) {
+          continue;
+        }
+        bookingExecutionInfo.set(bookingId.toString(), { executionHours, executionEnd });
+      }
+    }
+
     teamMembers.forEach(member => {
       // Add individual blocked dates
       if (member.blockedDates) {
@@ -341,6 +457,23 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       // Add individual blocked ranges
       if (member.blockedRanges) {
         member.blockedRanges.forEach(range => {
+          if (typeof range.reason === 'string' && range.reason.startsWith('project-booking:')) {
+            const bookingId = range.reason.split(':')[1];
+            const execInfo = bookingExecutionInfo.get(bookingId);
+            if (execInfo?.executionHours && execInfo.executionHours <= PARTIAL_BLOCK_THRESHOLD_HOURS) {
+              return;
+            }
+
+            if (execInfo?.executionEnd) {
+              allBlockedRanges.push({
+                startDate: range.startDate.toISOString(),
+                endDate: execInfo.executionEnd.toISOString(),
+                reason: range.reason
+              });
+              return;
+            }
+          }
+
           allBlockedRanges.push({
             startDate: range.startDate.toISOString(),
             endDate: range.endDate.toISOString(),
@@ -359,6 +492,23 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       // Add company blocked ranges
       if (member.companyBlockedRanges) {
         member.companyBlockedRanges.forEach(range => {
+          if (typeof range.reason === 'string' && range.reason.startsWith('project-booking:')) {
+            const bookingId = range.reason.split(':')[1];
+            const execInfo = bookingExecutionInfo.get(bookingId);
+            if (execInfo?.executionHours && execInfo.executionHours <= PARTIAL_BLOCK_THRESHOLD_HOURS) {
+              return;
+            }
+
+            if (execInfo?.executionEnd) {
+              allBlockedRanges.push({
+                startDate: range.startDate.toISOString(),
+                endDate: execInfo.executionEnd.toISOString(),
+                reason: range.reason
+              });
+              return;
+            }
+          }
+
           allBlockedRanges.push({
             startDate: range.startDate.toISOString(),
             endDate: range.endDate.toISOString(),
@@ -368,19 +518,65 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
     });
 
+    const getBookingExecutionHours = (booking: any): number => {
+      if (booking.scheduledStartDate && booking.scheduledExecutionEndDate) {
+        const start = new Date(booking.scheduledStartDate);
+        const end = new Date(booking.scheduledExecutionEndDate);
+        const diffHours = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+        if (diffHours > 0) {
+          return diffHours;
+        }
+      }
+
+      if (
+        typeof booking.selectedSubprojectIndex === 'number' &&
+        project.subprojects?.[booking.selectedSubprojectIndex]
+      ) {
+        const subproject = project.subprojects[booking.selectedSubprojectIndex];
+        const execDuration = subproject.executionDuration;
+        if (execDuration?.value) {
+          return execDuration.unit === 'hours'
+            ? execDuration.value
+            : execDuration.value * 24;
+        }
+      }
+
+      if (project.executionDuration?.value) {
+        return project.executionDuration.unit === 'hours'
+          ? project.executionDuration.value
+          : project.executionDuration.value * 24;
+      }
+
+      return 0;
+    };
+
     // Add existing bookings as blocked ranges (prevent double-booking)
     const existingBookings = await Booking.find({
       project: id,
       status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] }
-    }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate');
+    }).select('rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate scheduledExecutionEndDate');
 
     console.log(`[AVAILABILITY] Found ${existingBookings.length} existing bookings for project ${id}`);
 
     for (const booking of existingBookings) {
       if (booking.scheduledStartDate && booking.scheduledEndDate) {
+        const executionHours = getBookingExecutionHours(booking);
+        if (executionHours <= PARTIAL_BLOCK_THRESHOLD_HOURS) {
+          continue;
+        }
+
+        const bookingStart = new Date(booking.scheduledStartDate);
+        const bookingEnd = booking.scheduledExecutionEndDate
+          ? new Date(booking.scheduledExecutionEndDate)
+          : (() => {
+              const end = new Date(bookingStart);
+              end.setHours(end.getHours() + executionHours);
+              return end;
+            })();
+
         allBlockedRanges.push({
-          startDate: booking.scheduledStartDate.toISOString(),
-          endDate: booking.scheduledEndDate.toISOString(),
+          startDate: bookingStart.toISOString(),
+          endDate: bookingEnd.toISOString(),
           reason: 'Existing booking'
         });
         continue;
@@ -403,6 +599,10 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
 
       if (executionHours <= 0) {
+        continue;
+      }
+
+      if (executionHours <= PARTIAL_BLOCK_THRESHOLD_HOURS) {
         continue;
       }
 
