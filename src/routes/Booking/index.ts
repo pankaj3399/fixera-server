@@ -4,10 +4,10 @@ import {
   getMyBookings,
   getBookingById,
   submitQuote,
-  respondToQuote,
   updateBookingStatus,
   cancelBooking
 } from '../../handlers/Booking';
+import { respondToQuoteWithPayment, ensurePaymentIntent } from '../../handlers/Booking/payment-integration';
 import { protect } from '../../middlewares/auth';
 
 const router = express.Router();
@@ -27,8 +27,9 @@ router.get('/:bookingId', getBookingById);
 // Submit quote - Professional only
 router.post('/:bookingId/quote', submitQuote);
 
-// Respond to quote (accept/reject) - Customer only
-router.post('/:bookingId/respond', respondToQuote);
+// Respond to quote (accept/reject) - Customer only - WITH PAYMENT INTEGRATION
+router.post('/:bookingId/respond', respondToQuoteWithPayment);
+router.post('/:bookingId/payment-intent', ensurePaymentIntent);
 
 // Update booking status
 router.put('/:bookingId/status', updateBookingStatus);

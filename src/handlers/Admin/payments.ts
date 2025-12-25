@@ -1,0 +1,76 @@
+import { Request, Response } from 'express';
+import Payment from '../../models/payment';
+
+export const getPayments = async (req: Request, res: Response) => {
+  try {
+    const { status, page = '1', limit = '25', search } = req.query;
+    const pageNumber = Math.max(parseInt(page as string, 10) || 1, 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit as string, 10) || 25, 5), 100);
+
+    const query: Record<string, any> = {};
+
+    if (status && typeof status === 'string' && status !== 'all') {
+      query.status = status;
+    }
+
+    if (typeof search === 'string' && search.trim().length > 0) {
+      const term = search.trim();
+      const regex = new RegExp(term, 'i');
+      query.$or = [
+        { bookingNumber: regex },
+        { stripePaymentIntentId: regex },
+        { stripeChargeId: regex },
+        { stripeTransferId: regex },
+      ];
+    }
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const [payments, totalCount, statusBreakdown] = await Promise.all([
+      Payment.find(query)
+        .populate('booking', 'status bookingType bookingNumber createdAt')
+        .populate('customer', 'name email')
+        .populate('professional', 'name email businessInfo companyName')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+      Payment.countDocuments(query),
+      Payment.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            totalVolume: { $sum: '$totalWithVat' }
+          }
+        }
+      ])
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        payments,
+        pagination: {
+          page: pageNumber,
+          limit: limitNumber,
+          total: totalCount,
+          totalPages: Math.ceil(totalCount / limitNumber)
+        },
+        stats: statusBreakdown
+          .map(item => ({
+            status: item._id,
+            count: item.count,
+            totalVolume: item.totalVolume
+          }))
+      }
+    });
+  } catch (error: any) {
+    console.error('[ADMIN][PAYMENTS] Failed to fetch payments', error);
+    res.status(500).json({
+      success: false,
+      msg: error?.message || 'Failed to load payments'
+    });
+  }
+};

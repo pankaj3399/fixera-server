@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import Project from "../../models/project";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
+import { getScheduleProposalsForProject } from "./scheduling";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 export const seedData = async (req: Request, res: Response) => {
@@ -212,7 +213,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     const project = await Project.findOne({
       _id: id,
       status: "published",
-    }).populate('professionalId', 'name businessInfo.companyName email phone');
+    }).populate('professionalId', 'name businessInfo email phone');
 
     if (!project) {
       return res.status(404).json({
@@ -319,6 +320,45 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     res.status(500).json({
       success: false,
       error: "Failed to fetch team availability"
+    });
+  }
+};
+
+// Public endpoint - Get schedule proposals for a project (hours/days modes)
+export const getProjectScheduleProposals = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const project = await Project.findOne({
+      _id: id,
+      status: "published",
+    });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published",
+      });
+    }
+
+    const proposals = await getScheduleProposalsForProject(id);
+
+    if (!proposals) {
+      return res.status(404).json({
+        success: false,
+        error: "Unable to generate schedule proposals",
+      });
+    }
+
+    res.json({
+      success: true,
+      proposals,
+    });
+  } catch (error) {
+    console.error("Error fetching project schedule proposals:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch project schedule proposals",
     });
   }
 };

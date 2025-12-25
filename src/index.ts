@@ -14,6 +14,7 @@ import serviceCategoryRouter from './routes/ServiceCategory';
 import professionalRouter from './routes/Professional';
 import searchRouter from './routes/Search';
 import bookingRouter from './routes/Booking';
+import stripeRouter from './routes/Stripe';
 
 dotenv.config();
 
@@ -24,6 +25,8 @@ app.use(cors({
   origin: true, // Reflects the request's Origin header
   credentials: true, // Allow cookies
 }));
+
+app.use('/api/stripe/webhooks', express.raw({ type: 'application/json' }));
 
 // Body and cookie parsers
 app.use(express.json({ limit: '50mb' }));
@@ -54,6 +57,7 @@ app.use('/api/service-categories', serviceCategoryRouter);
 app.use('/api/professionals', professionalRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/bookings', bookingRouter);
+app.use('/api/stripe', stripeRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);

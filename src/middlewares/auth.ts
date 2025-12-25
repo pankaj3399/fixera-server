@@ -20,12 +20,17 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     if (req.cookies && req.cookies['auth-token']) {
       token = req.cookies['auth-token'];
     }
-    
+
+    // 2. Check for Bearer token in Authorization header
+    if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      token = req.headers.authorization.substring(7);
+    }
+
     // 3. If no token found, return unauthorized
     if (!token) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         success: false,
-        msg: 'Access denied. No authentication token provided.' 
+        msg: 'Access denied. No authentication token provided.'
       });
     }
 
@@ -94,6 +99,10 @@ export const authMiddleware = (allowedRoles: string[]) => {
       // Check for token in cookies
       if (req.cookies && req.cookies['auth-token']) {
         token = req.cookies['auth-token'];
+      }
+
+      if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+        token = req.headers.authorization.substring(7);
       }
 
       if (!token) {

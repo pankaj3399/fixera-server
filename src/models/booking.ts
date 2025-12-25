@@ -11,7 +11,8 @@ export type BookingStatus =
   | 'completed'     // Work finished
   | 'cancelled'     // Booking cancelled by either party
   | 'dispute'       // Issue raised
-  | 'refunded';     // Payment refunded
+  | 'refunded'      // Payment refunded
+  | 'expired';      // Payment authorization expired (7-day limit)
 
 export type BookingType = 'professional' | 'project';
 
@@ -40,6 +41,7 @@ export interface IQuote {
 }
 
 export interface IBooking extends Document {
+  _id: Types.ObjectId;
   // Core references
   customer: Types.ObjectId; // Reference to User (customer)
   bookingType: BookingType; // 'professional' or 'project'
@@ -85,15 +87,48 @@ export interface IBooking extends Document {
 
   // Payment information
   payment?: {
+    // Core payment info
     amount: number;
     currency: string;
     method?: 'card' | 'bank_transfer' | 'cash';
-    status: 'pending' | 'completed' | 'failed' | 'refunded';
+    status: 'pending' | 'authorized' | 'completed' | 'failed' | 'refunded' | 'partially_refunded' | 'expired';
+
+    // Stripe Payment Intent fields
     stripePaymentIntentId?: string;
+    stripeClientSecret?: string;
     stripeChargeId?: string;
+    stripeTransferId?: string;
+    stripeDestinationPayment?: string;
+
+    // Financial breakdown
+    stripeFeeAmount?: number;
+    platformCommission: number;
+    professionalPayout: number;
+    netAmount: number;
+    vatAmount: number;
+    vatRate: number;
+    totalWithVat: number;
+
+    // Multi-currency support
+    originalCurrency?: string;
+    fxRate?: number;
+    fxProvider?: 'stripe' | 'fixera';
+
+    // Payment timeline
+    authorizedAt?: Date;
+    capturedAt?: Date;
+    transferredAt?: Date;
     paidAt?: Date;
     refundedAt?: Date;
+
+    // Refund
     refundReason?: string;
+    refundSource?: 'professional' | 'platform' | 'mixed';
+    refundNotes?: string;
+
+    invoiceNumber?: string;
+    invoiceUrl?: string;
+    invoiceGeneratedAt?: Date;
   };
 
   // Scheduling
@@ -191,7 +226,7 @@ const BookingSchema = new Schema({
   // Status and lifecycle
   status: {
     type: String,
-    enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
+    enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded', 'expired'],
     default: 'rfq',
     required: true,
     index: true
@@ -199,7 +234,7 @@ const BookingSchema = new Schema({
   statusHistory: [{
     status: {
       type: String,
-      enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
+      enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded', 'expired'],
       required: true
     },
     timestamp: {
@@ -341,6 +376,7 @@ const BookingSchema = new Schema({
 
   // Payment
   payment: {
+    // Core payment info
     amount: { type: Number, min: 0 },
     currency: {
       type: String,
@@ -353,14 +389,55 @@ const BookingSchema = new Schema({
     },
     status: {
       type: String,
-      enum: ['pending', 'completed', 'failed', 'refunded'],
+      enum: ['pending', 'authorized', 'completed', 'failed', 'refunded', 'partially_refunded', 'expired'],
       default: 'pending'
     },
+
+    // Stripe Payment Intent fields
     stripePaymentIntentId: { type: String },
+    stripeClientSecret: { type: String },
     stripeChargeId: { type: String },
+
+    // Stripe Connect transfer fields
+    stripeTransferId: { type: String },
+    stripeDestinationPayment: { type: String },
+
+    // Financial breakdown
+    stripeFeeAmount: { type: Number },
+    platformCommission: { type: Number, default: 0 },
+    professionalPayout: { type: Number },
+    netAmount: { type: Number },
+    vatAmount: { type: Number },
+    vatRate: { type: Number },
+    totalWithVat: { type: Number },
+
+    // Multi-currency support
+    originalCurrency: { type: String },
+    fxRate: { type: Number },
+    fxProvider: {
+      type: String,
+      enum: ['stripe', 'fixera']
+    },
+
+    // Payment timeline
+    authorizedAt: { type: Date },
+    capturedAt: { type: Date },
+    transferredAt: { type: Date },
     paidAt: { type: Date },
     refundedAt: { type: Date },
-    refundReason: { type: String, maxlength: 500 }
+
+    // Refund metadata
+    refundReason: { type: String, maxlength: 500 },
+    refundSource: {
+      type: String,
+      enum: ['professional', 'platform', 'mixed']
+    },
+    refundNotes: { type: String, maxlength: 1000 },
+
+    // Invoice
+    invoiceNumber: { type: String },
+    invoiceUrl: { type: String },
+    invoiceGeneratedAt: { type: Date }
   },
 
   // Scheduling

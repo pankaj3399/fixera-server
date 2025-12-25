@@ -27,6 +27,7 @@ import {
   getCategories,
   getServicesByCategory
 } from "../../handlers/Admin/serviceConfigurationManagement";
+import { getPayments } from "../../handlers/Admin/payments";
 
 const adminRouter = Router();
 
@@ -59,5 +60,6 @@ adminRouter.route('/service-configurations/:id').get(getServiceConfigurationById
 adminRouter.route('/service-configurations/:id').put(updateServiceConfiguration);
 adminRouter.route('/service-configurations/:id').delete(deleteServiceConfiguration);
 adminRouter.route('/service-configurations/:id/toggle-active').patch(toggleServiceConfigurationActive);
+adminRouter.route('/payments').get(getPayments);
 
 export default adminRouter;
