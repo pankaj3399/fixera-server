@@ -13,6 +13,10 @@ export interface IDistance {
   useCompanyAddress: boolean;
   maxKmRange: number;
   noBorders: boolean;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
 }
 
 export interface IIntakeMeeting {
@@ -56,6 +60,11 @@ export interface IExecutionDuration {
   range?: { min: number; max: number };
 }
 
+export interface IPreparationDuration {
+  value: number;
+  unit: "hours" | "days";
+}
+
 export interface IBuffer {
   value: number;
   unit: "hours" | "days";
@@ -82,6 +91,7 @@ export interface ISubproject {
   included: IIncludedItem[];
   materialsIncluded: boolean;
   materials?: IMaterial[]; // List of materials if materialsIncluded is true
+  preparationDuration?: IPreparationDuration;
   deliveryPreparation: number;
   executionDuration: IExecutionDuration;
   buffer?: IBuffer;
@@ -155,6 +165,8 @@ export interface IProject extends Document {
   intakeMeeting?: IIntakeMeeting;
   renovationPlanning?: IRenovationPlanning;
   resources: string[];
+  minResources?: number;
+  minOverlapPercentage?: number;
   description: string;
   priceModel: string;
   keywords: string[];
@@ -222,6 +234,10 @@ const DistanceSchema = new Schema<IDistance>({
   useCompanyAddress: { type: Boolean, default: false },
   maxKmRange: { type: Number, required: true, min: 1, max: 200 },
   noBorders: { type: Boolean, default: false },
+  coordinates: {
+    latitude: { type: Number, min: -90, max: 90 },
+    longitude: { type: Number, min: -180, max: 180 },
+  },
 });
 
 // Intake Meeting Schema
@@ -278,6 +294,11 @@ const ExecutionDurationSchema = new Schema<IExecutionDuration>({
   },
 });
 
+const PreparationDurationSchema = new Schema<IPreparationDuration>({
+  value: { type: Number, required: true, min: 0 },
+  unit: { type: String, enum: ["hours", "days"], required: true },
+});
+
 // Buffer Schema
 const BufferSchema = new Schema<IBuffer>({
   value: { type: Number, required: true, min: 0 },
@@ -308,6 +329,7 @@ const SubprojectSchema = new Schema<ISubproject>({
   included: [IncludedItemSchema],
   materialsIncluded: { type: Boolean, default: false },
   materials: [MaterialSchema],
+  preparationDuration: { type: PreparationDurationSchema },
   deliveryPreparation: { type: Number, required: true, min: 0 },
   executionDuration: { type: ExecutionDurationSchema, required: true },
   buffer: BufferSchema,
@@ -412,6 +434,8 @@ const ProjectSchema = new Schema<IProject>(
     intakeMeeting: IntakeMeetingSchema,
     renovationPlanning: RenovationPlanningSchema,
     resources: [{ type: String }],
+    minResources: { type: Number, min: 1, default: 1 },
+    minOverlapPercentage: { type: Number, min: 0, max: 100, default: 70 },
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {
       type: String,

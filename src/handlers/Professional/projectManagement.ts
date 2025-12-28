@@ -1,6 +1,39 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 
+const normalizePreparationDuration = (projectData: any) => {
+  if (!Array.isArray(projectData?.subprojects)) {
+    return projectData;
+  }
+
+  const subprojects = projectData.subprojects.map((subproject: any) => {
+    const preparationValue =
+      subproject?.preparationDuration?.value ?? subproject?.deliveryPreparation;
+    if (preparationValue == null) {
+      return subproject;
+    }
+
+    const preparationUnit =
+      subproject?.preparationDuration?.unit ??
+      subproject?.deliveryPreparationUnit ??
+      subproject?.executionDuration?.unit ??
+      "days";
+
+    return {
+      ...subproject,
+      preparationDuration: {
+        value: preparationValue,
+        unit: preparationUnit,
+      },
+    };
+  });
+
+  return {
+    ...projectData,
+    subprojects,
+  };
+};
+
 /**
  * Save project draft (create or update)
  * @route POST /api/user/projects
@@ -8,7 +41,7 @@ import Project from '../../models/project';
 export const saveProjectDraft = async (req: Request, res: Response) => {
   try {
     const userId = String(req.user?._id);
-    const projectData = req.body;
+    const projectData = normalizePreparationDuration(req.body);
 
     let project;
 

@@ -1,8 +1,134 @@
 import { Request, Response } from "express";
 import Project from "../../models/project";
+import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
+import { buildProjectScheduleProposals } from "../../utils/scheduleEngine";
 // import { seedServiceCategories } from '../../scripts/seedProject';
+
+const normalizePreparationDuration = (projectData: any) => {
+  if (!Array.isArray(projectData?.subprojects)) {
+    return projectData;
+  }
+
+  const subprojects = projectData.subprojects.map((subproject: any) => {
+    const preparationValue =
+      subproject?.preparationDuration?.value ?? subproject?.deliveryPreparation;
+    if (preparationValue == null) {
+      return subproject;
+    }
+
+    const preparationUnit =
+      subproject?.preparationDuration?.unit ??
+      subproject?.deliveryPreparationUnit ??
+      subproject?.executionDuration?.unit ??
+      "days";
+
+    return {
+      ...subproject,
+      preparationDuration: {
+        value: preparationValue,
+        unit: preparationUnit,
+      },
+    };
+  });
+
+  return {
+    ...projectData,
+    subprojects,
+  };
+};
+
+const DEFAULT_AVAILABILITY = {
+  monday: { available: true, startTime: "09:00", endTime: "17:00" },
+  tuesday: { available: true, startTime: "09:00", endTime: "17:00" },
+  wednesday: { available: true, startTime: "09:00", endTime: "17:00" },
+  thursday: { available: true, startTime: "09:00", endTime: "17:00" },
+  friday: { available: true, startTime: "09:00", endTime: "17:00" },
+  saturday: { available: false },
+  sunday: { available: false },
+};
+
+const hasAnyAvailability = (availability?: Record<string, any>) => {
+  if (!availability) return false;
+  return Object.values(availability).some(
+    (day) => day?.available || day?.startTime || day?.endTime
+  );
+};
+
+const resolveAvailability = (availability?: Record<string, any>) => {
+  if (!availability || !hasAnyAvailability(availability)) {
+    return { ...DEFAULT_AVAILABILITY };
+  }
+
+  const resolved = { ...DEFAULT_AVAILABILITY } as Record<string, any>;
+  Object.entries(availability).forEach(([day, value]) => {
+    if (!value) return;
+    resolved[day] = { ...resolved[day], ...value };
+  });
+
+  return resolved;
+};
+
+const toIsoDate = (value?: Date | string | null) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+};
+
+const toBlockedRange = (range?: {
+  startDate?: Date | string;
+  endDate?: Date | string;
+  reason?: string;
+}) => {
+  if (!range?.startDate || !range?.endDate) return null;
+  const startDate = toIsoDate(range.startDate);
+  const endDate = toIsoDate(range.endDate);
+  if (!startDate || !endDate) return null;
+  return {
+    startDate,
+    endDate,
+    reason: range.reason,
+  };
+};
+
+const getDateRange = (start?: string, end?: string, fallbackDays = 180) => {
+  const rangeStart = start ? new Date(start) : new Date();
+  const rangeEnd = end ? new Date(end) : new Date(rangeStart);
+
+  if (Number.isNaN(rangeStart.getTime())) {
+    rangeStart.setTime(Date.now());
+  }
+  if (Number.isNaN(rangeEnd.getTime())) {
+    rangeEnd.setTime(rangeStart.getTime());
+  }
+
+  rangeStart.setHours(0, 0, 0, 0);
+  if (!end) {
+    rangeEnd.setDate(rangeStart.getDate() + fallbackDays);
+  }
+  rangeEnd.setHours(0, 0, 0, 0);
+
+  if (rangeEnd <= rangeStart) {
+    rangeEnd.setDate(rangeStart.getDate() + fallbackDays);
+  }
+
+  return { rangeStart, rangeEnd };
+};
+
+const buildWeekendDates = (rangeStart: Date, rangeEnd: Date) => {
+  const weekends: string[] = [];
+  const cursor = new Date(rangeStart);
+  while (cursor <= rangeEnd) {
+    const day = cursor.getDay();
+    if (day === 0 || day === 6) {
+      weekends.push(cursor.toISOString());
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return weekends;
+};
 
 export const seedData = async (req: Request, res: Response) => {
   try {
@@ -62,7 +188,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
     console.log("Project ID from request:", req.body.id);
 
     const professionalId = req.user?.id;
-    const projectData = req.body;
+    const projectData = normalizePreparationDuration(req.body);
 
     if (!professionalId) {
       console.log("❌ No professional ID found");
@@ -238,6 +364,8 @@ export const getPublishedProject = async (req: Request, res: Response) => {
 export const getProjectTeamAvailability = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const startDate = req.query.startDate as string | undefined;
+    const endDate = req.query.endDate as string | undefined;
 
     const project = await Project.findOne({
       _id: id,
@@ -251,74 +379,224 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       });
     }
 
-    // Get all team member IDs from resources
     const teamMemberIds = project.resources || [];
 
-    if (teamMemberIds.length === 0) {
-      return res.json({
-        success: true,
-        blockedDates: [],
-        blockedRanges: []
+    const professional = await User.findById(project.professionalId).select(
+      "companyAvailability companyBlockedDates companyBlockedRanges availability businessInfo.timezone"
+    );
+
+    const { rangeStart, rangeEnd } = getDateRange(startDate, endDate, 180);
+    const weekendDates = buildWeekendDates(rangeStart, rangeEnd);
+
+    const blockedCategories = {
+      weekends: weekendDates,
+      company: {
+        dates: [] as string[],
+        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+      },
+      personal: {
+        dates: [] as string[],
+        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+      },
+      bookings: {
+        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+      },
+    };
+
+    const allBlockedDates = new Set<string>(weekendDates);
+    const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+
+    if (professional?.companyBlockedDates) {
+      professional.companyBlockedDates.forEach((blocked) => {
+        const date = toIsoDate(blocked.date);
+        if (!date) return;
+        blockedCategories.company.dates.push(date);
+        allBlockedDates.add(date);
       });
     }
 
-    // Fetch all team members
-    const teamMembers = await User.find({
-      _id: { $in: teamMemberIds }
-    }).select('blockedDates blockedRanges companyBlockedDates companyBlockedRanges');
+    if (professional?.companyBlockedRanges) {
+      professional.companyBlockedRanges.forEach((range) => {
+        const blockedRange = toBlockedRange(range);
+        if (!blockedRange) return;
+        blockedCategories.company.ranges.push(blockedRange);
+        allBlockedRanges.push(blockedRange);
+      });
+    }
 
-    // Collect all blocked dates (union of all team members)
-    const allBlockedDates = new Set<string>();
-    const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+    const teamMembers =
+      teamMemberIds.length > 0
+        ? await User.find({
+            _id: { $in: teamMemberIds },
+          }).select("blockedDates blockedRanges")
+        : [];
 
-    teamMembers.forEach(member => {
-      // Add individual blocked dates
+    teamMembers.forEach((member) => {
       if (member.blockedDates) {
-        member.blockedDates.forEach(blocked => {
-          allBlockedDates.add(blocked.date.toISOString());
+        member.blockedDates.forEach((blocked) => {
+          const date = toIsoDate(blocked.date);
+          if (!date) return;
+          blockedCategories.personal.dates.push(date);
+          allBlockedDates.add(date);
         });
       }
 
-      // Add individual blocked ranges
       if (member.blockedRanges) {
-        member.blockedRanges.forEach(range => {
-          allBlockedRanges.push({
-            startDate: range.startDate.toISOString(),
-            endDate: range.endDate.toISOString(),
-            reason: range.reason
-          });
+        member.blockedRanges.forEach((range) => {
+          const blockedRange = toBlockedRange(range);
+          if (!blockedRange) return;
+          blockedCategories.personal.ranges.push(blockedRange);
+          allBlockedRanges.push(blockedRange);
         });
       }
+    });
 
-      // Add company blocked dates
-      if (member.companyBlockedDates) {
-        member.companyBlockedDates.forEach(blocked => {
-          allBlockedDates.add(blocked.date.toISOString());
+    const bookingFilter: any = {
+      status: { $nin: ["completed", "cancelled", "refunded"] },
+      scheduledStartDate: { $exists: true, $ne: null },
+      $or: [{ project: project._id }],
+    };
+
+    if (teamMemberIds.length > 0) {
+      bookingFilter.$or.push(
+        { assignedTeamMembers: { $in: teamMemberIds } },
+        { professional: { $in: teamMemberIds } }
+      );
+    }
+
+    const bookings = await Booking.find(bookingFilter).select(
+      "scheduledStartDate executionEndDate bufferStartDate scheduledEndDate status"
+    );
+
+    bookings.forEach((booking) => {
+      // Block the execution period
+      if (booking.scheduledStartDate && booking.executionEndDate) {
+        const blockedRange = toBlockedRange({
+          startDate: booking.scheduledStartDate,
+          endDate: booking.executionEndDate,
+          reason: "booking",
         });
+        if (blockedRange) {
+          blockedCategories.bookings.ranges.push(blockedRange);
+          allBlockedRanges.push(blockedRange);
+        }
       }
+      // Block the buffer period (if exists)
+      if (booking.bufferStartDate && booking.scheduledEndDate && booking.executionEndDate) {
+        const bufferStart = new Date(booking.bufferStartDate).getTime();
+        const execEnd = new Date(booking.executionEndDate).getTime();
 
-      // Add company blocked ranges
-      if (member.companyBlockedRanges) {
-        member.companyBlockedRanges.forEach(range => {
-          allBlockedRanges.push({
-            startDate: range.startDate.toISOString(),
-            endDate: range.endDate.toISOString(),
-            reason: range.reason
-          });
+        // If bufferStartDate equals executionEndDate, buffer is in hours (same day)
+        // Otherwise buffer is in days - extend to end of day to block entire days
+        const isHoursBuffer = bufferStart === execEnd;
+
+        let endDateStr: string;
+        if (isHoursBuffer) {
+          // Hours buffer: use exact scheduledEndDate
+          endDateStr = booking.scheduledEndDate.toISOString();
+        } else {
+          // Days buffer: extend to end of day to block entire days
+          const end = new Date(booking.scheduledEndDate);
+          end.setUTCHours(23, 59, 59, 999);
+          endDateStr = end.toISOString();
+        }
+
+        const bufferRange = toBlockedRange({
+          startDate: booking.bufferStartDate,
+          endDate: endDateStr,
+          reason: "booking-buffer",
         });
+        if (bufferRange) {
+          blockedCategories.bookings.ranges.push(bufferRange);
+          allBlockedRanges.push(bufferRange);
+        }
       }
     });
 
     res.json({
       success: true,
       blockedDates: Array.from(allBlockedDates),
-      blockedRanges: allBlockedRanges
+      blockedRanges: allBlockedRanges,
+      blockedCategories,
     });
   } catch (error) {
     console.error('Error fetching team availability:', error);
     res.status(500).json({
       success: false,
       error: "Failed to fetch team availability"
+    });
+  }
+};
+
+export const getProjectWorkingHours = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const project = await Project.findOne({
+      _id: id,
+      status: "published",
+    }).select("professionalId");
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found",
+      });
+    }
+
+    const professional = await User.findById(project.professionalId).select(
+      "companyAvailability availability businessInfo.timezone"
+    );
+
+    const availability = resolveAvailability(
+      professional?.companyAvailability || professional?.availability
+    );
+
+    res.json({
+      success: true,
+      availability,
+      timezone: professional?.businessInfo?.timezone || "UTC",
+    });
+  } catch (error) {
+    console.error("Error fetching working hours:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch working hours",
+    });
+  }
+};
+
+export const getProjectScheduleProposals = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const subprojectIndexRaw = req.query.subprojectIndex;
+    let subprojectIndex: number | undefined;
+
+    if (typeof subprojectIndexRaw === "string") {
+      const parsed = Number.parseInt(subprojectIndexRaw, 10);
+      if (!Number.isNaN(parsed)) {
+        subprojectIndex = parsed;
+      }
+    }
+
+    const proposals = await buildProjectScheduleProposals(id, subprojectIndex);
+
+    if (!proposals) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      proposals,
+    });
+  } catch (error) {
+    console.error("Error fetching schedule proposals:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch schedule proposals",
     });
   }
 };

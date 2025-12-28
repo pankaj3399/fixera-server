@@ -98,6 +98,8 @@ export interface IBooking extends Document {
 
   // Scheduling
   scheduledStartDate?: Date;
+  executionEndDate?: Date;
+  bufferStartDate?: Date;
   scheduledEndDate?: Date;
   actualStartDate?: Date;
   actualEndDate?: Date;
@@ -365,6 +367,8 @@ const BookingSchema = new Schema({
 
   // Scheduling
   scheduledStartDate: { type: Date },
+  executionEndDate: { type: Date },
+  bufferStartDate: { type: Date },
   scheduledEndDate: { type: Date },
   actualStartDate: { type: Date },
   actualEndDate: { type: Date },

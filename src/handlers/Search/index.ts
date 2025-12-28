@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import User from "../../models/user";
 import Project from "../../models/project";
+import { buildProjectScheduleProposals } from "../../utils/scheduleEngine";
 
 export { getPopularServices } from "./getPopularServices";
 
@@ -18,11 +19,17 @@ export const search = async (req: Request, res: Response) => {
       priceMax,
       category,
       availability,
+      customerLat,
+      customerLon,
+      customerCountry,
+      customerState,
+      customerCity,
+      customerAddress,
       page = "1",
       limit = "20",
     } = req.query;
 
-    console.log('🔍 Search request:', { q, loc, type, priceMin, priceMax, category, availability, page, limit });
+    console.log("dY\"? Search request:", { q, loc, type, priceMin, priceMax, category, availability, customerLat, customerLon, customerCountry, customerState, customerCity, customerAddress, page, limit });
 
     const pageNum = parseInt(page as string, 10);
     const limitNum = parseInt(limit as string, 10);
@@ -48,6 +55,12 @@ export const search = async (req: Request, res: Response) => {
         priceMin as string | undefined,
         priceMax as string | undefined,
         category as string | undefined,
+        customerLat as string | undefined,
+        customerLon as string | undefined,
+        customerCountry as string | undefined,
+        customerState as string | undefined,
+        customerCity as string | undefined,
+        customerAddress as string | undefined,
         skip,
         limitNum
       );
@@ -178,6 +191,12 @@ async function searchProjects(
   priceMin: string | undefined,
   priceMax: string | undefined,
   category: string | undefined,
+  customerLat: string | undefined,
+  customerLon: string | undefined,
+  customerCountry: string | undefined,
+  customerState: string | undefined,
+  customerCity: string | undefined,
+  customerAddress: string | undefined,
   skip: number,
   limit: number
 ) {
@@ -261,41 +280,178 @@ async function searchProjects(
 
     console.log('✅ Found', total, 'projects, returning', projects.length);
 
-    // If location filter is present, filter by professional's location
+    const normalizeValue = (value?: string | null) =>
+      value ? value.trim().toLowerCase() : "";
+
+    const parseCoordinate = (value?: string) => {
+      if (!value) return null;
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+      const toRad = (val: number) => (val * Math.PI) / 180;
+      const r = 6371;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return r * c;
+    };
+
+    const getProjectCoordinates = (project: any) => {
+      const coords = project?.distance?.coordinates;
+      if (!coords) return null;
+      const latitude = typeof coords.latitude === "number" ? coords.latitude : typeof coords.lat === "number" ? coords.lat : null;
+      const longitude = typeof coords.longitude === "number" ? coords.longitude : typeof coords.lng === "number" ? coords.lng : null;
+      if (latitude === null || longitude === null) return null;
+      return { latitude, longitude };
+    };
+
+    const customerLatValue = parseCoordinate(customerLat);
+    const customerLonValue = parseCoordinate(customerLon);
+    const customerCountryValue = normalizeValue(customerCountry);
+    const customerStateValue = normalizeValue(customerState);
+    const customerCityValue = normalizeValue(customerCity);
+    const customerAddressValue = normalizeValue(customerAddress);
+    const locationValue = normalizeValue(location);
+
+    const hasLocationFilter = Boolean(
+      locationValue ||
+        customerAddressValue ||
+        customerCityValue ||
+        customerStateValue ||
+        customerCountryValue ||
+        (customerLatValue !== null && customerLonValue !== null)
+    );
+
+    const locationParts = [
+      locationValue,
+      customerAddressValue,
+      customerCityValue,
+      customerStateValue,
+      customerCountryValue,
+    ].filter(Boolean);
+
     let results = projects;
-    if (location && location.trim()) {
-      const locationLower = location.toLowerCase();
-      results = projects.filter((p: any) => {
-        const prof = p.professionalId;
-        if (!prof || !prof.businessInfo) return false;
-        const city = prof.businessInfo.city?.toLowerCase() || "";
-        const country = prof.businessInfo.country?.toLowerCase() || "";
-        return city.includes(locationLower) || country.includes(locationLower);
+    if (hasLocationFilter) {
+      results = projects.filter((project: any) => {
+        const distance = project.distance || {};
+        const projectAddress = normalizeValue(distance.address);
+        const maxKmRange =
+          typeof distance.maxKmRange === "number" ? distance.maxKmRange : null;
+        const noBorders = Boolean(distance.noBorders);
+
+        const projectCoords = getProjectCoordinates(project);
+
+        if (noBorders && customerCountryValue) {
+          if (!projectAddress || !projectAddress.includes(customerCountryValue)) {
+            return false;
+          }
+        }
+
+        if (
+          projectCoords &&
+          customerLatValue !== null &&
+          customerLonValue !== null &&
+          typeof maxKmRange === "number"
+        ) {
+          const distanceKm = calculateDistanceKm(
+            customerLatValue,
+            customerLonValue,
+            projectCoords.latitude,
+            projectCoords.longitude
+          );
+          return distanceKm <= maxKmRange;
+        }
+
+        if (!projectAddress) {
+          return false;
+        }
+
+        if (locationParts.length === 0) {
+          return true;
+        }
+
+        return locationParts.some((part) => projectAddress.includes(part));
       });
 
-      // Prioritize exact matches
-      const exactMatches = results.filter((p: any) => {
-        const prof = p.professionalId;
-        const city = prof?.businessInfo?.city?.toLowerCase() || "";
-        const country = prof?.businessInfo?.country?.toLowerCase() || "";
-        return city === locationLower || country === locationLower;
-      });
-      const otherMatches = results.filter((p: any) => {
-        const prof = p.professionalId;
-        const city = prof?.businessInfo?.city?.toLowerCase() || "";
-        const country = prof?.businessInfo?.country?.toLowerCase() || "";
-        return city !== locationLower && country !== locationLower;
-      });
-      results = [...exactMatches, ...otherMatches];
+      if (locationValue) {
+        const exactMatches = results.filter((project: any) => {
+          const projectAddress = normalizeValue(project.distance?.address);
+          return projectAddress === locationValue;
+        });
+        const otherMatches = results.filter((project: any) => {
+          const projectAddress = normalizeValue(project.distance?.address);
+          return projectAddress !== locationValue;
+        });
+        results = [...exactMatches, ...otherMatches];
+      }
     }
+    const resultsWithAvailability = await Promise.all(
+      results.map(async (project: any) => {
+        if (project?.status !== "published") {
+          return project;
+        }
+
+        try {
+          // Get main project availability
+          const proposals = await buildProjectScheduleProposals(
+            project._id.toString()
+          );
+
+          // Get availability for each subproject
+          const subprojectsWithAvailability = await Promise.all(
+            (project.subprojects || []).map(async (subproject: any, index: number) => {
+              try {
+                const subprojectProposals = await buildProjectScheduleProposals(
+                  project._id.toString(),
+                  index
+                );
+                return {
+                  ...subproject,
+                  firstAvailableDate: subprojectProposals?.earliestBookableDate || null,
+                };
+              } catch {
+                return subproject;
+              }
+            })
+          );
+
+          return {
+            ...project,
+            subprojects: subprojectsWithAvailability,
+            firstAvailableDate: proposals?.earliestBookableDate || null,
+            firstAvailableWindow: proposals?.earliestProposal
+              ? {
+                  start: proposals.earliestProposal.start,
+                  end: proposals.earliestProposal.end,
+                }
+              : null,
+            shortestThroughputWindow: proposals?.shortestThroughputProposal
+              ? {
+                  start: proposals.shortestThroughputProposal.start,
+                  end: proposals.shortestThroughputProposal.end,
+                }
+              : null,
+          };
+        } catch (error) {
+          console.error("Failed to build schedule proposals:", error);
+          return project;
+        }
+      })
+    );
 
     res.json({
-      results,
+      results: resultsWithAvailability,
       pagination: {
-        total: location ? results.length : total,
+        total: hasLocationFilter ? results.length : total,
         page: Math.ceil(skip / limit) + 1,
         limit,
-        totalPages: Math.ceil((location ? results.length : total) / limit),
+        totalPages: Math.ceil((hasLocationFilter ? results.length : total) / limit),
       },
     });
   } catch (error) {
