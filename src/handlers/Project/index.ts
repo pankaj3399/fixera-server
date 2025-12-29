@@ -12,15 +12,13 @@ const normalizePreparationDuration = (projectData: any) => {
   }
 
   const subprojects = projectData.subprojects.map((subproject: any) => {
-    const preparationValue =
-      subproject?.preparationDuration?.value ?? subproject?.deliveryPreparation;
+    const preparationValue = subproject?.preparationDuration?.value;
     if (preparationValue == null) {
       return subproject;
     }
 
     const preparationUnit =
       subproject?.preparationDuration?.unit ??
-      subproject?.deliveryPreparationUnit ??
       subproject?.executionDuration?.unit ??
       "days";
 
@@ -465,15 +463,22 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     }
 
     const bookings = await Booking.find(bookingFilter).select(
-      "scheduledStartDate executionEndDate bufferStartDate scheduledEndDate status"
+      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status"
     );
 
     bookings.forEach((booking) => {
+      const scheduledExecutionEndDate =
+        booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
+      const scheduledBufferStartDate =
+        booking.scheduledBufferStartDate || (booking as any).bufferStartDate;
+      const scheduledBufferEndDate =
+        booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
+
       // Block the execution period
-      if (booking.scheduledStartDate && booking.executionEndDate) {
+      if (booking.scheduledStartDate && scheduledExecutionEndDate) {
         const blockedRange = toBlockedRange({
           startDate: booking.scheduledStartDate,
-          endDate: booking.executionEndDate,
+          endDate: scheduledExecutionEndDate,
           reason: "booking",
         });
         if (blockedRange) {
@@ -482,28 +487,25 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         }
       }
       // Block the buffer period (if exists)
-      if (booking.bufferStartDate && booking.scheduledEndDate && booking.executionEndDate) {
-        const bufferStart = new Date(booking.bufferStartDate).getTime();
-        const execEnd = new Date(booking.executionEndDate).getTime();
+      if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
+        const bufferStart = new Date(scheduledBufferStartDate).getTime();
+        const execEnd = new Date(scheduledExecutionEndDate).getTime();
 
-        // If bufferStartDate equals executionEndDate, buffer is in hours (same day)
-        // Otherwise buffer is in days - extend to end of day to block entire days
-        const isHoursBuffer = bufferStart === execEnd;
+        const scheduledBufferUnit =
+          booking.scheduledBufferUnit || (booking as any).scheduledBufferUnit;
+        // If buffer unit is unknown, fall back to bufferStartDate == executionEndDate.
+        const isHoursBuffer =
+          scheduledBufferUnit === "hours"
+            ? true
+            : scheduledBufferUnit === "days"
+            ? false
+            : bufferStart === execEnd;
 
-        let endDateStr: string;
-        if (isHoursBuffer) {
-          // Hours buffer: use exact scheduledEndDate
-          endDateStr = booking.scheduledEndDate.toISOString();
-        } else {
-          // Days buffer: extend to end of day to block entire days
-          const end = new Date(booking.scheduledEndDate);
-          end.setUTCHours(23, 59, 59, 999);
-          endDateStr = end.toISOString();
-        }
-
+        // Don't extend buffer end date - use the actual scheduled end
+        // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
         const bufferRange = toBlockedRange({
-          startDate: booking.bufferStartDate,
-          endDate: endDateStr,
+          startDate: scheduledBufferStartDate,
+          endDate: scheduledBufferEndDate.toISOString(),
           reason: "booking-buffer",
         });
         if (bufferRange) {

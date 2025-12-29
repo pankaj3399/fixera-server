@@ -98,14 +98,27 @@ export interface IBooking extends Document {
 
   // Scheduling
   scheduledStartDate?: Date;
-  executionEndDate?: Date;
-  bufferStartDate?: Date;
-  scheduledEndDate?: Date;
+  scheduledExecutionEndDate?: Date;
+  scheduledBufferStartDate?: Date;
+  scheduledBufferEndDate?: Date;
+  scheduledBufferUnit?: "hours" | "days";
+  scheduledStartTime?: string;
+  scheduledEndTime?: string;
   actualStartDate?: Date;
   actualEndDate?: Date;
 
   // Team members (for project bookings)
   assignedTeamMembers?: Types.ObjectId[]; // References to User (employees)
+
+  customerBlocks?: {
+    dates?: { date: Date; reason?: string }[];
+    windows?: {
+      date: Date;
+      startTime: string;
+      endTime: string;
+      reason?: string;
+    }[];
+  };
 
   // Communication
   messages?: {
@@ -367,9 +380,12 @@ const BookingSchema = new Schema({
 
   // Scheduling
   scheduledStartDate: { type: Date },
-  executionEndDate: { type: Date },
-  bufferStartDate: { type: Date },
-  scheduledEndDate: { type: Date },
+  scheduledExecutionEndDate: { type: Date },
+  scheduledBufferStartDate: { type: Date },
+  scheduledBufferEndDate: { type: Date },
+  scheduledBufferUnit: { type: String, enum: ["hours", "days"] },
+  scheduledStartTime: { type: String }, // "HH:mm"
+  scheduledEndTime: { type: String }, // "HH:mm"
   actualStartDate: { type: Date },
   actualEndDate: { type: Date },
 
@@ -483,6 +499,19 @@ const BookingSchema = new Schema({
     question: { type: String, required: true, maxlength: 500 },
     answer: { type: String, required: true, maxlength: 1000 }
   }],
+
+  customerBlocks: {
+    dates: [{
+      date: { type: Date, required: true },
+      reason: { type: String, maxlength: 200 }
+    }],
+    windows: [{
+      date: { type: Date, required: true },
+      startTime: { type: String, required: true },
+      endTime: { type: String, required: true },
+      reason: { type: String, maxlength: 200 }
+    }]
+  },
 
   // Metadata
   bookingNumber: {

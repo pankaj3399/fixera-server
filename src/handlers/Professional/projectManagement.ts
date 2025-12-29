@@ -7,15 +7,13 @@ const normalizePreparationDuration = (projectData: any) => {
   }
 
   const subprojects = projectData.subprojects.map((subproject: any) => {
-    const preparationValue =
-      subproject?.preparationDuration?.value ?? subproject?.deliveryPreparation;
+    const preparationValue = subproject?.preparationDuration?.value;
     if (preparationValue == null) {
       return subproject;
     }
 
     const preparationUnit =
       subproject?.preparationDuration?.unit ??
-      subproject?.deliveryPreparationUnit ??
       subproject?.executionDuration?.unit ??
       "days";
 

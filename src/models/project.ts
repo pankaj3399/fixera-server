@@ -92,7 +92,7 @@ export interface ISubproject {
   materialsIncluded: boolean;
   materials?: IMaterial[]; // List of materials if materialsIncluded is true
   preparationDuration?: IPreparationDuration;
-  deliveryPreparation: number;
+  deliveryPreparation?: number;
   executionDuration: IExecutionDuration;
   buffer?: IBuffer;
   intakeDuration?: IIntakeDuration;
@@ -330,7 +330,7 @@ const SubprojectSchema = new Schema<ISubproject>({
   materialsIncluded: { type: Boolean, default: false },
   materials: [MaterialSchema],
   preparationDuration: { type: PreparationDurationSchema },
-  deliveryPreparation: { type: Number, required: true, min: 0 },
+  deliveryPreparation: { type: Number, min: 0 },
   executionDuration: { type: ExecutionDurationSchema, required: true },
   buffer: BufferSchema,
   intakeDuration: IntakeDurationSchema,
@@ -434,7 +434,7 @@ const ProjectSchema = new Schema<IProject>(
     intakeMeeting: IntakeMeetingSchema,
     renovationPlanning: RenovationPlanningSchema,
     resources: [{ type: String }],
-    minResources: { type: Number, min: 1, default: 1 },
+    minResources: { type: Number, min: 1 },
     minOverlapPercentage: { type: Number, min: 0, max: 100, default: 70 },
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {

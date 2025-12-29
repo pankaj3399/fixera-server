@@ -22,6 +22,16 @@ export type ScheduleProposals = {
   shortestThroughputProposal?: ProposalWindow;
 };
 
+type CustomerBlocks = {
+  dates?: Array<{ date: string | Date; reason?: string }>;
+  windows?: Array<{
+    date: string | Date;
+    startTime: string;
+    endTime: string;
+    reason?: string;
+  }>;
+};
+
 const DEFAULT_AVAILABILITY: Record<string, any> = {
   monday: { available: true, startTime: "09:00", endTime: "17:00" },
   tuesday: { available: true, startTime: "09:00", endTime: "17:00" },
@@ -138,6 +148,12 @@ const parseTimeToMinutes = (value?: string) => {
   return hours * 60 + minutes;
 };
 
+const formatMinutesToTime = (minutesFromMidnight: number) => {
+  const hours = Math.floor(minutesFromMidnight / 60);
+  const minutes = minutesFromMidnight % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+};
+
 const buildZonedTime = (zonedDate: Date, minutesFromMidnight: number) => {
   const base = startOfDayZoned(zonedDate);
   const hours = Math.floor(minutesFromMidnight / 60);
@@ -187,6 +203,35 @@ const getWorkingHoursForDate = (
   };
 };
 
+const getPrepHoursForDate = (
+  availability: Record<string, any>,
+  zonedDate: Date
+) => {
+  const dayKey = DAY_KEYS[zonedDate.getUTCDay()];
+  const dayAvailability = availability?.[dayKey] || {};
+  const defaultDay = DEFAULT_AVAILABILITY[dayKey];
+  const startTime = dayAvailability.startTime || defaultDay.startTime || "09:00";
+  const endTime = dayAvailability.endTime || defaultDay.endTime || "17:00";
+  const startMinutes = parseTimeToMinutes(startTime);
+  const endMinutes = parseTimeToMinutes(endTime);
+
+  if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) {
+    return {
+      startMinutes: null,
+      endMinutes: null,
+      startTime: null,
+      endTime: null,
+    };
+  }
+
+  return {
+    startMinutes,
+    endMinutes,
+    startTime,
+    endTime,
+  };
+};
+
 const getProjectDurations = (project: any, subprojectIndex?: number) => {
   const subproject =
     typeof subprojectIndex === "number" &&
@@ -202,13 +247,9 @@ const getProjectDurations = (project: any, subprojectIndex?: number) => {
 
   const buffer = subproject?.buffer || project.bufferDuration || null;
 
-  const prepValue =
-    subproject?.preparationDuration?.value ?? subproject?.deliveryPreparation;
+  const prepValue = subproject?.preparationDuration?.value;
   const prepUnit =
-    subproject?.preparationDuration?.unit ||
-    subproject?.deliveryPreparationUnit ||
-    execution.unit ||
-    "days";
+    subproject?.preparationDuration?.unit || execution.unit || "days";
 
   const preparation =
     typeof prepValue === "number"
@@ -261,7 +302,8 @@ const buildHolidayChecker = (professional: any, timeZone: string) => {
 const buildBlockedData = async (
   project: any,
   professional: any,
-  timeZone: string
+  timeZone: string,
+  customerBlocks?: CustomerBlocks
 ) => {
   const blockedDates = new Set<string>();
   const blockedRanges: Array<{ start: Date; end: Date; reason?: string }> = [];
@@ -306,8 +348,15 @@ const buildBlockedData = async (
   const bookingFilter: any = {
     status: { $nin: ["completed", "cancelled", "refunded"] },
     scheduledStartDate: { $exists: true, $ne: null },
-    scheduledEndDate: { $exists: true, $ne: null },
     $or: [{ project: project._id }],
+    $and: [
+      {
+        $or: [
+          { scheduledBufferEndDate: { $exists: true, $ne: null } },
+          { scheduledEndDate: { $exists: true, $ne: null } },
+        ],
+      },
+    ],
   };
 
   if (teamMemberIds.length > 0) {
@@ -318,44 +367,78 @@ const buildBlockedData = async (
   }
 
   const bookings = await Booking.find(bookingFilter).select(
-    "scheduledStartDate executionEndDate bufferStartDate scheduledEndDate status"
+    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status"
   );
 
   bookings.forEach((booking) => {
     // Block the execution period
-    if (booking.scheduledStartDate && booking.executionEndDate) {
+    const scheduledExecutionEndDate =
+      booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
+    const scheduledBufferStartDate =
+      booking.scheduledBufferStartDate || (booking as any).bufferStartDate;
+    const scheduledBufferEndDate =
+      booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
+
+    if (booking.scheduledStartDate && scheduledExecutionEndDate) {
       blockedRanges.push({
         start: new Date(booking.scheduledStartDate),
-        end: new Date(booking.executionEndDate),
+        end: new Date(scheduledExecutionEndDate),
         reason: "booking",
       });
     }
     // Block the buffer period (if exists)
-    if (booking.bufferStartDate && booking.scheduledEndDate && booking.executionEndDate) {
-      const bufferStart = new Date(booking.bufferStartDate).getTime();
-      const execEnd = new Date(booking.executionEndDate).getTime();
+    if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
+      const bufferStart = new Date(scheduledBufferStartDate).getTime();
+      const execEnd = new Date(scheduledExecutionEndDate).getTime();
 
-      // If bufferStartDate equals executionEndDate, buffer is in hours (same day)
-      // Otherwise buffer is in days - extend to end of day to block entire days
-      const isHoursBuffer = bufferStart === execEnd;
+      const scheduledBufferUnit =
+        booking.scheduledBufferUnit || (booking as any).scheduledBufferUnit;
+      // If buffer unit is unknown, fall back to bufferStartDate == executionEndDate.
+      const isHoursBuffer =
+        scheduledBufferUnit === "hours"
+          ? true
+          : scheduledBufferUnit === "days"
+          ? false
+          : bufferStart === execEnd;
 
-      let endDate: Date;
-      if (isHoursBuffer) {
-        // Hours buffer: use exact scheduledEndDate
-        endDate = new Date(booking.scheduledEndDate);
-      } else {
-        // Days buffer: extend to end of day to block entire days
-        endDate = new Date(booking.scheduledEndDate);
-        endDate.setUTCHours(23, 59, 59, 999);
-      }
-
+      // Don't extend buffer end date - use the actual scheduled end
+      // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
       blockedRanges.push({
-        start: new Date(booking.bufferStartDate),
-        end: endDate,
+        start: new Date(scheduledBufferStartDate),
+        end: new Date(scheduledBufferEndDate),
         reason: "booking-buffer",
       });
     }
   });
+
+  if (customerBlocks?.dates) {
+    customerBlocks.dates.forEach((blocked) => {
+      if (!blocked?.date) return;
+      const zoned = toZonedTime(new Date(blocked.date), timeZone);
+      blockedDates.add(formatDateKey(zoned));
+    });
+  }
+
+  if (customerBlocks?.windows) {
+    customerBlocks.windows.forEach((window) => {
+      if (!window?.date) return;
+      const startMinutes = parseTimeToMinutes(window.startTime);
+      const endMinutes = parseTimeToMinutes(window.endTime);
+      if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) {
+        return;
+      }
+
+      const zonedDay = toZonedTime(new Date(window.date), timeZone);
+      const dayStart = startOfDayZoned(zonedDay);
+      const startZoned = buildZonedTime(dayStart, startMinutes);
+      const endZoned = buildZonedTime(dayStart, endMinutes);
+      blockedRanges.push({
+        start: fromZonedTime(startZoned, timeZone),
+        end: fromZonedTime(endZoned, timeZone),
+        reason: "customer-block",
+      });
+    });
+  }
 
   return { blockedDates, blockedRanges };
 };
@@ -441,7 +524,7 @@ const isDayBlocked = (
 
   totalMinutes += (currentEnd - currentStart) / (1000 * 60);
 
-  return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
+  return totalMinutes / 60 > PARTIAL_BLOCK_THRESHOLD_HOURS;
 };
 
 const advanceWorkingDays = (
@@ -492,18 +575,18 @@ const calculatePrepEnd = (
   const isPrepWorkingDay = (date: Date) => {
     if (isWeekend(date)) return false;
     if (isHoliday(date)) return false;
-    return isWorkingDay(availability, date);
+    return true;
   };
 
   if (preparation.unit === "days") {
     let cursor = startOfDayZoned(zonedNow);
     let nowMinutes = zonedNow.getUTCHours() * 60 + zonedNow.getUTCMinutes();
-    const todayHours = getWorkingHoursForDate(availability, cursor);
+    const todayHours = getPrepHoursForDate(availability, cursor);
 
     if (!isPrepWorkingDay(cursor)) {
       cursor = addDaysZoned(cursor, 1);
       nowMinutes = 0;
-    } else if (!todayHours.available || todayHours.endMinutes === null) {
+    } else if (todayHours.endMinutes === null) {
       cursor = addDaysZoned(cursor, 1);
       nowMinutes = 0;
     } else if (nowMinutes >= todayHours.endMinutes) {
@@ -535,8 +618,8 @@ const calculatePrepEnd = (
       continue;
     }
 
-    const hours = getWorkingHoursForDate(availability, dayStart);
-    if (!hours.available || hours.startMinutes === null || hours.endMinutes === null) {
+    const hours = getPrepHoursForDate(availability, dayStart);
+    if (hours.startMinutes === null || hours.endMinutes === null) {
       cursor = addDaysZoned(dayStart, 1);
       continue;
     }
@@ -620,16 +703,73 @@ const getAvailableSlotsForDate = (
     );
 
     if (!overlaps) {
-      const hoursValue = Math.floor(startMinutes / 60);
-      const minutesValue = startMinutes % 60;
-      const timeLabel = `${String(hoursValue).padStart(2, "0")}:${String(
-        minutesValue
-      ).padStart(2, "0")}`;
+      const timeLabel = formatMinutesToTime(startMinutes);
       slots.push({ startZoned: slotStartZoned, startTime: timeLabel });
     }
   }
 
   return slots;
+};
+
+const getBufferStartZoned = (
+  executionEndZoned: Date,
+  executionMode: DurationUnit,
+  buffer: Duration | null
+) => {
+  if (!buffer || !buffer.value || buffer.value <= 0) {
+    return null;
+  }
+
+  if (executionMode === "hours" && buffer.unit === "hours") {
+    return executionEndZoned;
+  }
+
+  return addDaysZoned(startOfDayZoned(executionEndZoned), 1);
+};
+
+const addWorkingHours = (
+  startZoned: Date,
+  hoursToAdd: number,
+  availability: Record<string, any>,
+  blockedDates: Set<string>,
+  blockedRanges: Array<{ start: Date; end: Date }>,
+  timeZone: string
+) => {
+  let remainingMinutes = hoursToAdd * 60;
+  let cursor = startZoned;
+
+  while (remainingMinutes > 0) {
+    const dayStart = startOfDayZoned(cursor);
+    if (isDayBlocked(availability, dayStart, blockedDates, blockedRanges, timeZone)) {
+      cursor = addDaysZoned(dayStart, 1);
+      continue;
+    }
+
+    const hours = getWorkingHoursForDate(availability, dayStart);
+    if (!hours.available || hours.startMinutes === null || hours.endMinutes === null) {
+      cursor = addDaysZoned(dayStart, 1);
+      continue;
+    }
+
+    let currentMinutes = cursor.getUTCHours() * 60 + cursor.getUTCMinutes();
+    if (currentMinutes < hours.startMinutes) {
+      currentMinutes = hours.startMinutes;
+    }
+    if (currentMinutes >= hours.endMinutes) {
+      cursor = addDaysZoned(dayStart, 1);
+      continue;
+    }
+
+    const availableMinutes = hours.endMinutes - currentMinutes;
+    if (remainingMinutes <= availableMinutes) {
+      return buildZonedTime(dayStart, currentMinutes + remainingMinutes);
+    }
+
+    remainingMinutes -= availableMinutes;
+    cursor = addDaysZoned(dayStart, 1);
+  }
+
+  return cursor;
 };
 
 const calculateBufferEnd = (
@@ -645,25 +785,31 @@ const calculateBufferEnd = (
     return executionEndZoned;
   }
 
-  if (executionMode === "hours" && buffer.unit === "hours") {
-    const completion = new Date(executionEndZoned.getTime());
-    completion.setUTCHours(completion.getUTCHours() + buffer.value);
-    return completion;
-  }
-
-  const bufferStart = addDaysZoned(startOfDayZoned(executionEndZoned), 1);
-  let bufferDays = buffer.value;
-
   if (buffer.unit === "hours") {
-    const hours = getWorkingHoursForDate(availability, bufferStart);
-    const workingMinutes =
-      hours.startMinutes !== null && hours.endMinutes !== null
-        ? hours.endMinutes - hours.startMinutes
-        : 0;
-    const dayHours = workingMinutes > 0 ? workingMinutes / 60 : 8;
-    bufferDays = Math.ceil(buffer.value / dayHours);
+    const bufferStart = getBufferStartZoned(
+      executionEndZoned,
+      executionMode,
+      buffer
+    );
+    if (!bufferStart) {
+      return executionEndZoned;
+    }
+    return addWorkingHours(
+      bufferStart,
+      buffer.value,
+      availability,
+      blockedDates,
+      blockedRanges,
+      timeZone
+    );
   }
 
+  const bufferStart = getBufferStartZoned(executionEndZoned, executionMode, buffer);
+  if (!bufferStart) {
+    return executionEndZoned;
+  }
+
+  let bufferDays = buffer.value;
   const bufferEndDay = advanceWorkingDays(
     bufferStart,
     Math.ceil(bufferDays),
@@ -867,11 +1013,13 @@ export const validateProjectScheduleSelection = async ({
   subprojectIndex,
   startDate,
   startTime,
+  customerBlocks,
 }: {
   projectId: string;
   subprojectIndex?: number;
   startDate?: string;
   startTime?: string;
+  customerBlocks?: CustomerBlocks;
 }) => {
   if (!startDate) {
     return { valid: true };
@@ -904,11 +1052,16 @@ export const validateProjectScheduleSelection = async ({
   );
   const timeZone = professional.businessInfo?.timezone || "UTC";
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
-  const { blockedDates, blockedRanges } = await buildBlockedData(
+  const baseBlockedData = await buildBlockedData(
     project,
     professional,
-    timeZone
+    timeZone,
+    customerBlocks
   );
+  const { blockedDates, blockedRanges } = baseBlockedData;
+  const bufferBlockedData = customerBlocks
+    ? await buildBlockedData(project, professional, timeZone)
+    : baseBlockedData;
 
   const prepEnd = calculatePrepEnd(
     durations.preparation,
@@ -970,11 +1123,13 @@ export const buildProjectScheduleWindow = async ({
   subprojectIndex,
   startDate,
   startTime,
+  customerBlocks,
 }: {
   projectId: string;
   subprojectIndex?: number;
   startDate?: string;
   startTime?: string;
+  customerBlocks?: CustomerBlocks;
 }) => {
   if (!startDate) {
     return null;
@@ -1007,11 +1162,16 @@ export const buildProjectScheduleWindow = async ({
   );
   const timeZone = professional.businessInfo?.timezone || "UTC";
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
-  const { blockedDates, blockedRanges } = await buildBlockedData(
+  const baseBlockedData = await buildBlockedData(
     project,
     professional,
-    timeZone
+    timeZone,
+    customerBlocks
   );
+  const { blockedDates, blockedRanges } = baseBlockedData;
+  const bufferBlockedData = customerBlocks
+    ? await buildBlockedData(project, professional, timeZone)
+    : baseBlockedData;
 
   const prepEnd = calculatePrepEnd(
     durations.preparation,
@@ -1043,29 +1203,33 @@ export const buildProjectScheduleWindow = async ({
     const executionEndZoned = new Date(
       selectedZoned.getTime() + durations.execution.value * 60 * 60000
     );
-    const bufferStartZoned =
-      durations.buffer && durations.buffer.value > 0
-        ? durations.execution.unit === "hours" && durations.buffer.unit === "hours"
-          ? executionEndZoned
-          : addDaysZoned(startOfDayZoned(executionEndZoned), 1)
-        : null;
+    const bufferStartZoned = getBufferStartZoned(
+      executionEndZoned,
+      durations.execution.unit,
+      durations.buffer
+    );
     const bufferEndZoned = calculateBufferEnd(
       executionEndZoned,
       durations.buffer,
       durations.execution.unit,
       availability,
-      blockedDates,
-      blockedRanges,
+      bufferBlockedData.blockedDates,
+      bufferBlockedData.blockedRanges,
       timeZone
     );
 
     return {
       scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
-      executionEndDate: fromZonedTime(executionEndZoned, timeZone),
-      bufferStartDate: bufferStartZoned
+      scheduledExecutionEndDate: fromZonedTime(executionEndZoned, timeZone),
+      scheduledBufferStartDate: bufferStartZoned
         ? fromZonedTime(bufferStartZoned, timeZone)
         : null,
-      scheduledEndDate: fromZonedTime(bufferEndZoned, timeZone),
+      scheduledBufferEndDate: fromZonedTime(bufferEndZoned, timeZone),
+      scheduledBufferUnit: durations.buffer?.unit,
+      scheduledStartTime: formatMinutesToTime(minutes),
+      scheduledEndTime: formatMinutesToTime(
+        minutes + Math.round(durations.execution.value * 60)
+      ),
     };
   }
 
@@ -1093,26 +1257,28 @@ export const buildProjectScheduleWindow = async ({
     parseTimeToMinutes(DEFAULT_AVAILABILITY.monday.endTime) ??
     1020;
   const executionEndZoned = buildZonedTime(executionEndDay, executionEndMinutes);
-  const bufferStartZoned =
-    durations.buffer && durations.buffer.value > 0
-      ? addDaysZoned(startOfDayZoned(executionEndDay), 1)
-      : null;
+  const bufferStartZoned = getBufferStartZoned(
+    executionEndZoned,
+    durations.execution.unit,
+    durations.buffer
+  );
   const bufferEndZoned = calculateBufferEnd(
     executionEndDay,
     durations.buffer,
     durations.execution.unit,
     availability,
-    blockedDates,
-    blockedRanges,
+    bufferBlockedData.blockedDates,
+    bufferBlockedData.blockedRanges,
     timeZone
   );
 
   return {
     scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
-    executionEndDate: fromZonedTime(executionEndZoned, timeZone),
-    bufferStartDate: bufferStartZoned
+    scheduledExecutionEndDate: fromZonedTime(executionEndZoned, timeZone),
+    scheduledBufferStartDate: bufferStartZoned
       ? fromZonedTime(bufferStartZoned, timeZone)
       : null,
-    scheduledEndDate: fromZonedTime(bufferEndZoned, timeZone),
+    scheduledBufferEndDate: fromZonedTime(bufferEndZoned, timeZone),
+    scheduledBufferUnit: durations.buffer?.unit,
   };
 };

@@ -398,9 +398,12 @@ async function searchProjects(
         }
 
         try {
-          // Get main project availability
+          // Get main project availability - use first subproject
+          const hasMainDuration = project.executionDuration?.value;
+          const defaultSubprojectIndex = (!hasMainDuration && project.subprojects?.length > 0) ? 0 : undefined;
           const proposals = await buildProjectScheduleProposals(
-            project._id.toString()
+            project._id.toString(),
+            defaultSubprojectIndex
           );
 
           // Get availability for each subproject
@@ -414,6 +417,18 @@ async function searchProjects(
                 return {
                   ...subproject,
                   firstAvailableDate: subprojectProposals?.earliestBookableDate || null,
+                  firstAvailableWindow: subprojectProposals?.earliestProposal
+                    ? {
+                        start: subprojectProposals.earliestProposal.start,
+                        end: subprojectProposals.earliestProposal.executionEnd || subprojectProposals.earliestProposal.end,
+                      }
+                    : null,
+                  shortestThroughputWindow: subprojectProposals?.shortestThroughputProposal
+                    ? {
+                        start: subprojectProposals.shortestThroughputProposal.start,
+                        end: subprojectProposals.shortestThroughputProposal.executionEnd || subprojectProposals.shortestThroughputProposal.end,
+                      }
+                    : null,
                 };
               } catch {
                 return subproject;

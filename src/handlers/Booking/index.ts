@@ -20,7 +20,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       preferredStartDate,
       preferredStartTime,
       selectedSubprojectIndex,
-      urgency
+      urgency,
+      customerBlocks
     } = req.body;
 
     // Validate required fields
@@ -100,6 +101,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     };
 
+    if (customerBlocks) {
+      bookingData.customerBlocks = customerBlocks;
+    }
+
     // Validate professional or project exists
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
@@ -169,6 +174,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         subprojectIndex,
         startDate: normalizedStartDate,
         startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+        customerBlocks,
       });
 
       if (!validation.valid) {
@@ -184,6 +190,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           subprojectIndex,
           startDate: normalizedStartDate,
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+          customerBlocks,
         });
 
         if (!window) {
@@ -194,13 +201,22 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
 
         bookingData.scheduledStartDate = window.scheduledStartDate;
-        if (window.executionEndDate) {
-          bookingData.executionEndDate = window.executionEndDate;
+        if (window.scheduledExecutionEndDate) {
+          bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
         }
-        if (window.bufferStartDate) {
-          bookingData.bufferStartDate = window.bufferStartDate;
+        if (window.scheduledBufferStartDate) {
+          bookingData.scheduledBufferStartDate = window.scheduledBufferStartDate;
         }
-        bookingData.scheduledEndDate = window.scheduledEndDate;
+        bookingData.scheduledBufferEndDate = window.scheduledBufferEndDate;
+        if (window.scheduledBufferUnit) {
+          bookingData.scheduledBufferUnit = window.scheduledBufferUnit;
+        }
+        if (window.scheduledStartTime) {
+          bookingData.scheduledStartTime = window.scheduledStartTime;
+        }
+        if (window.scheduledEndTime) {
+          bookingData.scheduledEndTime = window.scheduledEndTime;
+        }
       }
     }
 
