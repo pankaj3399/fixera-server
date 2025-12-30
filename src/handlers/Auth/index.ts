@@ -243,6 +243,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       serviceCategories: user.serviceCategories,
       blockedDates: user.blockedDates,
       blockedRanges: user.blockedRanges,
+      bookingBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,

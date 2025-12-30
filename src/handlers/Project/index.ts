@@ -4,38 +4,8 @@ import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
 import { buildProjectScheduleProposals } from "../../utils/scheduleEngine";
+import { normalizePreparationDuration } from "../../utils/projectDurations";
 // import { seedServiceCategories } from '../../scripts/seedProject';
-
-const normalizePreparationDuration = (projectData: any) => {
-  if (!Array.isArray(projectData?.subprojects)) {
-    return projectData;
-  }
-
-  const subprojects = projectData.subprojects.map((subproject: any) => {
-    const preparationValue = subproject?.preparationDuration?.value;
-    if (preparationValue == null) {
-      return subproject;
-    }
-
-    const preparationUnit =
-      subproject?.preparationDuration?.unit ??
-      subproject?.executionDuration?.unit ??
-      "days";
-
-    return {
-      ...subproject,
-      preparationDuration: {
-        value: preparationValue,
-        unit: preparationUnit,
-      },
-    };
-  });
-
-  return {
-    ...projectData,
-    subprojects,
-  };
-};
 
 const DEFAULT_AVAILABILITY = {
   monday: { available: true, startTime: "09:00", endTime: "17:00" },
@@ -488,19 +458,6 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
       // Block the buffer period (if exists)
       if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
-        const bufferStart = new Date(scheduledBufferStartDate).getTime();
-        const execEnd = new Date(scheduledExecutionEndDate).getTime();
-
-        const scheduledBufferUnit =
-          booking.scheduledBufferUnit || (booking as any).scheduledBufferUnit;
-        // If buffer unit is unknown, fall back to bufferStartDate == executionEndDate.
-        const isHoursBuffer =
-          scheduledBufferUnit === "hours"
-            ? true
-            : scheduledBufferUnit === "days"
-            ? false
-            : bufferStart === execEnd;
-
         // Don't extend buffer end date - use the actual scheduled end
         // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
         const bufferRange = toBlockedRange({

@@ -29,7 +29,7 @@ export const search = async (req: Request, res: Response) => {
       limit = "20",
     } = req.query;
 
-    console.log("dY\"? Search request:", { q, loc, type, priceMin, priceMax, category, availability, customerLat, customerLon, customerCountry, customerState, customerCity, customerAddress, page, limit });
+    console.log("Search request:", { q, loc, type, priceMin, priceMax, category, availability, customerLat, customerLon, customerCountry, customerState, customerCity, customerAddress, page, limit });
 
     const pageNum = parseInt(page as string, 10);
     const limitNum = parseInt(limit as string, 10);
@@ -359,7 +359,7 @@ async function searchProjects(
 
         const projectCoords = getProjectCoordinates(project);
 
-        if (noBorders && customerCountryValue) {
+        if (!noBorders && customerCountryValue) {
           if (!projectAddress || !projectAddress.includes(customerCountryValue)) {
             return false;
           }

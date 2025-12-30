@@ -388,19 +388,6 @@ const buildBlockedData = async (
     }
     // Block the buffer period (if exists)
     if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
-      const bufferStart = new Date(scheduledBufferStartDate).getTime();
-      const execEnd = new Date(scheduledExecutionEndDate).getTime();
-
-      const scheduledBufferUnit =
-        booking.scheduledBufferUnit || (booking as any).scheduledBufferUnit;
-      // If buffer unit is unknown, fall back to bufferStartDate == executionEndDate.
-      const isHoursBuffer =
-        scheduledBufferUnit === "hours"
-          ? true
-          : scheduledBufferUnit === "days"
-          ? false
-          : bufferStart === execEnd;
-
       // Don't extend buffer end date - use the actual scheduled end
       // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
       blockedRanges.push({
@@ -441,6 +428,23 @@ const buildBlockedData = async (
   }
 
   return { blockedDates, blockedRanges };
+};
+
+const loadProjectAndProfessional = async (projectId: string) => {
+  const project = await Project.findOne({
+    _id: projectId,
+    status: "published",
+  }).lean();
+
+  if (!project) {
+    return { project: null, professional: null };
+  }
+
+  const professional = await User.findById(project.professionalId).select(
+    "companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone"
+  );
+
+  return { project, professional: professional || null };
 };
 
 const buildWorkingRangeUtc = (
@@ -737,8 +741,11 @@ const addWorkingHours = (
 ) => {
   let remainingMinutes = hoursToAdd * 60;
   let cursor = startZoned;
+  const maxIterations = 366 * 3;
+  let iterations = 0;
 
-  while (remainingMinutes > 0) {
+  while (remainingMinutes > 0 && iterations < maxIterations) {
+    iterations += 1;
     const dayStart = startOfDayZoned(cursor);
     if (isDayBlocked(availability, dayStart, blockedDates, blockedRanges, timeZone)) {
       cursor = addDaysZoned(dayStart, 1);
@@ -830,20 +837,8 @@ export const buildProjectScheduleProposals = async (
   projectId: string,
   subprojectIndex?: number
 ): Promise<ScheduleProposals | null> => {
-  const project = await Project.findOne({
-    _id: projectId,
-    status: "published",
-  }).lean();
-
-  if (!project) {
-    return null;
-  }
-
-  const professional = await User.findById(project.professionalId).select(
-    "companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone"
-  );
-
-  if (!professional) {
+  const { project, professional } = await loadProjectAndProfessional(projectId);
+  if (!project || !professional) {
     return null;
   }
 
@@ -993,7 +988,7 @@ export const buildProjectScheduleProposals = async (
       }
 
       if (earliestProposal && shortestProposal) {
-        continue;
+        break;
       }
     }
   }
@@ -1025,19 +1020,10 @@ export const validateProjectScheduleSelection = async ({
     return { valid: true };
   }
 
-  const project = await Project.findOne({
-    _id: projectId,
-    status: "published",
-  }).lean();
-
+  const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project) {
     return { valid: false, reason: "Project not found" };
   }
-
-  const professional = await User.findById(project.professionalId).select(
-    "companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone"
-  );
-
   if (!professional) {
     return { valid: false, reason: "Professional not found" };
   }
@@ -1059,9 +1045,6 @@ export const validateProjectScheduleSelection = async ({
     customerBlocks
   );
   const { blockedDates, blockedRanges } = baseBlockedData;
-  const bufferBlockedData = customerBlocks
-    ? await buildBlockedData(project, professional, timeZone)
-    : baseBlockedData;
 
   const prepEnd = calculatePrepEnd(
     durations.preparation,
@@ -1135,20 +1118,8 @@ export const buildProjectScheduleWindow = async ({
     return null;
   }
 
-  const project = await Project.findOne({
-    _id: projectId,
-    status: "published",
-  }).lean();
-
-  if (!project) {
-    return null;
-  }
-
-  const professional = await User.findById(project.professionalId).select(
-    "companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone"
-  );
-
-  if (!professional) {
+  const { project, professional } = await loadProjectAndProfessional(projectId);
+  if (!project || !professional) {
     return null;
   }
 
@@ -1233,8 +1204,9 @@ export const buildProjectScheduleWindow = async ({
     };
   }
 
+  const prepStartDay = startOfDayZoned(prepEnd);
   selectedZoned = startOfDayZoned(selectedZoned);
-  if (startOfDayZoned(selectedZoned) < startOfDayZoned(prepEnd)) {
+  if (selectedZoned < prepStartDay) {
     return null;
   }
   if (isDayBlocked(availability, selectedZoned, blockedDates, blockedRanges, timeZone)) {

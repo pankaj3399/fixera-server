@@ -43,17 +43,6 @@ export const buildBookingBlockedRanges = async (
     }
 
     if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
-      const bufferStart = new Date(scheduledBufferStartDate).getTime();
-      const execEnd = new Date(scheduledExecutionEndDate).getTime();
-      const scheduledBufferUnit =
-        booking.scheduledBufferUnit || (booking as any).scheduledBufferUnit;
-      const isHoursBuffer =
-        scheduledBufferUnit === "hours"
-          ? true
-          : scheduledBufferUnit === "days"
-          ? false
-          : bufferStart === execEnd;
-
       // Don't extend buffer end date - use the actual scheduled end
       // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
       ranges.push({
