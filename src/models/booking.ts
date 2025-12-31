@@ -549,7 +549,6 @@ const BookingSchema = new Schema({
 
 // Indexes for efficient queries
 BookingSchema.index({ customer: 1, status: 1 });
-// Note: { professional: 1, status: 1 } removed - covered by compound index on line 563 via left-prefix
 BookingSchema.index({ project: 1, status: 1 });
 BookingSchema.index({ project: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ bookingType: 1, status: 1 });
@@ -585,6 +584,28 @@ BookingSchema.pre('save', async function(next) {
   if (this.scheduledBufferStartDate && this.scheduledBufferEndDate) {
     if (this.scheduledBufferStartDate >= this.scheduledBufferEndDate) {
       return next(new Error('scheduledBufferStartDate must be before scheduledBufferEndDate'));
+    }
+  }
+
+  // Buffer alignment validation with execution dates
+  // Buffer should start at or after execution end
+  if (this.scheduledBufferStartDate && this.scheduledExecutionEndDate) {
+    if (this.scheduledBufferStartDate < this.scheduledExecutionEndDate) {
+      return next(new Error('scheduledBufferStartDate must be at or after scheduledExecutionEndDate'));
+    }
+  }
+
+  // Execution end should be at or before buffer end (if both exist)
+  if (this.scheduledExecutionEndDate && this.scheduledBufferEndDate) {
+    if (this.scheduledExecutionEndDate > this.scheduledBufferEndDate) {
+      return next(new Error('scheduledExecutionEndDate must be at or before scheduledBufferEndDate'));
+    }
+  }
+
+  // Scheduled start date should be before execution end date
+  if (this.scheduledStartDate && this.scheduledExecutionEndDate) {
+    if (this.scheduledStartDate >= this.scheduledExecutionEndDate) {
+      return next(new Error('scheduledStartDate must be before scheduledExecutionEndDate'));
     }
   }
 
