@@ -549,7 +549,7 @@ const BookingSchema = new Schema({
 
 // Indexes for efficient queries
 BookingSchema.index({ customer: 1, status: 1 });
-BookingSchema.index({ professional: 1, status: 1 });
+// Note: { professional: 1, status: 1 } removed - covered by compound index on line 563 via left-prefix
 BookingSchema.index({ project: 1, status: 1 });
 BookingSchema.index({ project: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ bookingType: 1, status: 1 });
@@ -564,8 +564,43 @@ BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 
-// Pre-save middleware to generate booking number
+// Helper to parse HH:mm to minutes for comparison
+const parseTimeToMinutes = (time: string): number => {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+// Pre-save middleware to generate booking number and validate scheduling fields
 BookingSchema.pre('save', async function(next) {
+  // Cross-field validation for scheduling times
+  if (this.scheduledStartTime && this.scheduledEndTime) {
+    const startMinutes = parseTimeToMinutes(this.scheduledStartTime);
+    const endMinutes = parseTimeToMinutes(this.scheduledEndTime);
+    if (startMinutes >= endMinutes) {
+      return next(new Error('scheduledStartTime must be before scheduledEndTime'));
+    }
+  }
+
+  // Cross-field validation for buffer dates
+  if (this.scheduledBufferStartDate && this.scheduledBufferEndDate) {
+    if (this.scheduledBufferStartDate >= this.scheduledBufferEndDate) {
+      return next(new Error('scheduledBufferStartDate must be before scheduledBufferEndDate'));
+    }
+  }
+
+  // Validate customerBlocks time windows
+  if (this.customerBlocks?.windows) {
+    for (const window of this.customerBlocks.windows) {
+      if (window.startTime && window.endTime) {
+        const startMinutes = parseTimeToMinutes(window.startTime);
+        const endMinutes = parseTimeToMinutes(window.endTime);
+        if (startMinutes >= endMinutes) {
+          return next(new Error('customerBlocks window startTime must be before endTime'));
+        }
+      }
+    }
+  }
+
   if (this.isNew && !this.bookingNumber) {
     const year = new Date().getFullYear();
     const count = await model('Booking').countDocuments();
