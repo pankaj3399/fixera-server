@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import User from "../../models/user";
 import Project from "../../models/project";
-import { buildProjectScheduleProposals } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngine";
 
 export { getPopularServices } from "./getPopularServices";
 
@@ -345,6 +345,13 @@ async function searchProjects(
     if (hasLocationFilter) {
       projects = await baseQuery.lean();
       total = projects.length;
+      // Performance warning: location filtering loads all projects into memory
+      if (total > 500) {
+        console.warn(
+          `[Search Performance] Location filter returned ${total} projects for in-memory filtering. ` +
+          `Consider implementing geospatial indexes for better scalability.`
+        );
+      }
     } else {
       [projects, total] = await Promise.all([
         baseQuery.skip(skip).limit(limit).lean(),
@@ -412,6 +419,27 @@ async function searchProjects(
     const totalResults = hasLocationFilter ? results.length : total;
     const pagedResults = hasLocationFilter ? results.slice(skip, skip + limit) : results;
 
+    // Batch-load professionals for all published projects to avoid N+1 queries
+    const publishedProjects = pagedResults.filter((p: any) => p?.status === "published");
+    const professionalIdSet = new Set(
+      publishedProjects
+        .map((p: any) => p.professionalId?._id?.toString() || p.professionalId?.toString())
+        .filter(Boolean)
+    );
+    const professionalIds = Array.from(professionalIdSet);
+
+    // Fetch all professionals in a single query
+    const professionalsData = professionalIds.length > 0
+      ? await User.find({ _id: { $in: professionalIds } })
+          .select("companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone")
+          .lean()
+      : [];
+
+    // Create a lookup map for quick access
+    const professionalMap = new Map(
+      professionalsData.map((p: any) => [p._id.toString(), p])
+    );
+
     const resultsWithAvailability = await Promise.all(
       pagedResults.map(async (project: any) => {
         if (project?.status !== "published") {
@@ -419,20 +447,30 @@ async function searchProjects(
         }
 
         try {
+          // Get professional from pre-loaded map
+          const profId = project.professionalId?._id?.toString() || project.professionalId?.toString();
+          const professional = profId ? professionalMap.get(profId) : null;
+
+          if (!professional) {
+            return project;
+          }
+
           // Get main project availability - use first subproject
           const hasMainDuration = project.executionDuration?.value;
           const defaultSubprojectIndex = (!hasMainDuration && project.subprojects?.length > 0) ? 0 : undefined;
-          const proposals = await buildProjectScheduleProposals(
-            project._id.toString(),
+          const proposals = await buildProjectScheduleProposalsWithData(
+            project,
+            professional,
             defaultSubprojectIndex
           );
 
-          // Get availability for each subproject
+          // Get availability for each subproject (reuse pre-loaded professional)
           const subprojectsWithAvailability = await Promise.all(
             (project.subprojects || []).map(async (subproject: any, index: number) => {
               try {
-                const subprojectProposals = await buildProjectScheduleProposals(
-                  project._id.toString(),
+                const subprojectProposals = await buildProjectScheduleProposalsWithData(
+                  project,
+                  professional,
                   index
                 );
                 return {

@@ -548,6 +548,9 @@ BookingSchema.index({ createdAt: -1 }); // Sort by creation date
 BookingSchema.index({ scheduledStartDate: 1 }); // Upcoming bookings
 BookingSchema.index({ scheduledBufferEndDate: 1 });
 BookingSchema.index({ assignedTeamMembers: 1 });
+// Compound index for schedule engine blocked data queries
+BookingSchema.index({ assignedTeamMembers: 1, status: 1, scheduledStartDate: 1 });
+BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 
