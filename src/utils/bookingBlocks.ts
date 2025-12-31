@@ -14,7 +14,7 @@ export const buildBookingBlockedRanges = async (
       {
         $or: [
           { scheduledBufferEndDate: { $exists: true, $ne: null } },
-          { scheduledEndDate: { $exists: true, $ne: null } },
+          { scheduledExecutionEndDate: { $exists: true, $ne: null } },
         ],
       },
     ],
@@ -27,6 +27,7 @@ export const buildBookingBlockedRanges = async (
   const ranges: BookingBlockedRange[] = [];
 
   bookings.forEach((booking) => {
+    // Legacy field fallbacks are kept for older bookings until data is normalized.
     const scheduledExecutionEndDate =
       booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
     const scheduledBufferStartDate =

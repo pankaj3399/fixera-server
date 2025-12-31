@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { getGoogleMapsConfig, validateAddress } from "../../handlers/User/googleMaps";
 import { validateVAT } from "../../handlers/User/validateVat";
 import {
@@ -10,6 +11,13 @@ import {
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
+
+const schedulingRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -24,10 +32,14 @@ publicRouter.route("/vat/validate").post(validateVAT);
 publicRouter.route("/projects/:id").get(getPublishedProject);
 
 // Team availability (public endpoint for booking calendar)
-publicRouter.route("/projects/:id/availability").get(getProjectTeamAvailability);
-publicRouter.route("/projects/:id/working-hours").get(getProjectWorkingHours);
+publicRouter
+  .route("/projects/:id/availability")
+  .get(schedulingRateLimiter, getProjectTeamAvailability);
+publicRouter
+  .route("/projects/:id/working-hours")
+  .get(schedulingRateLimiter, getProjectWorkingHours);
 publicRouter
   .route("/projects/:id/schedule-proposals")
-  .get(getProjectScheduleProposals);
+  .get(schedulingRateLimiter, getProjectScheduleProposals);
 
 export default publicRouter;

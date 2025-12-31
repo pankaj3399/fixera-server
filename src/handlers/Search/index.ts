@@ -277,21 +277,6 @@ async function searchProjects(
       }
     }
 
-    // Execute query with pagination and populate professional info
-    console.log('🔍 Project search filter:', JSON.stringify(filter, null, 2));
-
-    const [projects, total] = await Promise.all([
-      Project.find(filter)
-        .populate("professionalId", "name email businessInfo hourlyRate currency profileImage")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      Project.countDocuments(filter),
-    ]);
-
-    console.log('✅ Found', total, 'projects, returning', projects.length);
-
     const normalizeValue = (value?: string | null) =>
       value ? value.trim().toLowerCase() : "";
 
@@ -347,6 +332,27 @@ async function searchProjects(
       customerStateValue,
       customerCountryValue,
     ].filter(Boolean);
+    // Execute query with pagination and populate professional info
+    console.log('dY"? Project search filter:', JSON.stringify(filter, null, 2));
+
+    const baseQuery = Project.find(filter)
+      .populate("professionalId", "name email businessInfo hourlyRate currency profileImage")
+      .sort({ createdAt: -1 });
+
+    let projects: any[] = [];
+    let total = 0;
+
+    if (hasLocationFilter) {
+      projects = await baseQuery.lean();
+      total = projects.length;
+    } else {
+      [projects, total] = await Promise.all([
+        baseQuery.skip(skip).limit(limit).lean(),
+        Project.countDocuments(filter),
+      ]);
+    }
+
+    console.log("Found", total, "projects, returning", projects.length);
 
     let results = projects;
     if (hasLocationFilter) {
@@ -403,8 +409,11 @@ async function searchProjects(
         results = [...exactMatches, ...otherMatches];
       }
     }
+    const totalResults = hasLocationFilter ? results.length : total;
+    const pagedResults = hasLocationFilter ? results.slice(skip, skip + limit) : results;
+
     const resultsWithAvailability = await Promise.all(
-      results.map(async (project: any) => {
+      pagedResults.map(async (project: any) => {
         if (project?.status !== "published") {
           return project;
         }
@@ -475,10 +484,10 @@ async function searchProjects(
     res.json({
       results: resultsWithAvailability,
       pagination: {
-        total: hasLocationFilter ? results.length : total,
+        total: totalResults,
         page: Math.ceil(skip / limit) + 1,
         limit,
-        totalPages: Math.ceil((hasLocationFilter ? results.length : total) / limit),
+        totalPages: Math.ceil(totalResults / limit),
       },
     });
   } catch (error) {

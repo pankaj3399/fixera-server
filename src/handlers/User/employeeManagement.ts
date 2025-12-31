@@ -13,7 +13,7 @@ const generatePassword = (): string => {
 };
 
 // Invite employee with email
-export const inviteEmployee  = async (req: Request, res: Response, next: NextFunction) => {
+export const inviteEmployee = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = req.cookies?.['auth-token'];
         

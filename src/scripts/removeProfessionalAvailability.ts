@@ -18,9 +18,7 @@ async function removeProfessionalAvailability() {
 
     const filter = {
       role: "professional",
-      $or: [
-        { availability: { $exists: true } },
-      ],
+      availability: { $exists: true },
     };
 
     const result = await User.updateMany(filter, {

@@ -173,6 +173,8 @@ export interface IBooking extends Document {
   updatedAt: Date;
 }
 
+const TIME_24H_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 const BookingSchema = new Schema({
   // Core references
   customer: {
@@ -384,8 +386,16 @@ const BookingSchema = new Schema({
   scheduledBufferStartDate: { type: Date },
   scheduledBufferEndDate: { type: Date },
   scheduledBufferUnit: { type: String, enum: ["hours", "days"] },
-  scheduledStartTime: { type: String }, // "HH:mm"
-  scheduledEndTime: { type: String }, // "HH:mm"
+  scheduledStartTime: {
+    type: String,
+    trim: true,
+    match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
+  },
+  scheduledEndTime: {
+    type: String,
+    trim: true,
+    match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
+  },
   actualStartDate: { type: Date },
   actualEndDate: { type: Date },
 
@@ -531,10 +541,13 @@ const BookingSchema = new Schema({
 BookingSchema.index({ customer: 1, status: 1 });
 BookingSchema.index({ professional: 1, status: 1 });
 BookingSchema.index({ project: 1, status: 1 });
+BookingSchema.index({ project: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ bookingType: 1, status: 1 });
 BookingSchema.index({ 'location.coordinates': '2dsphere' }); // Geospatial queries
 BookingSchema.index({ createdAt: -1 }); // Sort by creation date
 BookingSchema.index({ scheduledStartDate: 1 }); // Upcoming bookings
+BookingSchema.index({ scheduledBufferEndDate: 1 });
+BookingSchema.index({ assignedTeamMembers: 1 });
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 
