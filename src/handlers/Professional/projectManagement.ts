@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
+import { normalizePreparationDuration } from '../../utils/projectDurations';
 
 /**
  * Save project draft (create or update)
@@ -8,7 +9,7 @@ import Project from '../../models/project';
 export const saveProjectDraft = async (req: Request, res: Response) => {
   try {
     const userId = String(req.user?._id);
-    const projectData = req.body;
+    const projectData = normalizePreparationDuration(req.body);
 
     let project;
 

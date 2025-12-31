@@ -3,6 +3,7 @@ import {
   createBooking,
   getMyBookings,
   getBookingById,
+  submitPostBookingAnswers,
   submitQuote,
   respondToQuote,
   updateBookingStatus,
@@ -23,6 +24,9 @@ router.get('/my-bookings', getMyBookings);
 
 // Get single booking by ID
 router.get('/:bookingId', getBookingById);
+
+// Submit post-booking answers (Customer only)
+router.post('/:bookingId/post-booking-answers', submitPostBookingAnswers);
 
 // Submit quote - Professional only
 router.post('/:bookingId/quote', submitQuote);

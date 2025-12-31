@@ -3,6 +3,7 @@ import User from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
+import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 
 // They can only block specific dates
 export const updateEmployeeAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {
@@ -159,12 +160,14 @@ export const getEmployeeEffectiveAvailability = async (req: Request, res: Respon
     }
 
     // Return company's weekly schedule + employee's personal blocked dates
+    const bookingBlockedRanges = await buildBookingBlockedRanges(user._id as mongoose.Types.ObjectId);
     return res.status(200).json({
       success: true,
       data: {
         availability: professional.companyAvailability || {},
         blockedDates: user.blockedDates || [],
         blockedRanges: user.blockedRanges || [],
+        bookingBlockedRanges,
         companyBlockedDates: professional.companyBlockedDates || [],
         companyBlockedRanges: professional.companyBlockedRanges || []
       }

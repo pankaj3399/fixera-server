@@ -95,7 +95,7 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
         });
 
         // Get the professional's company availability (for employees using same_as_company)
-        const professional = await User.findById(professionalId).select('availability blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
+        const professional = await User.findById(professionalId).select('blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
 
         res.status(200).json({
             success: true,

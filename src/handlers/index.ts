@@ -41,7 +41,6 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         hourlyRate: user.hourlyRate,
         currency: user.currency,
         serviceCategories: user.serviceCategories,
-        availability: user.availability,
         blockedDates: user.blockedDates,
         blockedRanges: user.blockedRanges,
         companyAvailability: user.companyAvailability,

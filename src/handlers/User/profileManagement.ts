@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import User, { IUser } from "../../models/user";
+import User from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile } from "../../utils/s3Upload";
@@ -154,7 +154,6 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       hourlyRate,
       currency,
       serviceCategories,
-      availability,
       blockedDates,
       blockedRanges,
       companyAvailability,
@@ -220,13 +219,6 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
         });
       }
       user.serviceCategories = serviceCategories;
-    }
-
-    if (availability) {
-      user.availability = {
-        ...user.availability,
-        ...availability
-      };
     }
 
     if (blockedDates !== undefined) {
@@ -371,7 +363,6 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       hourlyRate: user.hourlyRate,
       currency: user.currency,
       serviceCategories: user.serviceCategories,
-      availability: user.availability,
       blockedDates: user.blockedDates,
       blockedRanges: user.blockedRanges,
       companyAvailability: user.companyAvailability,

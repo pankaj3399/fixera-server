@@ -3,6 +3,10 @@ import Booking, { IBooking, BookingStatus } from "../../models/booking";
 import User from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
+import {
+  buildProjectScheduleWindow,
+  validateProjectScheduleSelection,
+} from "../../utils/scheduleEngine";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -14,7 +18,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       projectId,
       rfqData, // Service type, description, answers, budget, etc.
       preferredStartDate,
-      urgency
+      preferredStartTime,
+      selectedSubprojectIndex,
+      urgency,
+      customerBlocks
     } = req.body;
 
     // Validate required fields
@@ -70,40 +77,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    // Validate professional or project exists
-    if (bookingType === 'professional') {
-      const professional = await User.findById(professionalId);
-      if (!professional || professional.role !== 'professional') {
-        return res.status(404).json({
-          success: false,
-          msg: "Professional not found"
-        });
-      }
-
-      if (professional.professionalStatus !== 'approved') {
-        return res.status(400).json({
-          success: false,
-          msg: "Professional is not approved to accept bookings"
-        });
-      }
-    } else {
-      const project = await Project.findById(projectId);
-      if (!project) {
-        return res.status(404).json({
-          success: false,
-          msg: "Project not found"
-        });
-      }
-
-      if (project.status !== 'published') {
-        return res.status(400).json({
-          success: false,
-          msg: "Project is not available for booking"
-        });
-      }
-    }
-
-    // Create booking
+    // Create booking payload (base fields)
     const bookingData: any = {
       customer: userId,
       bookingType,
@@ -127,10 +101,123 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     };
 
+    if (customerBlocks) {
+      bookingData.customerBlocks = customerBlocks;
+    }
+
+    // Validate professional or project exists
     if (bookingType === 'professional') {
+      const professional = await User.findById(professionalId);
+      if (!professional || professional.role !== 'professional') {
+        return res.status(404).json({
+          success: false,
+          msg: "Professional not found"
+        });
+      }
+
+      if (professional.professionalStatus !== 'approved') {
+        return res.status(400).json({
+          success: false,
+          msg: "Professional is not approved to accept bookings"
+        });
+      }
+
       bookingData.professional = professionalId;
     } else {
+      const project = await Project.findById(projectId);
+      if (!project) {
+        return res.status(404).json({
+          success: false,
+          msg: "Project not found"
+        });
+      }
+
+      if (project.status !== 'published') {
+        return res.status(400).json({
+          success: false,
+          msg: "Project is not available for booking"
+        });
+      }
+
       bookingData.project = projectId;
+      bookingData.professional = project.professionalId;
+
+      const rawStartDate =
+        preferredStartDate || rfqData?.preferredStartDate || undefined;
+      const rawStartTime =
+        preferredStartTime || rfqData?.preferredStartTime || undefined;
+      const normalizedStartDate =
+        typeof rawStartDate === "string"
+          ? /^\d{4}-\d{2}-\d{2}$/.test(rawStartDate)
+            ? rawStartDate
+            : (() => {
+                const parsed = new Date(rawStartDate);
+                if (Number.isNaN(parsed.getTime())) return rawStartDate;
+                return parsed.toISOString().slice(0, 10);
+              })()
+          : undefined;
+
+      const parsedSubprojectIndex =
+        typeof selectedSubprojectIndex === "number"
+          ? selectedSubprojectIndex
+          : typeof selectedSubprojectIndex === "string"
+          ? Number.parseInt(selectedSubprojectIndex, 10)
+          : undefined;
+      const subprojectIndex =
+        typeof parsedSubprojectIndex === "number" &&
+        !Number.isNaN(parsedSubprojectIndex)
+          ? parsedSubprojectIndex
+          : undefined;
+
+      const validation = await validateProjectScheduleSelection({
+        projectId,
+        subprojectIndex,
+        startDate: normalizedStartDate,
+        startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+        customerBlocks,
+      });
+
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          msg: validation.reason || "Selected schedule is not available",
+        });
+      }
+
+      if (normalizedStartDate) {
+        const window = await buildProjectScheduleWindow({
+          projectId,
+          subprojectIndex,
+          startDate: normalizedStartDate,
+          startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+          customerBlocks,
+        });
+
+        if (!window) {
+          return res.status(400).json({
+            success: false,
+            msg: "Unable to schedule the selected window",
+          });
+        }
+
+        bookingData.scheduledStartDate = window.scheduledStartDate;
+        if (window.scheduledExecutionEndDate) {
+          bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
+        }
+        if (window.scheduledBufferStartDate) {
+          bookingData.scheduledBufferStartDate = window.scheduledBufferStartDate;
+        }
+        bookingData.scheduledBufferEndDate = window.scheduledBufferEndDate;
+        if (window.scheduledBufferUnit) {
+          bookingData.scheduledBufferUnit = window.scheduledBufferUnit;
+        }
+        if (window.scheduledStartTime) {
+          bookingData.scheduledStartTime = window.scheduledStartTime;
+        }
+        if (window.scheduledEndTime) {
+          bookingData.scheduledEndTime = window.scheduledEndTime;
+        }
+      }
     }
 
     const booking = await Booking.create(bookingData);
@@ -183,7 +270,14 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     if (user.role === 'customer') {
       query.customer = userId;
     } else if (user.role === 'professional') {
-      query.professional = userId;
+      const projectIds = await Project.find({
+        professionalId: userId,
+      }).select("_id");
+      const projectIdList = projectIds.map((project) => project._id);
+      query.$or = [
+        { professional: userId },
+        { project: { $in: projectIdList } },
+      ];
     } else {
       return res.status(403).json({
         success: false,
@@ -230,6 +324,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
 export const getBookingById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
+    const userIdString = userId ? userId.toString() : '';
     const { bookingId } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(bookingId)) {
@@ -241,8 +336,8 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email businessInfo hourlyRate availability')
-      .populate('project', 'title description pricing category service team')
+      .populate('professional', 'name email businessInfo hourlyRate')
+      .populate('project', 'title description pricing category service team postBookingQuestions')
       .populate('assignedTeamMembers', 'name email');
 
     if (!booking) {
@@ -253,8 +348,8 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     }
 
     // Check authorization - only customer or professional can view
-    const isCustomer = booking.customer._id.toString() === userId;
-    const isProfessional = booking.professional?._id.toString() === userId;
+    const isCustomer = booking.customer._id.toString() === userIdString;
+    const isProfessional = booking.professional?._id.toString() === userIdString;
 
     if (!isCustomer && !isProfessional) {
       return res.status(403).json({
@@ -270,6 +365,117 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
   } catch (error: any) {
     console.error('Get booking error:', error);
+    next(error);
+  }
+};
+
+export const submitPostBookingAnswers = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const userId = req.user?._id;
+    const userIdString = userId ? userId.toString() : '';
+    const { bookingId } = req.params;
+    const { answers } = req.body as {
+      answers?: Array<{ questionId?: string; question?: string; answer?: string }>;
+    };
+
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid booking ID",
+      });
+    }
+
+    if (!Array.isArray(answers)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Answers are required",
+      });
+    }
+
+    const booking = await Booking.findById(bookingId).populate(
+      "project",
+      "postBookingQuestions"
+    );
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        msg: "Booking not found",
+      });
+    }
+
+    if (booking.customer.toString() !== userIdString) {
+      return res.status(403).json({
+        success: false,
+        msg: "You do not have permission to submit answers for this booking",
+      });
+    }
+
+    if ((booking.postBookingData?.length || 0) > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "Post-booking answers already submitted",
+      });
+    }
+
+    const project = booking.project as any;
+    const postBookingQuestions = project?.postBookingQuestions || [];
+    if (postBookingQuestions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "No post-booking questions available for this booking",
+      });
+    }
+
+    const normalizedAnswers = answers.map((answer) => ({
+      questionId: answer.questionId || "",
+      question: answer.question || "",
+      answer: (answer.answer || "").trim(),
+    }));
+
+    const hasMissingRequired = postBookingQuestions.some((question: any) => {
+      if (!question?.isRequired) {
+        return false;
+      }
+
+      const questionId = question._id?.toString() || question.id;
+      const matched = normalizedAnswers.find((answer) => {
+        if (questionId && answer.questionId === questionId) {
+          return true;
+        }
+        if (question?.question && answer.question === question.question) {
+          return true;
+        }
+        return false;
+      });
+
+      return !matched || !matched.answer;
+    });
+
+    if (hasMissingRequired) {
+      return res.status(400).json({
+        success: false,
+        msg: "Please answer all required questions",
+      });
+    }
+
+    booking.postBookingData = normalizedAnswers.filter(
+      (answer) => answer.answer
+    ) as any;
+
+    await booking.save();
+
+    return res.status(200).json({
+      success: true,
+      msg: "Post-booking answers submitted successfully",
+      postBookingData: booking.postBookingData,
+    });
+  } catch (error: any) {
+    console.error("Submit post-booking answers error:", error);
     next(error);
   }
 };

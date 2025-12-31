@@ -422,6 +422,13 @@ const UserSchema = new Schema({
     timestamps: true
 });
 
+UserSchema.pre("save", function (next) {
+    if (this.role === "professional") {
+        this.set("availability", undefined);
+    }
+    next();
+});
+
 UserSchema.index({ role: 1, professionalStatus: 1 });
 UserSchema.index({ role: 1 });
 UserSchema.index({ role: 1, loyaltyPoints: 1 });
