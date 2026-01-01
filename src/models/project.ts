@@ -10,12 +10,13 @@ export interface ICertification {
 
 export interface IDistance {
   address: string;
+  countryCode?: string; // ISO 3166-1 alpha-2 country code (e.g., "US", "NL", "DE")
   useCompanyAddress: boolean;
   maxKmRange: number;
   noBorders: boolean;
-  coordinates?: {
-    latitude: number;
-    longitude: number;
+  location?: {
+    type: "Point";
+    coordinates: [number, number];
   };
 }
 
@@ -230,12 +231,48 @@ const CertificationSchema = new Schema<ICertification>({
 // Distance Schema
 const DistanceSchema = new Schema<IDistance>({
   address: { type: String, required: true },
+  countryCode: {
+    type: String,
+    validate: {
+      validator: (value: string) =>
+        !value || /^[A-Z]{2}$/.test(value),
+      message: "countryCode must be a valid ISO 3166-1 alpha-2 code (e.g., 'US', 'NL', 'DE')",
+    },
+  },
   useCompanyAddress: { type: Boolean, default: false },
   maxKmRange: { type: Number, required: true, min: 1, max: 200 },
   noBorders: { type: Boolean, default: false },
-  coordinates: {
-    latitude: { type: Number, min: -90, max: 90 },
-    longitude: { type: Number, min: -180, max: 180 },
+  location: {
+    type: {
+      type: String,
+      enum: ["Point"],
+      default: "Point",
+    },
+    coordinates: {
+      type: [Number],
+      validate: {
+        validator: (value: number[]) => {
+          if (!value || (Array.isArray(value) && value.length === 0)) {
+            return true;
+          }
+          if (!Array.isArray(value) || value.length !== 2) {
+            return false;
+          }
+          const [longitude, latitude] = value;
+          if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+            return false;
+          }
+          if (longitude < -180 || longitude > 180) {
+            return false;
+          }
+          if (latitude < -90 || latitude > 90) {
+            return false;
+          }
+          return true;
+        },
+        message: "Invalid coordinates: expected [longitude, latitude] with longitude ∈ [-180,180] and latitude ∈ [-90,90]",
+      },
+    },
   },
 });
 
@@ -507,6 +544,7 @@ ProjectSchema.index({ professionalId: 1, autoSaveTimestamp: -1 });
 ProjectSchema.index({ title: 'text', description: 'text' });
 ProjectSchema.index({ category: 1, service: 1 });
 ProjectSchema.index({ status: 1 });
+ProjectSchema.index({ "distance.location": "2dsphere" });
 
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {

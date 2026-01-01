@@ -286,27 +286,8 @@ async function searchProjects(
       return Number.isFinite(parsed) ? parsed : null;
     };
 
-    const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-      const toRad = (val: number) => (val * Math.PI) / 180;
-      const r = 6371;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      return r * c;
-    };
-
-    const getProjectCoordinates = (project: any) => {
-      const coords = project?.distance?.coordinates;
-      if (!coords) return null;
-      const latitude = typeof coords.latitude === "number" ? coords.latitude : typeof coords.lat === "number" ? coords.lat : null;
-      const longitude = typeof coords.longitude === "number" ? coords.longitude : typeof coords.lng === "number" ? coords.lng : null;
-      if (latitude === null || longitude === null) return null;
-      return { latitude, longitude };
-    };
+    const escapeRegExp = (value: string) =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
     const customerLatValue = parseCoordinate(customerLat);
     const customerLonValue = parseCoordinate(customerLon);
@@ -315,6 +296,7 @@ async function searchProjects(
     const customerCityValue = normalizeValue(customerCity);
     const customerAddressValue = normalizeValue(customerAddress);
     const locationValue = normalizeValue(location);
+    const hasGeoCoordinates = customerLatValue !== null && customerLonValue !== null;
 
     const hasLocationFilter = Boolean(
       locationValue ||
@@ -322,7 +304,7 @@ async function searchProjects(
         customerCityValue ||
         customerStateValue ||
         customerCountryValue ||
-        (customerLatValue !== null && customerLonValue !== null)
+        hasGeoCoordinates
     );
 
     const locationParts = [
@@ -341,8 +323,106 @@ async function searchProjects(
 
     let projects: any[] = [];
     let total = 0;
+    let usedGeoSearch = false;
+    let filteredResults: any[] | null = null;
 
-    if (hasLocationFilter) {
+    if (customerLatValue !== null && customerLonValue !== null) {
+      usedGeoSearch = true;
+      const nearLatitude = customerLatValue;
+      const nearLongitude = customerLonValue;
+      const maxDistanceMeters = 200 * 1000;
+      const geoPipeline: any[] = [
+        {
+          $geoNear: {
+            near: {
+              type: "Point",
+              coordinates: [nearLongitude, nearLatitude],
+            },
+            distanceField: "geoDistanceMeters",
+            spherical: true,
+            maxDistance: maxDistanceMeters,
+            query: filter,
+            key: "distance.location",
+          },
+        },
+      ];
+
+      if (customerCountryValue) {
+        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2)
+        // Fall back to regex on address for backwards compatibility
+        const countryCodeUpper = customerCountryValue.toUpperCase();
+        const countryRegex = new RegExp(escapeRegExp(customerCountryValue), "i");
+        geoPipeline.push({
+          $match: {
+            $or: [
+              { "distance.noBorders": true },
+              { "distance.countryCode": countryCodeUpper },
+              // Fallback: match address if countryCode not set
+              {
+                $and: [
+                  { "distance.countryCode": { $exists: false } },
+                  { "distance.address": countryRegex },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      geoPipeline.push({
+        $match: {
+          $expr: {
+            $lte: [
+              "$geoDistanceMeters",
+              { $multiply: ["$distance.maxKmRange", 1000] },
+            ],
+          },
+        },
+      });
+
+      if (locationValue) {
+        geoPipeline.push({
+          $addFields: {
+            locationExactMatch: {
+              $eq: [
+                { $toLower: { $ifNull: ["$distance.address", ""] } },
+                locationValue,
+              ],
+            },
+          },
+        });
+        geoPipeline.push({
+          $sort: {
+            locationExactMatch: -1,
+            createdAt: -1,
+          },
+        });
+      } else {
+        geoPipeline.push({ $sort: { createdAt: -1 } });
+      }
+
+      geoPipeline.push({
+        $project: {
+          geoDistanceMeters: 0,
+          locationExactMatch: 0,
+        },
+      });
+
+      geoPipeline.push({
+        $facet: {
+          results: [{ $skip: skip }, { $limit: limit }],
+          total: [{ $count: "count" }],
+        },
+      });
+
+      const [geoResult] = await Project.aggregate(geoPipeline);
+      projects = geoResult?.results ?? [];
+      total = geoResult?.total?.[0]?.count ?? 0;
+      projects = await Project.populate(projects, {
+        path: "professionalId",
+        select: "name email businessInfo hourlyRate currency profileImage",
+      });
+    } else if (hasLocationFilter) {
       projects = await baseQuery.lean();
       total = projects.length;
       // Performance warning: location filtering loads all projects into memory
@@ -361,36 +441,22 @@ async function searchProjects(
 
     console.log("Found", total, "projects, returning", projects.length);
 
-    let results = projects;
-    if (hasLocationFilter) {
-      results = projects.filter((project: any) => {
+    if (hasLocationFilter && !usedGeoSearch) {
+      filteredResults = projects.filter((project: any) => {
         const distance = project.distance || {};
         const projectAddress = normalizeValue(distance.address);
-        const maxKmRange =
-          typeof distance.maxKmRange === "number" ? distance.maxKmRange : null;
+        const projectCountryCode = typeof distance.countryCode === "string" ? distance.countryCode : null;
         const noBorders = Boolean(distance.noBorders);
 
-        const projectCoords = getProjectCoordinates(project);
-
         if (!noBorders && customerCountryValue) {
-          if (!projectAddress || !projectAddress.includes(customerCountryValue)) {
+          const customerCountryUpper = customerCountryValue.toUpperCase();
+          // Prefer matching by countryCode, fallback to address matching
+          const countryMatches = projectCountryCode
+            ? projectCountryCode === customerCountryUpper
+            : projectAddress?.includes(customerCountryValue);
+          if (!countryMatches) {
             return false;
           }
-        }
-
-        if (
-          projectCoords &&
-          customerLatValue !== null &&
-          customerLonValue !== null &&
-          typeof maxKmRange === "number"
-        ) {
-          const distanceKm = calculateDistanceKm(
-            customerLatValue,
-            customerLonValue,
-            projectCoords.latitude,
-            projectCoords.longitude
-          );
-          return distanceKm <= maxKmRange;
         }
 
         if (!projectAddress) {
@@ -398,29 +464,31 @@ async function searchProjects(
         }
 
         if (locationParts.length === 0) {
-          return true;
+          return false;
         }
 
         return locationParts.some((part) => projectAddress.includes(part));
       });
 
       if (locationValue) {
-        const exactMatches = results.filter((project: any) => {
+        const exactMatches = filteredResults.filter((project: any) => {
           const projectAddress = normalizeValue(project.distance?.address);
           return projectAddress === locationValue;
         });
-        const otherMatches = results.filter((project: any) => {
+        const otherMatches = filteredResults.filter((project: any) => {
           const projectAddress = normalizeValue(project.distance?.address);
           return projectAddress !== locationValue;
         });
-        results = [...exactMatches, ...otherMatches];
+        filteredResults = [...exactMatches, ...otherMatches];
       }
     }
-    const totalResults = hasLocationFilter ? results.length : total;
-    const pagedResults = hasLocationFilter ? results.slice(skip, skip + limit) : results;
+
+    const baseResults = filteredResults ?? projects;
+    const totalCount = filteredResults ? baseResults.length : total;
+    const finalResults = filteredResults ? baseResults.slice(skip, skip + limit) : baseResults;
 
     // Batch-load professionals for all published projects to avoid N+1 queries
-    const publishedProjects = pagedResults.filter((p: any) => p?.status === "published");
+    const publishedProjects = finalResults.filter((p: any) => p?.status === "published");
     const professionalIdSet = new Set(
       publishedProjects
         .map((p: any) => p.professionalId?._id?.toString() || p.professionalId?.toString())
@@ -441,7 +509,7 @@ async function searchProjects(
     );
 
     const resultsWithAvailability = await Promise.all(
-      pagedResults.map(async (project: any) => {
+      finalResults.map(async (project: any) => {
         if (project?.status !== "published") {
           return project;
         }
@@ -522,10 +590,10 @@ async function searchProjects(
     res.json({
       results: resultsWithAvailability,
       pagination: {
-        total: totalResults,
+        total: totalCount,
         page: Math.ceil(skip / limit) + 1,
         limit,
-        totalPages: Math.ceil(totalResults / limit),
+        totalPages: Math.ceil(totalCount / limit),
       },
     });
   } catch (error) {
