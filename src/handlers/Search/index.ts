@@ -348,12 +348,22 @@ async function searchProjects(
       ];
 
       if (customerCountryValue) {
+        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2)
+        // Fall back to regex on address for backwards compatibility
+        const countryCodeUpper = customerCountryValue.toUpperCase();
         const countryRegex = new RegExp(escapeRegExp(customerCountryValue), "i");
         geoPipeline.push({
           $match: {
             $or: [
               { "distance.noBorders": true },
-              { "distance.address": countryRegex },
+              { "distance.countryCode": countryCodeUpper },
+              // Fallback: match address if countryCode not set
+              {
+                $and: [
+                  { "distance.countryCode": { $exists: false } },
+                  { "distance.address": countryRegex },
+                ],
+              },
             ],
           },
         });
@@ -435,10 +445,16 @@ async function searchProjects(
       filteredResults = projects.filter((project: any) => {
         const distance = project.distance || {};
         const projectAddress = normalizeValue(distance.address);
+        const projectCountryCode = typeof distance.countryCode === "string" ? distance.countryCode : null;
         const noBorders = Boolean(distance.noBorders);
 
         if (!noBorders && customerCountryValue) {
-          if (!projectAddress || !projectAddress.includes(customerCountryValue)) {
+          const customerCountryUpper = customerCountryValue.toUpperCase();
+          // Prefer matching by countryCode, fallback to address matching
+          const countryMatches = projectCountryCode
+            ? projectCountryCode === customerCountryUpper
+            : projectAddress?.includes(customerCountryValue);
+          if (!countryMatches) {
             return false;
           }
         }

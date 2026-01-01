@@ -10,6 +10,7 @@ export interface ICertification {
 
 export interface IDistance {
   address: string;
+  countryCode?: string; // ISO 3166-1 alpha-2 country code (e.g., "US", "NL", "DE")
   useCompanyAddress: boolean;
   maxKmRange: number;
   noBorders: boolean;
@@ -230,6 +231,14 @@ const CertificationSchema = new Schema<ICertification>({
 // Distance Schema
 const DistanceSchema = new Schema<IDistance>({
   address: { type: String, required: true },
+  countryCode: {
+    type: String,
+    validate: {
+      validator: (value: string) =>
+        !value || /^[A-Z]{2}$/.test(value),
+      message: "countryCode must be a valid ISO 3166-1 alpha-2 code (e.g., 'US', 'NL', 'DE')",
+    },
+  },
   useCompanyAddress: { type: Boolean, default: false },
   maxKmRange: { type: Number, required: true, min: 1, max: 200 },
   noBorders: { type: Boolean, default: false },

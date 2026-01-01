@@ -14,6 +14,11 @@ type GeoPoint = {
   coordinates: [number, number];
 };
 
+type GeocodeResult = {
+  coordinates: CoordinatePair;
+  countryCode: string | null;
+};
+
 const parseNumber = (value: unknown): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
@@ -94,7 +99,19 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const GEOCODE_TIMEOUT_MS = 10_000;
 
-const geocodeAddress = async (address: string, apiKey: string): Promise<CoordinatePair | null> => {
+const extractCountryCode = (addressComponents: any[]): string | null => {
+  if (!Array.isArray(addressComponents)) return null;
+  const countryComponent = addressComponents.find(
+    (comp: any) => Array.isArray(comp.types) && comp.types.includes("country")
+  );
+  const shortName = countryComponent?.short_name;
+  if (typeof shortName === "string" && /^[A-Z]{2}$/.test(shortName)) {
+    return shortName;
+  }
+  return null;
+};
+
+const geocodeAddress = async (address: string, apiKey: string): Promise<GeocodeResult | null> => {
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), GEOCODE_TIMEOUT_MS);
@@ -110,7 +127,8 @@ const geocodeAddress = async (address: string, apiKey: string): Promise<Coordina
     if (data.status !== "OK" || !Array.isArray(data.results) || data.results.length === 0) {
       return null;
     }
-    const location = data.results[0]?.geometry?.location;
+    const result = data.results[0];
+    const location = result?.geometry?.location;
     const latitude = parseNumber(location?.lat);
     const longitude = parseNumber(location?.lng);
     if (latitude === null || longitude === null) {
@@ -120,7 +138,8 @@ const geocodeAddress = async (address: string, apiKey: string): Promise<Coordina
       console.warn(`Discarding invalid geocoded coordinates: lat=${latitude}, lng=${longitude}`);
       return null;
     }
-    return { latitude, longitude };
+    const countryCode = extractCountryCode(result?.address_components);
+    return { coordinates: { latitude, longitude }, countryCode };
   } catch (error) {
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === "AbortError") {
@@ -182,46 +201,66 @@ async function backfillProjectGeo() {
       let nextLocation: GeoPoint | null = locationCoords
         ? { type: "Point", coordinates: locationCoords }
         : null;
+      let nextCountryCode: string | null = null;
+      const existingCountryCode = typeof distance.countryCode === "string" ? distance.countryCode : null;
 
       if (!nextLocation && legacyCoords) {
         nextLocation = buildLocation(legacyCoords);
         fromLegacyCoords += 1;
       }
 
-      if (!nextLocation) {
-        if (!address) {
-          skippedMissingAddress += 1;
-          skipped += 1;
-          continue;
-        }
-        if (!apiKey) {
-          console.warn(`Missing GOOGLE_MAPS_API_KEY, skipping project ${project._id}`);
-          skippedMissingKey += 1;
-          skipped += 1;
-          continue;
-        }
+      // If we need location or country code, try geocoding
+      const needsLocation = !nextLocation;
+      const needsCountryCode = !existingCountryCode;
 
-        const geocodedCoords = await geocodeAddress(address, apiKey);
-        if (!geocodedCoords) {
-          console.warn(`Geocoding failed for project ${project._id}`);
-          skippedGeocodeFailed += 1;
-          skipped += 1;
-          continue;
+      if (needsLocation || needsCountryCode) {
+        if (!address) {
+          if (needsLocation) {
+            skippedMissingAddress += 1;
+            skipped += 1;
+            continue;
+          }
+        } else if (!apiKey) {
+          if (needsLocation) {
+            console.warn(`Missing GOOGLE_MAPS_API_KEY, skipping project ${project._id}`);
+            skippedMissingKey += 1;
+            skipped += 1;
+            continue;
+          }
+        } else {
+          const geocodeResult = await geocodeAddress(address, apiKey);
+          if (!geocodeResult) {
+            if (needsLocation) {
+              console.warn(`Geocoding failed for project ${project._id}`);
+              skippedGeocodeFailed += 1;
+              skipped += 1;
+              continue;
+            }
+          } else {
+            if (needsLocation) {
+              nextLocation = buildLocation(geocodeResult.coordinates);
+            }
+            if (needsCountryCode) {
+              nextCountryCode = geocodeResult.countryCode;
+            }
+            geocoded += 1;
+            await delay(geocodeDelayMs);
+          }
         }
-        nextLocation = buildLocation(geocodedCoords);
-        geocoded += 1;
-        await delay(geocodeDelayMs);
       }
 
-      if (!nextLocation) {
+      if (!nextLocation && !existingCountryCode && !nextCountryCode) {
         skipped += 1;
         continue;
       }
 
       const setUpdate: Record<string, unknown> = {};
       const unsetUpdate: Record<string, unknown> = {};
-      if (!hasLocation) {
+      if (!hasLocation && nextLocation) {
         setUpdate["distance.location"] = nextLocation;
+      }
+      if (!existingCountryCode && nextCountryCode) {
+        setUpdate["distance.countryCode"] = nextCountryCode;
       }
       if (hasCoordinates) {
         unsetUpdate["distance.coordinates"] = "";
