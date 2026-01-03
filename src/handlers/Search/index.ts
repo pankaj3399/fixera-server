@@ -302,6 +302,11 @@ async function searchProjects(
       return id && Types.ObjectId.isValid(id) ? id : null;
     };
 
+    const getRawProfessionalId = (project: any) =>
+      project.professionalId?._id?.toString?.() ||
+      project.professionalId?.toString?.() ||
+      project.professionalId;
+
     const escapeRegExp = (value: string) =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -503,10 +508,7 @@ async function searchProjects(
     const professionalIdSet = new Set(
       publishedProjects
         .map((p: any) => {
-          const raw =
-            p.professionalId?._id?.toString?.() ||
-            p.professionalId?.toString?.() ||
-            p.professionalId;
+          const raw = getRawProfessionalId(p);
           const id = toObjectIdString(p.professionalId);
           if (!id && raw) {
             invalidProfessionalIds.add(String(raw));
@@ -541,10 +543,7 @@ async function searchProjects(
 
         try {
           // Get professional from pre-loaded map
-          const rawProfessionalId =
-            project.professionalId?._id?.toString?.() ||
-            project.professionalId?.toString?.() ||
-            project.professionalId;
+          const rawProfessionalId = getRawProfessionalId(project);
           const profId = toObjectIdString(project.professionalId);
           const professional = profId ? professionalMap.get(profId) : null;
 
@@ -632,13 +631,13 @@ async function searchProjects(
             firstAvailableWindow: proposals?.earliestProposal
               ? {
                 start: proposals.earliestProposal.start,
-                end: proposals.earliestProposal.end,
+                end: proposals.earliestProposal.executionEnd || proposals.earliestProposal.end,
               }
               : null,
             shortestThroughputWindow: proposals?.shortestThroughputProposal
               ? {
                 start: proposals.shortestThroughputProposal.start,
-                end: proposals.shortestThroughputProposal.end,
+                end: proposals.shortestThroughputProposal.executionEnd || proposals.shortestThroughputProposal.end,
               }
               : null,
           };
