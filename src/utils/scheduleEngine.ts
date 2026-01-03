@@ -634,7 +634,8 @@ const getAvailableSlotsForDate = (
   blockedDates: Set<string>,
   blockedRanges: Array<{ start: Date; end: Date }>,
   timeZone: string,
-  notBefore?: Date
+  notBefore?: Date,
+  buffer?: Duration | null
 ) => {
   const dateKey = formatDateKey(zonedDate);
   if (blockedDates.has(dateKey)) return [];
@@ -679,14 +680,42 @@ const getAvailableSlotsForDate = (
     const slotStartUtc = fromZonedTime(slotStartZoned, timeZone);
     const slotEndUtc = new Date(slotStartUtc.getTime() + executionMinutes * 60000);
 
-    const overlaps = blockedRanges.some(
-      (range) => slotStartUtc < range.end && slotEndUtc > range.start
-    );
+    const overlaps = windowOverlapsRanges(slotStartUtc, slotEndUtc, blockedRanges);
 
-    if (!overlaps) {
-      const timeLabel = formatMinutesToTime(startMinutes);
-      slots.push({ startZoned: slotStartZoned, startTime: timeLabel });
+    if (overlaps) {
+      continue;
     }
+
+    if (buffer && buffer.value > 0) {
+      const executionEndZoned = new Date(
+        slotStartZoned.getTime() + executionMinutes * 60000
+      );
+      const bufferStartZoned = getBufferStartZoned(
+        executionEndZoned,
+        "hours",
+        buffer
+      );
+      const bufferEndZoned = calculateBufferEnd(
+        executionEndZoned,
+        buffer,
+        "hours",
+        availability,
+        blockedDates,
+        blockedRanges,
+        timeZone
+      );
+
+      if (bufferStartZoned && bufferEndZoned > bufferStartZoned) {
+        const bufferStartUtc = fromZonedTime(bufferStartZoned, timeZone);
+        const bufferEndUtc = fromZonedTime(bufferEndZoned, timeZone);
+        if (windowOverlapsRanges(bufferStartUtc, bufferEndUtc, blockedRanges)) {
+          continue;
+        }
+      }
+    }
+
+    const timeLabel = formatMinutesToTime(startMinutes);
+    slots.push({ startZoned: slotStartZoned, startTime: timeLabel });
   }
 
   return slots;
@@ -755,6 +784,14 @@ const addWorkingHours = (
 
   return cursor;
 };
+
+const windowOverlapsRanges = (
+  windowStartUtc: Date,
+  windowEndUtc: Date,
+  blockedRanges: Array<{ start: Date; end: Date }>
+) => blockedRanges.some(
+  (range) => windowStartUtc < range.end && windowEndUtc > range.start
+);
 
 const calculateBufferEnd = (
   executionEndZoned: Date,
@@ -868,7 +905,8 @@ export const buildProjectScheduleProposalsWithData = async (
         blockedDates,
         blockedRanges,
         timeZone,
-        prepEnd
+        prepEnd,
+        durations.buffer
       );
 
       if (slots.length === 0) {
@@ -1077,7 +1115,8 @@ export const validateProjectScheduleSelection = async ({
       blockedDates,
       blockedRanges,
       timeZone,
-      prepEnd
+      prepEnd,
+      durations.buffer
     );
 
     const matchingSlot = slots.find((slot) => slot.startTime === startTime);

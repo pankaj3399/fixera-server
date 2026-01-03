@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import User from "../../models/user";
 import Project from "../../models/project";
 import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngine";
@@ -286,6 +287,26 @@ async function searchProjects(
       return Number.isFinite(parsed) ? parsed : null;
     };
 
+    const toObjectIdString = (value?: unknown) => {
+      if (!value) return null;
+      const raw =
+        typeof value === "object" && (value as any)?._id != null
+          ? (value as any)._id
+          : value;
+      const id =
+        typeof raw === "string"
+          ? raw
+          : typeof raw?.toString === "function"
+            ? raw.toString()
+            : null;
+      return id && Types.ObjectId.isValid(id) ? id : null;
+    };
+
+    const getRawProfessionalId = (project: any) =>
+      project.professionalId?._id?.toString?.() ||
+      project.professionalId?.toString?.() ||
+      project.professionalId;
+
     const escapeRegExp = (value: string) =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -300,11 +321,11 @@ async function searchProjects(
 
     const hasLocationFilter = Boolean(
       locationValue ||
-        customerAddressValue ||
-        customerCityValue ||
-        customerStateValue ||
-        customerCountryValue ||
-        hasGeoCoordinates
+      customerAddressValue ||
+      customerCityValue ||
+      customerStateValue ||
+      customerCountryValue ||
+      hasGeoCoordinates
     );
 
     const locationParts = [
@@ -317,9 +338,7 @@ async function searchProjects(
     // Execute query with pagination and populate professional info
     console.log('dY"? Project search filter:', JSON.stringify(filter, null, 2));
 
-    const baseQuery = Project.find(filter)
-      .populate("professionalId", "name email businessInfo hourlyRate currency profileImage")
-      .sort({ createdAt: -1 });
+    const baseQuery = Project.find(filter).sort({ createdAt: -1 });
 
     let projects: any[] = [];
     let total = 0;
@@ -418,10 +437,6 @@ async function searchProjects(
       const [geoResult] = await Project.aggregate(geoPipeline);
       projects = geoResult?.results ?? [];
       total = geoResult?.total?.[0]?.count ?? 0;
-      projects = await Project.populate(projects, {
-        path: "professionalId",
-        select: "name email businessInfo hourlyRate currency profileImage",
-      });
     } else if (hasLocationFilter) {
       projects = await baseQuery.lean();
       total = projects.length;
@@ -489,9 +504,17 @@ async function searchProjects(
 
     // Batch-load professionals for all published projects to avoid N+1 queries
     const publishedProjects = finalResults.filter((p: any) => p?.status === "published");
+    const invalidProfessionalIds = new Set<string>();
     const professionalIdSet = new Set(
       publishedProjects
-        .map((p: any) => p.professionalId?._id?.toString() || p.professionalId?.toString())
+        .map((p: any) => {
+          const raw = getRawProfessionalId(p);
+          const id = toObjectIdString(p.professionalId);
+          if (!id && raw) {
+            invalidProfessionalIds.add(String(raw));
+          }
+          return id;
+        })
         .filter(Boolean)
     );
     const professionalIds = Array.from(professionalIdSet);
@@ -499,14 +522,17 @@ async function searchProjects(
     // Fetch all professionals in a single query
     const professionalsData = professionalIds.length > 0
       ? await User.find({ _id: { $in: professionalIds } })
-          .select("companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone")
-          .lean()
+        .select(
+          "name email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
+        )
+        .lean()
       : [];
 
     // Create a lookup map for quick access
     const professionalMap = new Map(
       professionalsData.map((p: any) => [p._id.toString(), p])
     );
+    const shouldLogAvailability = process.env.NODE_ENV !== "production";
 
     const resultsWithAvailability = await Promise.all(
       finalResults.map(async (project: any) => {
@@ -516,12 +542,29 @@ async function searchProjects(
 
         try {
           // Get professional from pre-loaded map
-          const profId = project.professionalId?._id?.toString() || project.professionalId?.toString();
+          const rawProfessionalId = getRawProfessionalId(project);
+          const profId = toObjectIdString(project.professionalId);
           const professional = profId ? professionalMap.get(profId) : null;
 
           if (!professional) {
+            if (shouldLogAvailability) {
+              console.warn("[SEARCH] Missing professional for availability", {
+                projectId: project?._id?.toString?.() || project?._id,
+                professionalId: rawProfessionalId,
+              });
+            }
             return project;
           }
+
+          const professionalSummary = {
+            _id: professional._id,
+            name: professional.name,
+            email: professional.email,
+            businessInfo: professional.businessInfo,
+            hourlyRate: professional.hourlyRate,
+            currency: professional.currency,
+            profileImage: professional.profileImage,
+          };
 
           // Get main project availability - use first subproject
           const hasMainDuration = project.executionDuration?.value;
@@ -531,6 +574,14 @@ async function searchProjects(
             professional,
             defaultSubprojectIndex
           );
+          if (!proposals && shouldLogAvailability) {
+            console.warn("[SEARCH] Missing main proposals", {
+              projectId: project?._id?.toString?.() || project?._id,
+              executionDuration: project?.executionDuration,
+              timeMode: project?.timeMode,
+              subprojectIndex: defaultSubprojectIndex ?? null,
+            });
+          }
 
           // Get availability for each subproject (reuse pre-loaded professional)
           const subprojectsWithAvailability = await Promise.all(
@@ -541,20 +592,28 @@ async function searchProjects(
                   professional,
                   index
                 );
+                if (!subprojectProposals && shouldLogAvailability) {
+                  console.warn("[SEARCH] Missing subproject proposals", {
+                    projectId: project?._id?.toString?.() || project?._id,
+                    subprojectIndex: index,
+                    subprojectName: subproject?.name,
+                    executionDuration: subproject?.executionDuration,
+                  });
+                }
                 return {
                   ...subproject,
                   firstAvailableDate: subprojectProposals?.earliestBookableDate || null,
                   firstAvailableWindow: subprojectProposals?.earliestProposal
                     ? {
-                        start: subprojectProposals.earliestProposal.start,
-                        end: subprojectProposals.earliestProposal.executionEnd || subprojectProposals.earliestProposal.end,
-                      }
+                      start: subprojectProposals.earliestProposal.start,
+                      end: subprojectProposals.earliestProposal.executionEnd || subprojectProposals.earliestProposal.end,
+                    }
                     : null,
                   shortestThroughputWindow: subprojectProposals?.shortestThroughputProposal
                     ? {
-                        start: subprojectProposals.shortestThroughputProposal.start,
-                        end: subprojectProposals.shortestThroughputProposal.executionEnd || subprojectProposals.shortestThroughputProposal.end,
-                      }
+                      start: subprojectProposals.shortestThroughputProposal.start,
+                      end: subprojectProposals.shortestThroughputProposal.executionEnd || subprojectProposals.shortestThroughputProposal.end,
+                    }
                     : null,
                 };
               } catch {
@@ -565,19 +624,20 @@ async function searchProjects(
 
           return {
             ...project,
+            professionalId: professionalSummary,
             subprojects: subprojectsWithAvailability,
             firstAvailableDate: proposals?.earliestBookableDate || null,
             firstAvailableWindow: proposals?.earliestProposal
               ? {
-                  start: proposals.earliestProposal.start,
-                  end: proposals.earliestProposal.end,
-                }
+                start: proposals.earliestProposal.start,
+                end: proposals.earliestProposal.executionEnd || proposals.earliestProposal.end,
+              }
               : null,
             shortestThroughputWindow: proposals?.shortestThroughputProposal
               ? {
-                  start: proposals.shortestThroughputProposal.start,
-                  end: proposals.shortestThroughputProposal.end,
-                }
+                start: proposals.shortestThroughputProposal.start,
+                end: proposals.shortestThroughputProposal.executionEnd || proposals.shortestThroughputProposal.end,
+              }
               : null,
           };
         } catch (error) {
@@ -586,6 +646,13 @@ async function searchProjects(
         }
       })
     );
+
+    if (shouldLogAvailability && invalidProfessionalIds.size > 0) {
+      console.warn("[SEARCH] Invalid professionalId values detected", {
+        count: invalidProfessionalIds.size,
+        ids: Array.from(invalidProfessionalIds).slice(0, 5),
+      });
+    }
 
     res.json({
       results: resultsWithAvailability,
