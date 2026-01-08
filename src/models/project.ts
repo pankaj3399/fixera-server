@@ -39,8 +39,6 @@ export interface IPricing {
   type: "fixed" | "unit" | "rfq";
   amount?: number;
   priceRange?: { min: number; max: number };
-  minProjectValue?: number;
-  includedQuantity?: number; // Fixed pricing: max quantity covered by price
   minOrderQuantity?: number; // Unit pricing: minimum order quantity
 }
 
@@ -199,14 +197,14 @@ export interface IProject extends Document {
   status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
   // Booking lifecycle status (only applicable when project is published and has active bookings)
   bookingStatus?:
-    | "rfq"
-    | "quoted"
-    | "booked"
-    | "execution"
-    | "completed"
-    | "cancelled"
-    | "dispute"
-    | "warranty";
+  | "rfq"
+  | "quoted"
+  | "booked"
+  | "execution"
+  | "completed"
+  | "cancelled"
+  | "dispute"
+  | "warranty";
   qualityChecks: IQualityCheck[];
   adminFeedback?: string;
   submittedAt?: Date;
@@ -304,9 +302,7 @@ const PricingSchema = new Schema<IPricing>({
     min: { type: Number, min: 0 },
     max: { type: Number, min: 0 },
   },
-  minProjectValue: { type: Number, min: 0 },
-  includedQuantity: { type: Number, min: 1 }, // Fixed pricing: max quantity
-  minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: min order
+  minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
 });
 
 // Included Item Schema
