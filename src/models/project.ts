@@ -39,8 +39,7 @@ export interface IPricing {
   type: "fixed" | "unit" | "rfq";
   amount?: number;
   priceRange?: { min: number; max: number };
-  minProjectValue?: number;
-  includedQuantity?: number; // Fixed pricing: max quantity covered by price
+  quantityRange?: { min: number; max: number }; // RFQ: quantity range for unit-based models
   minOrderQuantity?: number; // Unit pricing: minimum order quantity
 }
 
@@ -304,9 +303,11 @@ const PricingSchema = new Schema<IPricing>({
     min: { type: Number, min: 0 },
     max: { type: Number, min: 0 },
   },
-  minProjectValue: { type: Number, min: 0 },
-  includedQuantity: { type: Number, min: 1 }, // Fixed pricing: max quantity
-  minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: min order
+  quantityRange: {
+    min: { type: Number, min: 1 },
+    max: { type: Number, min: 1 },
+  },
+  minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
 });
 
 // Included Item Schema
