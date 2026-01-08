@@ -39,7 +39,6 @@ export interface IPricing {
   type: "fixed" | "unit" | "rfq";
   amount?: number;
   priceRange?: { min: number; max: number };
-  quantityRange?: { min: number; max: number }; // RFQ: quantity range for unit-based models
   minOrderQuantity?: number; // Unit pricing: minimum order quantity
 }
 
@@ -303,21 +302,6 @@ const PricingSchema = new Schema<IPricing>({
     min: { type: Number, min: 0 },
     max: { type: Number, min: 0 },
   },
-  quantityRange: {
-    min: { type: Number, min: 1 },
-    max: { type: Number, min: 1 },
-    validate: {
-      validator: (value: { min?: number; max?: number } | null) => {
-        if (value == null) return true
-        if (value.min == null && value.max == null) return true
-        // After pre-validate normalization, both should be set if either was provided
-        const minVal = value.min ?? value.max ?? 1
-        const maxVal = value.max ?? value.min ?? 1
-        return maxVal >= minVal
-      },
-      message: "quantityRange.max must be greater than or equal to quantityRange.min",
-    },
-  },
   minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
 });
 
@@ -561,30 +545,6 @@ ProjectSchema.index({ title: 'text', description: 'text' });
 ProjectSchema.index({ category: 1, service: 1 });
 ProjectSchema.index({ status: 1 });
 ProjectSchema.index({ "distance.location": "2dsphere" });
-
-// Pre-validate middleware to normalize quantityRange values in subprojects
-ProjectSchema.pre("validate", function (next) {
-  if (this.subprojects && Array.isArray(this.subprojects)) {
-    for (const subproject of this.subprojects) {
-      if (subproject.pricing?.quantityRange) {
-        const qr = subproject.pricing.quantityRange;
-        // If only one of min/max is set, derive the other from it
-        if (qr.min != null && qr.max == null) {
-          qr.max = qr.min;
-        } else if (qr.max != null && qr.min == null) {
-          qr.min = qr.max;
-        }
-        // Ensure max >= min
-        if (qr.min != null && qr.max != null && qr.max < qr.min) {
-          return next(new Error(
-            `Subproject "${subproject.name}": quantityRange.max (${qr.max}) must be >= quantityRange.min (${qr.min})`
-          ));
-        }
-      }
-    }
-  }
-  next();
-});
 
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {
