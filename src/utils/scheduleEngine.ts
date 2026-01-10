@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import Booking from "../models/booking";
 import Project from "../models/project";
 import User from "../models/user";
@@ -32,6 +33,22 @@ type CustomerBlocks = {
     reason?: string;
   }>;
 };
+
+// Multi-resource availability types
+type MemberBlockedData = {
+  blockedDates: Set<string>;
+  blockedRanges: Array<{ start: Date; end: Date; reason?: string }>;
+};
+
+type PerMemberBlockedData = Map<string, MemberBlockedData>;
+
+type ResourcePolicy = {
+  minResources: number;
+  minOverlapPercentage: number;
+  totalResources: number;
+};
+
+const DEFAULT_MIN_OVERLAP_PERCENTAGE = 90;
 
 const DAY_KEYS = [
   "sunday",
@@ -345,9 +362,13 @@ const buildBlockedData = async (
   };
 
   if (teamMemberIds.length > 0) {
+    // Convert string IDs to ObjectIds for proper MongoDB matching
+    const teamMemberObjectIds = teamMemberIds.map(
+      (id: string) => new mongoose.Types.ObjectId(id)
+    );
     bookingFilter.$or.push(
-      { assignedTeamMembers: { $in: teamMemberIds } },
-      { professional: { $in: teamMemberIds } }
+      { assignedTeamMembers: { $in: teamMemberObjectIds } },
+      { professional: { $in: teamMemberObjectIds } }
     );
   }
 
@@ -416,6 +437,436 @@ const buildBlockedData = async (
   return { blockedDates, blockedRanges };
 };
 
+/**
+ * Build blocked data per individual team member for multi-resource availability.
+ * Returns a Map keyed by member ID with each member's blocked dates and ranges.
+ */
+const buildPerMemberBlockedData = async (
+  project: any,
+  professional: any,
+  timeZone: string,
+  customerBlocks?: CustomerBlocks
+): Promise<PerMemberBlockedData> => {
+  const perMemberData: PerMemberBlockedData = new Map();
+  const teamMemberIds: string[] = project.resources || [];
+
+  // Include professional in the team if not already included
+  const professionalId = project.professionalId?.toString() || professional?._id?.toString();
+  if (professionalId && !teamMemberIds.includes(professionalId)) {
+    teamMemberIds.unshift(professionalId);
+  }
+
+  // Initialize each member with company blocks (shared by all)
+  const companyBlockedDates = new Set<string>();
+  const companyBlockedRanges: Array<{ start: Date; end: Date; reason?: string }> = [];
+
+  professional?.companyBlockedDates?.forEach((blocked: any) => {
+    if (!blocked?.date) return;
+    const zoned = toZonedTime(new Date(blocked.date), timeZone);
+    companyBlockedDates.add(formatDateKey(zoned));
+  });
+
+  professional?.companyBlockedRanges?.forEach((range: any) => {
+    if (!range?.startDate || !range?.endDate) return;
+    const start = new Date(range.startDate);
+    const end = new Date(range.endDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return;
+    companyBlockedRanges.push({ start, end, reason: range.reason });
+  });
+
+  // Add customer blocks to company blocks (applies to all members)
+  if (customerBlocks?.dates) {
+    customerBlocks.dates.forEach((blocked) => {
+      if (!blocked?.date) return;
+      const zoned = toZonedTime(new Date(blocked.date), timeZone);
+      companyBlockedDates.add(formatDateKey(zoned));
+    });
+  }
+
+  if (customerBlocks?.windows) {
+    customerBlocks.windows.forEach((window) => {
+      if (!window?.date) return;
+      const startMinutes = parseTimeToMinutes(window.startTime);
+      const endMinutes = parseTimeToMinutes(window.endTime);
+      if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) {
+        return;
+      }
+      const zonedDay = toZonedTime(new Date(window.date), timeZone);
+      const dayStart = startOfDayZoned(zonedDay);
+      const startZoned = buildZonedTime(dayStart, startMinutes);
+      const endZoned = buildZonedTime(dayStart, endMinutes);
+      companyBlockedRanges.push({
+        start: fromZonedTime(startZoned, timeZone),
+        end: fromZonedTime(endZoned, timeZone),
+        reason: "customer-block",
+      });
+    });
+  }
+
+  // Fetch all team members' personal blocks
+  const teamMembers =
+    teamMemberIds.length > 0
+      ? await User.find({ _id: { $in: teamMemberIds } }).select(
+          "blockedDates blockedRanges"
+        )
+      : [];
+
+  const memberBlocksMap = new Map<string, MemberBlockedData>();
+  teamMembers.forEach((member: any) => {
+    const memberId = member._id.toString();
+    const blockedDates = new Set<string>(companyBlockedDates);
+    const blockedRanges = [...companyBlockedRanges];
+
+    member.blockedDates?.forEach((blocked: any) => {
+      if (!blocked?.date) return;
+      const zoned = toZonedTime(new Date(blocked.date), timeZone);
+      blockedDates.add(formatDateKey(zoned));
+    });
+
+    member.blockedRanges?.forEach((range: any) => {
+      if (!range?.startDate || !range?.endDate) return;
+      const start = new Date(range.startDate);
+      const end = new Date(range.endDate);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return;
+      blockedRanges.push({ start, end, reason: range.reason });
+    });
+
+    memberBlocksMap.set(memberId, { blockedDates, blockedRanges });
+  });
+
+  // Fetch bookings for each team member individually
+  // Convert string IDs to ObjectIds for proper MongoDB matching
+  const teamMemberObjectIds = teamMemberIds.map(
+    (id: string) => new mongoose.Types.ObjectId(id)
+  );
+  const bookingFilter: any = {
+    status: { $nin: ["completed", "cancelled", "refunded"] },
+    scheduledStartDate: { $exists: true, $ne: null },
+    $or: [
+      { project: project._id },
+      { assignedTeamMembers: { $in: teamMemberObjectIds } },
+      { professional: { $in: teamMemberObjectIds } },
+    ],
+    $and: [
+      {
+        $or: [
+          { scheduledBufferEndDate: { $exists: true, $ne: null } },
+          { scheduledExecutionEndDate: { $exists: true, $ne: null } },
+        ],
+      },
+    ],
+  };
+
+  const bookings = await Booking.find(bookingFilter).select(
+    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate assignedTeamMembers professional status"
+  );
+
+  bookings.forEach((booking) => {
+    const scheduledExecutionEndDate =
+      booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
+    const scheduledBufferStartDate =
+      booking.scheduledBufferStartDate || (booking as any).bufferStartDate;
+    const scheduledBufferEndDate =
+      booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
+
+    // Determine which team members are affected by this booking
+    const affectedMembers = new Set<string>();
+
+    // If booking has assignedTeamMembers, use those
+    if (booking.assignedTeamMembers && booking.assignedTeamMembers.length > 0) {
+      booking.assignedTeamMembers.forEach((memberId: any) => {
+        const id = memberId.toString();
+        if (teamMemberIds.includes(id)) {
+          affectedMembers.add(id);
+        }
+      });
+    }
+
+    // Also check if professional is in our team
+    if (booking.professional) {
+      const profId = booking.professional.toString();
+      if (teamMemberIds.includes(profId)) {
+        affectedMembers.add(profId);
+      }
+    }
+
+    // If booking is for this project, all team members are affected
+    if (booking.project?.toString() === project._id?.toString()) {
+      teamMemberIds.forEach((id) => affectedMembers.add(id));
+    }
+
+    // Add blocks only to affected members
+    affectedMembers.forEach((memberId) => {
+      let memberData = memberBlocksMap.get(memberId);
+      if (!memberData) {
+        memberData = {
+          blockedDates: new Set<string>(companyBlockedDates),
+          blockedRanges: [...companyBlockedRanges],
+        };
+        memberBlocksMap.set(memberId, memberData);
+      }
+
+      if (booking.scheduledStartDate && scheduledExecutionEndDate) {
+        memberData.blockedRanges.push({
+          start: new Date(booking.scheduledStartDate),
+          end: new Date(scheduledExecutionEndDate),
+          reason: "booking",
+        });
+      }
+
+      if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
+        memberData.blockedRanges.push({
+          start: new Date(scheduledBufferStartDate),
+          end: new Date(scheduledBufferEndDate),
+          reason: "booking-buffer",
+        });
+      }
+    });
+  });
+
+  // Ensure all team members have entries
+  teamMemberIds.forEach((memberId) => {
+    if (!memberBlocksMap.has(memberId)) {
+      memberBlocksMap.set(memberId, {
+        blockedDates: new Set<string>(companyBlockedDates),
+        blockedRanges: [...companyBlockedRanges],
+      });
+    }
+    perMemberData.set(memberId, memberBlocksMap.get(memberId)!);
+  });
+
+  return perMemberData;
+};
+
+/**
+ * Check if a specific member is blocked on a given day.
+ */
+const isMemberDayBlocked = (
+  memberData: MemberBlockedData,
+  availability: Record<string, any>,
+  zonedDate: Date,
+  timeZone: string
+): boolean => {
+  const dateKey = formatDateKey(zonedDate);
+  if (memberData.blockedDates.has(dateKey)) return true;
+  if (!isWorkingDay(availability, zonedDate)) return true;
+
+  const workingRange = buildWorkingRangeUtc(availability, zonedDate, timeZone);
+  if (!workingRange) return true;
+
+  const dayStartUtc = fromZonedTime(startOfDayZoned(zonedDate), timeZone);
+  const dayEndUtc = fromZonedTime(addDaysZoned(startOfDayZoned(zonedDate), 1), timeZone);
+
+  const intervals = memberData.blockedRanges
+    .map((range) => {
+      const rangeEnd = normalizeRangeEndInclusive(range.end, timeZone);
+      if (rangeEnd <= dayStartUtc || range.start >= dayEndUtc) {
+        return null;
+      }
+      const start = range.start > dayStartUtc ? range.start : dayStartUtc;
+      const end = rangeEnd < dayEndUtc ? rangeEnd : dayEndUtc;
+      return { start, end };
+    })
+    .filter(Boolean) as Array<{ start: Date; end: Date }>;
+
+  if (intervals.length === 0) return false;
+
+  const clamped = intervals
+    .map((interval) => {
+      const start = Math.max(interval.start.getTime(), workingRange.startUtc.getTime());
+      const end = Math.min(interval.end.getTime(), workingRange.endUtc.getTime());
+      return { start, end };
+    })
+    .filter((interval) => interval.end > interval.start)
+    .sort((a, b) => a.start - b.start);
+
+  if (clamped.length === 0) return false;
+
+  let totalMinutes = 0;
+  let currentStart = clamped[0].start;
+  let currentEnd = clamped[0].end;
+
+  for (let i = 1; i < clamped.length; i++) {
+    const interval = clamped[i];
+    if (interval.start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, interval.end);
+    } else {
+      totalMinutes += (currentEnd - currentStart) / (1000 * 60);
+      currentStart = interval.start;
+      currentEnd = interval.end;
+    }
+  }
+
+  totalMinutes += (currentEnd - currentStart) / (1000 * 60);
+  return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
+};
+
+/**
+ * Count how many resources are available for a given day.
+ */
+const countAvailableResourcesForDay = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  zonedDate: Date,
+  timeZone: string
+): number => {
+  let count = 0;
+  perMemberBlocked.forEach((memberData) => {
+    if (!isMemberDayBlocked(memberData, availability, zonedDate, timeZone)) {
+      count++;
+    }
+  });
+  return count;
+};
+
+/**
+ * Check if a time range overlaps with any blocked ranges for a member.
+ */
+const memberTimeOverlapsRanges = (
+  memberData: MemberBlockedData,
+  startUtc: Date,
+  endUtc: Date,
+  timeZone: string
+): boolean => {
+  return memberData.blockedRanges.some((range) => {
+    const rangeEnd = normalizeRangeEndInclusive(range.end, timeZone);
+    return startUtc < rangeEnd && endUtc > range.start;
+  });
+};
+
+/**
+ * Count how many resources are available during a specific time window (hours mode).
+ */
+const countAvailableResourcesForWindow = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  startUtc: Date,
+  endUtc: Date,
+  timeZone: string
+): number => {
+  let count = 0;
+  const startZoned = toZonedTime(startUtc, timeZone);
+
+  perMemberBlocked.forEach((memberData) => {
+    // Check if it's a working day
+    if (!isWorkingDay(availability, startZoned)) return;
+
+    // Check if date is blocked
+    const dateKey = formatDateKey(startZoned);
+    if (memberData.blockedDates.has(dateKey)) return;
+
+    // Check if window overlaps with blocked ranges
+    if (!memberTimeOverlapsRanges(memberData, startUtc, endUtc, timeZone)) {
+      count++;
+    }
+  });
+
+  return count;
+};
+
+/**
+ * Compute overlap percentage for days mode.
+ * Returns the percentage of execution days where at least minResources are available.
+ */
+const computeDaysOverlapPercentage = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  startZoned: Date,
+  executionDays: number,
+  minResources: number,
+  timeZone: string
+): number => {
+  if (executionDays <= 0) return 100;
+
+  let availableDays = 0;
+  let cursor = startZoned;
+  let daysCounted = 0;
+
+  while (daysCounted < executionDays) {
+    // Only count working days
+    if (isWorkingDay(availability, cursor)) {
+      const availableCount = countAvailableResourcesForDay(
+        perMemberBlocked,
+        availability,
+        cursor,
+        timeZone
+      );
+      if (availableCount >= minResources) {
+        availableDays++;
+      }
+      daysCounted++;
+    }
+    cursor = addDaysZoned(cursor, 1);
+  }
+
+  return (availableDays / executionDays) * 100;
+};
+
+/**
+ * Compute overlap percentage for hours mode.
+ * Returns the percentage of execution time where at least minResources are available.
+ * Samples at 30-minute intervals for efficiency.
+ */
+const computeHoursOverlapPercentage = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  startUtc: Date,
+  endUtc: Date,
+  minResources: number,
+  timeZone: string
+): number => {
+  const totalMinutes = (endUtc.getTime() - startUtc.getTime()) / (1000 * 60);
+  if (totalMinutes <= 0) return 100;
+
+  const sampleInterval = 30; // Sample every 30 minutes
+  const totalSamples = Math.max(1, Math.ceil(totalMinutes / sampleInterval));
+  let availableSamples = 0;
+
+  for (let i = 0; i < totalSamples; i++) {
+    const sampleTime = new Date(startUtc.getTime() + i * sampleInterval * 60 * 1000);
+    const sampleEnd = new Date(sampleTime.getTime() + sampleInterval * 60 * 1000);
+
+    const availableCount = countAvailableResourcesForWindow(
+      perMemberBlocked,
+      availability,
+      sampleTime,
+      sampleEnd,
+      timeZone
+    );
+
+    if (availableCount >= minResources) {
+      availableSamples++;
+    }
+  }
+
+  return (availableSamples / totalSamples) * 100;
+};
+
+/**
+ * Get resource policy from project with defaults applied.
+ */
+const getResourcePolicy = (project: any): ResourcePolicy => {
+  const totalResources = project.resources?.length || 1;
+  const minResources = Math.min(
+    Math.max(project.minResources || 1, 1),
+    totalResources
+  );
+  const minOverlapPercentage = Math.min(
+    Math.max(project.minOverlapPercentage ?? DEFAULT_MIN_OVERLAP_PERCENTAGE, 10),
+    100
+  );
+
+  return { minResources, minOverlapPercentage, totalResources };
+};
+
+/**
+ * Check if multi-resource mode is active (minResources > 1).
+ */
+const isMultiResourceMode = (project: any): boolean => {
+  const { minResources, totalResources } = getResourcePolicy(project);
+  return minResources > 1 && totalResources > 1;
+};
+
 const loadProjectAndProfessional = async (projectId: string) => {
   const project = await Project.findOne({
     _id: projectId,
@@ -456,6 +907,10 @@ const isWorkingDay = (availability: Record<string, any>, zonedDate: Date) => {
   return hours.available;
 };
 
+/**
+ * Check if a day is blocked (strict intersection mode - all resources must be free).
+ * This is the original behavior when minResources <= 1.
+ */
 const isDayBlocked = (
   availability: Record<string, any>,
   zonedDate: Date,
@@ -516,6 +971,61 @@ const isDayBlocked = (
   totalMinutes += (currentEnd - currentStart) / (1000 * 60);
 
   return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
+};
+
+/**
+ * Check if a day is blocked in multi-resource mode.
+ * A day is blocked if fewer than minResources are available.
+ */
+const isDayBlockedMultiResource = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  zonedDate: Date,
+  minResources: number,
+  timeZone: string
+): boolean => {
+  if (!isWorkingDay(availability, zonedDate)) return true;
+
+  const availableCount = countAvailableResourcesForDay(
+    perMemberBlocked,
+    availability,
+    zonedDate,
+    timeZone
+  );
+
+  return availableCount < minResources;
+};
+
+/**
+ * Unified day blocked check that uses multi-resource mode when applicable.
+ */
+const isDayBlockedWithPolicy = (
+  availability: Record<string, any>,
+  zonedDate: Date,
+  blockedDates: Set<string>,
+  blockedRanges: Array<{ start: Date; end: Date }>,
+  timeZone: string,
+  perMemberBlocked?: PerMemberBlockedData,
+  resourcePolicy?: ResourcePolicy
+): boolean => {
+  // Use multi-resource mode if applicable
+  if (
+    perMemberBlocked &&
+    resourcePolicy &&
+    resourcePolicy.minResources > 1 &&
+    resourcePolicy.totalResources > 1
+  ) {
+    return isDayBlockedMultiResource(
+      perMemberBlocked,
+      availability,
+      zonedDate,
+      resourcePolicy.minResources,
+      timeZone
+    );
+  }
+
+  // Fall back to strict intersection mode
+  return isDayBlocked(availability, zonedDate, blockedDates, blockedRanges, timeZone);
 };
 
 const advanceWorkingDays = (
@@ -651,10 +1161,19 @@ const getAvailableSlotsForDate = (
   blockedRanges: Array<{ start: Date; end: Date }>,
   timeZone: string,
   notBefore?: Date,
-  buffer?: Duration | null
+  buffer?: Duration | null,
+  perMemberBlocked?: PerMemberBlockedData,
+  resourcePolicy?: ResourcePolicy
 ) => {
   const dateKey = formatDateKey(zonedDate);
-  if (blockedDates.has(dateKey)) return [];
+  const isMultiResource =
+    perMemberBlocked &&
+    resourcePolicy &&
+    resourcePolicy.minResources > 1 &&
+    resourcePolicy.totalResources > 1;
+
+  // In strict mode, check if date is fully blocked
+  if (!isMultiResource && blockedDates.has(dateKey)) return [];
 
   const hours = getWorkingHoursForDate(availability, zonedDate);
   if (!hours.available || hours.startMinutes === null || hours.endMinutes === null) {
@@ -696,17 +1215,35 @@ const getAvailableSlotsForDate = (
     const slotStartUtc = fromZonedTime(slotStartZoned, timeZone);
     const slotEndUtc = new Date(slotStartUtc.getTime() + executionMinutes * 60000);
 
-    const overlaps = windowOverlapsRanges(
-      slotStartUtc,
-      slotEndUtc,
-      blockedRanges,
-      timeZone
-    );
+    if (isMultiResource) {
+      // Multi-resource mode: check overlap percentage
+      const overlapPercentage = computeHoursOverlapPercentage(
+        perMemberBlocked!,
+        availability,
+        slotStartUtc,
+        slotEndUtc,
+        resourcePolicy!.minResources,
+        timeZone
+      );
 
-    if (overlaps) {
-      continue;
+      if (overlapPercentage < resourcePolicy!.minOverlapPercentage) {
+        continue;
+      }
+    } else {
+      // Strict intersection mode: check if window overlaps any blocked ranges
+      const overlaps = windowOverlapsRanges(
+        slotStartUtc,
+        slotEndUtc,
+        blockedRanges,
+        timeZone
+      );
+
+      if (overlaps) {
+        continue;
+      }
     }
 
+    // Buffer check (same for both modes - uses merged blocked data)
     if (buffer && buffer.value > 0) {
       const executionEndZoned = new Date(
         slotStartZoned.getTime() + executionMinutes * 60000
@@ -875,6 +1412,7 @@ const calculateBufferEnd = (
 /**
  * Build schedule proposals using pre-loaded project and professional data.
  * This avoids N+1 queries when called in bulk.
+ * Supports multi-resource mode when project.minResources > 1.
  */
 export const buildProjectScheduleProposalsWithData = async (
   project: any,
@@ -895,11 +1433,27 @@ export const buildProjectScheduleProposalsWithData = async (
   );
   const timeZone = professional.businessInfo?.timezone || "UTC";
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
+
+  // Get resource policy and determine if multi-resource mode is active
+  const resourcePolicy = getResourcePolicy(project);
+  const useMultiResource = isMultiResourceMode(project);
+
+  // Build blocked data (merged for strict mode, per-member for multi-resource)
   const { blockedDates, blockedRanges } = await buildBlockedData(
     project,
     professional,
     timeZone
   );
+
+  // Build per-member blocked data if in multi-resource mode
+  let perMemberBlocked: PerMemberBlockedData | undefined;
+  if (useMultiResource) {
+    perMemberBlocked = await buildPerMemberBlockedData(
+      project,
+      professional,
+      timeZone
+    );
+  }
 
   const prepEnd = calculatePrepEnd(
     durations.preparation,
@@ -923,6 +1477,7 @@ export const buildProjectScheduleProposalsWithData = async (
     const currentDay = addDaysZoned(searchStart, dayOffset);
 
     if (executionMode === "hours") {
+      // Pass multi-resource params to getAvailableSlotsForDate
       const slots = getAvailableSlotsForDate(
         currentDay,
         execution.value,
@@ -931,7 +1486,9 @@ export const buildProjectScheduleProposalsWithData = async (
         blockedRanges,
         timeZone,
         prepEnd,
-        durations.buffer
+        durations.buffer,
+        perMemberBlocked,
+        useMultiResource ? resourcePolicy : undefined
       );
 
       if (slots.length === 0) {
@@ -968,7 +1525,18 @@ export const buildProjectScheduleProposalsWithData = async (
         break;
       }
     } else {
-      if (isDayBlocked(availability, currentDay, blockedDates, blockedRanges, timeZone)) {
+      // Days mode: use policy-aware day blocked check
+      const dayIsBlocked = isDayBlockedWithPolicy(
+        availability,
+        currentDay,
+        blockedDates,
+        blockedRanges,
+        timeZone,
+        perMemberBlocked,
+        useMultiResource ? resourcePolicy : undefined
+      );
+
+      if (dayIsBlocked) {
         continue;
       }
 
@@ -977,6 +1545,23 @@ export const buildProjectScheduleProposalsWithData = async (
       }
 
       const executionDays = Math.max(1, Math.ceil(execution.value));
+
+      // For multi-resource days mode, check overlap percentage across execution window
+      if (useMultiResource && perMemberBlocked) {
+        const overlapPercentage = computeDaysOverlapPercentage(
+          perMemberBlocked,
+          availability,
+          currentDay,
+          executionDays,
+          resourcePolicy.minResources,
+          timeZone
+        );
+
+        if (overlapPercentage < resourcePolicy.minOverlapPercentage) {
+          continue;
+        }
+      }
+
       const executionEndDay = advanceWorkingDays(
         currentDay,
         executionDays,
@@ -1106,6 +1691,19 @@ export const validateProjectScheduleSelection = async ({
   );
   const { blockedDates, blockedRanges } = baseBlockedData;
 
+  // Get resource policy and build per-member data if multi-resource mode
+  const resourcePolicy = getResourcePolicy(project);
+  const useMultiResource = isMultiResourceMode(project);
+  let perMemberBlocked: PerMemberBlockedData | undefined;
+  if (useMultiResource) {
+    perMemberBlocked = await buildPerMemberBlockedData(
+      project,
+      professional,
+      timeZone,
+      customerBlocks
+    );
+  }
+
   const prepEnd = calculatePrepEnd(
     durations.preparation,
     availability,
@@ -1133,6 +1731,7 @@ export const validateProjectScheduleSelection = async ({
       return { valid: false, reason: "Selected time is before prep window" };
     }
 
+    // Pass multi-resource params to getAvailableSlotsForDate
     const slots = getAvailableSlotsForDate(
       selectedZoned,
       durations.execution.value,
@@ -1141,22 +1740,62 @@ export const validateProjectScheduleSelection = async ({
       blockedRanges,
       timeZone,
       prepEnd,
-      durations.buffer
+      durations.buffer,
+      perMemberBlocked,
+      useMultiResource ? resourcePolicy : undefined
     );
 
     const matchingSlot = slots.find((slot) => slot.startTime === startTime);
     if (!matchingSlot) {
+      if (useMultiResource) {
+        return { valid: false, reason: "Selected time does not meet team availability requirements" };
+      }
       return { valid: false, reason: "Selected time is not available" };
     }
     return { valid: true };
   }
 
+  // Days mode
   if (startOfDayZoned(selectedZoned) < startOfDayZoned(prepEnd)) {
     return { valid: false, reason: "Selected date is before prep window" };
   }
 
-  if (isDayBlocked(availability, selectedZoned, blockedDates, blockedRanges, timeZone)) {
+  // Use policy-aware day blocked check
+  const dayIsBlocked = isDayBlockedWithPolicy(
+    availability,
+    selectedZoned,
+    blockedDates,
+    blockedRanges,
+    timeZone,
+    perMemberBlocked,
+    useMultiResource ? resourcePolicy : undefined
+  );
+
+  if (dayIsBlocked) {
+    if (useMultiResource) {
+      return { valid: false, reason: "Selected date does not have enough team members available" };
+    }
     return { valid: false, reason: "Selected date is blocked" };
+  }
+
+  // For multi-resource days mode, also check overlap percentage across execution window
+  if (useMultiResource && perMemberBlocked) {
+    const executionDays = Math.max(1, Math.ceil(durations.execution.value));
+    const overlapPercentage = computeDaysOverlapPercentage(
+      perMemberBlocked,
+      availability,
+      selectedZoned,
+      executionDays,
+      resourcePolicy.minResources,
+      timeZone
+    );
+
+    if (overlapPercentage < resourcePolicy.minOverlapPercentage) {
+      return {
+        valid: false,
+        reason: `Team availability (${Math.round(overlapPercentage)}%) is below required ${resourcePolicy.minOverlapPercentage}%`
+      };
+    }
   }
 
   return { valid: true };
@@ -1250,6 +1889,9 @@ export const buildProjectScheduleWindow = async ({
       timeZone
     );
 
+    // Include assignedTeamMembers (all project resources)
+    const assignedTeamMembers = project.resources || [];
+
     return {
       scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
       scheduledExecutionEndDate: fromZonedTime(executionEndZoned, timeZone),
@@ -1262,6 +1904,7 @@ export const buildProjectScheduleWindow = async ({
       scheduledEndTime: formatMinutesToTime(
         minutes + Math.round(durations.execution.value * 60)
       ),
+      assignedTeamMembers,
     };
   }
 
@@ -1305,6 +1948,9 @@ export const buildProjectScheduleWindow = async ({
     timeZone
   );
 
+  // Include assignedTeamMembers (all project resources)
+  const assignedTeamMembers = project.resources || [];
+
   return {
     scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
     scheduledExecutionEndDate: fromZonedTime(executionEndZoned, timeZone),
@@ -1313,5 +1959,6 @@ export const buildProjectScheduleWindow = async ({
       : null,
     scheduledBufferEndDate: fromZonedTime(bufferEndZoned, timeZone),
     scheduledBufferUnit: durations.buffer?.unit,
+    assignedTeamMembers,
   };
 };

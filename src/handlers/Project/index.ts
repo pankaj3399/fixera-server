@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
@@ -408,22 +409,28 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
     });
 
+    // Convert string IDs to ObjectIds for proper MongoDB matching
+    const professionalObjectId = new mongoose.Types.ObjectId(project.professionalId);
+    const teamMemberObjectIds = teamMemberIds.map(
+      (id: string) => new mongoose.Types.ObjectId(id)
+    );
+
     const bookingFilter: any = {
       status: { $nin: ["completed", "cancelled", "refunded"] },
       scheduledStartDate: { $exists: true, $ne: null },
       $or: [
         { project: project._id },
         // Include bookings where the professional (project owner) is booked on ANY project
-        { professional: project.professionalId },
+        { professional: professionalObjectId },
         // Include bookings where the professional is assigned as a team member on OTHER projects
-        { assignedTeamMembers: project.professionalId },
+        { assignedTeamMembers: professionalObjectId },
       ],
     };
 
-    if (teamMemberIds.length > 0) {
+    if (teamMemberObjectIds.length > 0) {
       bookingFilter.$or.push(
-        { assignedTeamMembers: { $in: teamMemberIds } },
-        { professional: { $in: teamMemberIds } }
+        { assignedTeamMembers: { $in: teamMemberObjectIds } },
+        { professional: { $in: teamMemberObjectIds } }
       );
     }
 
@@ -467,11 +474,29 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
     });
 
+    // Build resource policy from project settings
+    const totalResources = (project.resources?.length || 0) + 1; // +1 for professional
+    const minResources = Math.min(
+      Math.max(project.minResources || 1, 1),
+      totalResources
+    );
+    const minOverlapPercentage = Math.min(
+      Math.max(project.minOverlapPercentage ?? 90, 10),
+      100
+    );
+
+    const resourcePolicy = {
+      minResources,
+      minOverlapPercentage,
+      totalResources,
+    };
+
     res.json({
       success: true,
       blockedDates: Array.from(allBlockedDates),
       blockedRanges: allBlockedRanges,
       blockedCategories,
+      resourcePolicy,
     });
   } catch (error) {
     console.error('Error fetching team availability:', error);

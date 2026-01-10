@@ -20,7 +20,12 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     if (req.cookies && req.cookies['auth-token']) {
       token = req.cookies['auth-token'];
     }
-    
+
+    // 2. If no cookie, check Authorization header (Bearer token fallback)
+    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+      token = req.headers.authorization.split(' ')[1];
+    }
+
     // 3. If no token found, return unauthorized
     if (!token) {
       return res.status(401).json({ 
@@ -94,6 +99,11 @@ export const authMiddleware = (allowedRoles: string[]) => {
       // Check for token in cookies
       if (req.cookies && req.cookies['auth-token']) {
         token = req.cookies['auth-token'];
+      }
+
+      // Fallback: check Authorization header (Bearer token)
+      if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+        token = req.headers.authorization.split(' ')[1];
       }
 
       if (!token) {
