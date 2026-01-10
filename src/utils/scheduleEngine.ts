@@ -844,9 +844,11 @@ const computeHoursOverlapPercentage = (
 
 /**
  * Get resource policy from project with defaults applied.
+ * totalResources includes the professional (+1) plus any additional team members.
  */
 const getResourcePolicy = (project: any): ResourcePolicy => {
-  const totalResources = project.resources?.length || 1;
+  // Include professional in the count: resources array + 1 for the professional
+  const totalResources = (project.resources?.length || 0) + 1;
   const minResources = Math.min(
     Math.max(project.minResources || 1, 1),
     totalResources
