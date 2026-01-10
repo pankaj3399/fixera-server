@@ -470,7 +470,7 @@ const ProjectSchema = new Schema<IProject>(
     renovationPlanning: RenovationPlanningSchema,
     resources: [{ type: String }],
     minResources: { type: Number, min: 1 },
-    minOverlapPercentage: { type: Number, min: 0, max: 100, default: 70 },
+    minOverlapPercentage: { type: Number, min: 0, max: 100, default: 90 },
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {
       type: String,

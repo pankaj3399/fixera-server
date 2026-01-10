@@ -142,6 +142,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.project = projectId;
       bookingData.professional = project.professionalId;
 
+      // Assign all project resources as team members for booking
+      if (project.resources && project.resources.length > 0) {
+        bookingData.assignedTeamMembers = project.resources.map(
+          (id: string) => new mongoose.Types.ObjectId(id)
+        );
+      }
+
       const rawStartDate =
         preferredStartDate || rfqData?.preferredStartDate || undefined;
       const rawStartTime =
