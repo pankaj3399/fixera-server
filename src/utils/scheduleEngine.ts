@@ -42,7 +42,7 @@ type MemberBlockedData = {
 
 type PerMemberBlockedData = Map<string, MemberBlockedData>;
 
-type ResourcePolicy = {
+export type ResourcePolicy = {
   minResources: number;
   minOverlapPercentage: number;
   totalResources: number;
@@ -69,6 +69,40 @@ const toValidObjectIds = (ids: string[]): mongoose.Types.ObjectId[] => {
   return ids
     .filter((id) => mongoose.isValidObjectId(id))
     .map((id) => new mongoose.Types.ObjectId(id));
+};
+
+/**
+ * Validate and deduplicate resource IDs, converting to ObjectIds.
+ * Handles both string IDs and existing ObjectId instances.
+ * Returns validated, deduplicated ObjectIds.
+ */
+export const validateAndDedupeResourceIds = (
+  resources: any[] | undefined
+): mongoose.Types.ObjectId[] => {
+  if (!resources || !Array.isArray(resources) || resources.length === 0) {
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  const validIds: mongoose.Types.ObjectId[] = [];
+
+  for (const id of resources) {
+    if (id == null) continue;
+
+    // Convert to string for validation and deduplication
+    const idStr = typeof id === 'string' ? id : String(id);
+
+    // Validate the ID format
+    if (!mongoose.isValidObjectId(idStr)) continue;
+
+    // Skip duplicates
+    if (seenIds.has(idStr)) continue;
+
+    seenIds.add(idStr);
+    validIds.push(new mongoose.Types.ObjectId(idStr));
+  }
+
+  return validIds;
 };
 
 const getTimeZoneOffsetMinutes = (date: Date, timeZone: string) => {
@@ -458,24 +492,25 @@ const buildPerMemberBlockedData = async (
 ): Promise<PerMemberBlockedData> => {
   const perMemberData: PerMemberBlockedData = new Map();
 
-  // Normalize all resource IDs to strings up-front
+  // Normalize all resource IDs to strings up-front using a Set for O(1) lookups
   const rawResources = project.resources || [];
-  const normalizedResources: string[] = [];
+  const teamMemberIdsSet = new Set<string>();
   for (const id of rawResources) {
     if (id == null) continue;
     const idStr = typeof id === 'string' ? id : id.toString();
-    if (idStr && !normalizedResources.includes(idStr)) {
-      normalizedResources.push(idStr);
+    if (idStr) {
+      teamMemberIdsSet.add(idStr);
     }
   }
 
-  const teamMemberIds: string[] = [...normalizedResources];
-
   // Include professional in the team if not already included
   const professionalId = project.professionalId?.toString() || professional?._id?.toString();
-  if (professionalId && !teamMemberIds.includes(professionalId)) {
-    teamMemberIds.unshift(professionalId);
+  if (professionalId) {
+    teamMemberIdsSet.add(professionalId);
   }
+
+  // Keep array for iteration where needed
+  const teamMemberIds: string[] = Array.from(teamMemberIdsSet);
 
   // Initialize each member with company blocks (shared by all)
   const companyBlockedDates = new Set<string>();
@@ -601,7 +636,7 @@ const buildPerMemberBlockedData = async (
     if (booking.assignedTeamMembers && booking.assignedTeamMembers.length > 0) {
       booking.assignedTeamMembers.forEach((memberId: any) => {
         const id = memberId.toString();
-        if (teamMemberIds.includes(id)) {
+        if (teamMemberIdsSet.has(id)) {
           affectedMembers.add(id);
         }
       });
@@ -610,7 +645,7 @@ const buildPerMemberBlockedData = async (
     // Also check if professional is in our team
     if (booking.professional) {
       const profId = booking.professional.toString();
-      if (teamMemberIds.includes(profId)) {
+      if (teamMemberIdsSet.has(profId)) {
         affectedMembers.add(profId);
       }
     }
@@ -881,7 +916,7 @@ const computeHoursOverlapPercentage = (
  * Get resource policy from project with defaults applied.
  * totalResources includes the professional (+1) plus any additional team members.
  */
-const getResourcePolicy = (project: any): ResourcePolicy => {
+export const getResourcePolicy = (project: any): ResourcePolicy => {
   // Include professional in the count: resources array + 1 for the professional
   const totalResources = (project.resources?.length || 0) + 1;
   const minResources = Math.min(
@@ -1926,8 +1961,8 @@ export const buildProjectScheduleWindow = async ({
       timeZone
     );
 
-    // Include assignedTeamMembers (all project resources)
-    const assignedTeamMembers = project.resources || [];
+    // Validate and deduplicate assignedTeamMembers (all project resources)
+    const assignedTeamMembers = validateAndDedupeResourceIds(project.resources);
 
     return {
       scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
@@ -1985,8 +2020,8 @@ export const buildProjectScheduleWindow = async ({
     timeZone
   );
 
-  // Include assignedTeamMembers (all project resources)
-  const assignedTeamMembers = project.resources || [];
+  // Validate and deduplicate assignedTeamMembers (all project resources)
+  const assignedTeamMembers = validateAndDedupeResourceIds(project.resources);
 
   return {
     scheduledStartDate: fromZonedTime(selectedZoned, timeZone),

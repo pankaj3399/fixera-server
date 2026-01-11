@@ -4,7 +4,7 @@ import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
-import { buildProjectScheduleProposals, DEFAULT_MIN_OVERLAP_PERCENTAGE } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposals, DEFAULT_MIN_OVERLAP_PERCENTAGE, getResourcePolicy, type ResourcePolicy } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 // import { seedServiceCategories } from '../../scripts/seedProject';
@@ -421,11 +421,24 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const professionalObjectId = new mongoose.Types.ObjectId(project.professionalId);
 
     // Filter and convert team member IDs, skipping invalid entries
+    // Handles both string IDs and existing ObjectId instances
     const teamMemberObjectIds: mongoose.Types.ObjectId[] = [];
     if (Array.isArray(teamMemberIds)) {
       for (const id of teamMemberIds) {
-        if (typeof id === 'string' && mongoose.isValidObjectId(id)) {
-          teamMemberObjectIds.push(new mongoose.Types.ObjectId(id));
+        if (id == null) continue;
+
+        // Handle string IDs
+        if (typeof id === 'string') {
+          if (mongoose.isValidObjectId(id)) {
+            teamMemberObjectIds.push(new mongoose.Types.ObjectId(id));
+          }
+          continue;
+        }
+
+        // Handle existing ObjectId instances or objects with toString
+        const idStr = String(id);
+        if (mongoose.isValidObjectId(idStr)) {
+          teamMemberObjectIds.push(new mongoose.Types.ObjectId(idStr));
         }
       }
     }
@@ -489,22 +502,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
     });
 
-    // Build resource policy from project settings
-    const totalResources = (project.resources?.length || 0) + 1; // +1 for professional
-    const minResources = Math.min(
-      Math.max(project.minResources || 1, 1),
-      totalResources
-    );
-    const minOverlapPercentage = Math.min(
-      Math.max(project.minOverlapPercentage ?? DEFAULT_MIN_OVERLAP_PERCENTAGE, 10),
-      100
-    );
-
-    const resourcePolicy = {
-      minResources,
-      minOverlapPercentage,
-      totalResources,
-    };
+    // Build resource policy from project settings using shared helper
+    const resourcePolicy = getResourcePolicy(project);
 
     res.json({
       success: true,
