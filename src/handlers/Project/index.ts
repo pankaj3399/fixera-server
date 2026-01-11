@@ -4,7 +4,7 @@ import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
-import { buildProjectScheduleProposals, DEFAULT_MIN_OVERLAP_PERCENTAGE, getResourcePolicy, type ResourcePolicy } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposals, getResourcePolicy, type ResourcePolicy } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 // import { seedServiceCategories } from '../../scripts/seedProject';
