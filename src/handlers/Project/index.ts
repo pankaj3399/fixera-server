@@ -600,16 +600,9 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const useMultiResourceMode = minResources > 1 && totalResources > 1;
     const allowPartialAvailability = resourcePolicy.minOverlapPercentage < 100;
 
-    console.log('[AVAILABILITY DEBUG] resourcePolicy:', resourcePolicy);
-    console.log('[AVAILABILITY DEBUG] useMultiResourceMode:', useMultiResourceMode);
-    console.log('[AVAILABILITY DEBUG] allowPartialAvailability:', allowPartialAvailability);
-    console.log('[AVAILABILITY DEBUG] dateBlockedMembers size:', dateBlockedMembers.size);
-
     dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
       const blockedCount = blockedMemberIds.size;
       const availableResources = totalResources - blockedCount;
-
-      console.log(`[AVAILABILITY DEBUG] ${dateIso}: blockedCount=${blockedCount}, available=${availableResources}, blockedMembers=`, Array.from(blockedMemberIds));
 
       if (useMultiResourceMode) {
         if (allowPartialAvailability) {
