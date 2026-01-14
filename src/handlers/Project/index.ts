@@ -593,12 +593,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     });
 
     // Apply resource policy logic to determine which dates are blocked
-    // minResources = 1 means STRICT mode: ANY resource blocked = date blocked
-    // minResources > 1 with minOverlapPercentage = 100%: block if available < minResources
-    // minResources > 1 with minOverlapPercentage < 100%: only block if 0 resources available
+    // minResources = 1: any one resource can cover the date
+    // minResources > 1 with overlap = 100%: block if available < minResources
+    // minResources > 1 with overlap < 100%: only block if 0 resources available
     //   (partial availability might still meet overlap requirement over execution window)
-    const useMultiResourceMode = minResources > 1 && totalResources > 1;
-    const allowPartialAvailability = resourcePolicy.minOverlapPercentage < 100;
+    const useMultiResourceMode = totalResources > 0;
+    const requiredOverlap =
+      minResources <= 1 ? 100 : resourcePolicy.minOverlapPercentage;
+    const allowPartialAvailability = requiredOverlap < 100;
 
     dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
       const blockedCount = blockedMemberIds.size;

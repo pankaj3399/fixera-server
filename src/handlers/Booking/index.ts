@@ -142,7 +142,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.project = projectId;
       bookingData.professional = project.professionalId;
 
-      // Assign all project resources as team members for booking
+      let fallbackTeamMembers: mongoose.Types.ObjectId[] | null = null;
       // Validate and normalize resource IDs, filtering out invalid entries and duplicates
       if (project.resources && Array.isArray(project.resources) && project.resources.length > 0) {
         const seenIds = new Set<string>();
@@ -166,7 +166,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
 
         if (validTeamMembers.length > 0) {
-          bookingData.assignedTeamMembers = validTeamMembers;
+          fallbackTeamMembers = validTeamMembers;
         }
       }
 
@@ -247,6 +247,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         if (window.scheduledEndTime) {
           bookingData.scheduledEndTime = window.scheduledEndTime;
         }
+        if (window.assignedTeamMembers && window.assignedTeamMembers.length > 0) {
+          bookingData.assignedTeamMembers = window.assignedTeamMembers;
+        }
+      }
+
+      if (!bookingData.assignedTeamMembers && fallbackTeamMembers) {
+        bookingData.assignedTeamMembers = fallbackTeamMembers;
       }
     }
 
