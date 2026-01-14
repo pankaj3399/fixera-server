@@ -4,7 +4,7 @@ import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
-import { buildProjectScheduleProposals, getResourcePolicy, type ResourcePolicy } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposals, getResourcePolicy, toZonedTime, type ResourcePolicy } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 // import { seedServiceCategories } from '../../scripts/seedProject';
@@ -342,6 +342,54 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       },
     };
 
+    // Get resource policy to determine if we need multi-resource logic
+    const resourcePolicy = getResourcePolicy(project);
+    const { minResources, totalResources } = resourcePolicy;
+
+    // Get professional's timezone for proper date handling
+    const timeZone = professional?.businessInfo?.timezone || 'UTC';
+
+    // Track blocked members per date for multi-resource logic
+    // Key: date ISO string (normalized to midnight UTC), Value: Set of member IDs blocked on that date
+    const dateBlockedMembers = new Map<string, Set<string>>();
+
+    // Helper to normalize date to midnight UTC ISO string
+    const normalizeDateKey = (dateIso: string): string => {
+      const d = new Date(dateIso);
+      return d.toISOString().split('T')[0] + 'T00:00:00.000Z';
+    };
+
+    // Helper to mark a member as blocked on a date
+    const markMemberBlocked = (dateIso: string, memberId: string) => {
+      const dateKey = normalizeDateKey(dateIso);
+      if (!dateBlockedMembers.has(dateKey)) {
+        dateBlockedMembers.set(dateKey, new Set());
+      }
+      dateBlockedMembers.get(dateKey)!.add(memberId);
+    };
+
+    // Helper to expand a date range and mark member as blocked for each day
+    // Uses professional's timezone to determine which calendar days are affected
+    const expandRangeAndMarkBlocked = (startIso: string, endIso: string, memberId: string) => {
+      const start = new Date(startIso);
+      const end = new Date(endIso);
+
+      // Convert to professional's timezone to get correct calendar days
+      const startZoned = toZonedTime(start, timeZone);
+      const endZoned = toZonedTime(end, timeZone);
+
+      // Get calendar days in the professional's timezone
+      const startDay = new Date(Date.UTC(startZoned.getUTCFullYear(), startZoned.getUTCMonth(), startZoned.getUTCDate()));
+      const endDay = new Date(Date.UTC(endZoned.getUTCFullYear(), endZoned.getUTCMonth(), endZoned.getUTCDate()));
+
+      const cursor = new Date(startDay);
+      while (cursor <= endDay) {
+        markMemberBlocked(cursor.toISOString(), memberId);
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    };
+
+    // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
     const allBlockedDates = new Set<string>(weekendDates);
     const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
 
@@ -350,7 +398,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         const date = toIsoDate(blocked.date);
         if (!date) return;
         blockedCategories.company.dates.push(date);
-        allBlockedDates.add(date);
+        allBlockedDates.add(date); // Company dates always fully blocked
       });
     }
 
@@ -359,43 +407,28 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         const blockedRange = toBlockedRange(range);
         if (!blockedRange) return;
         blockedCategories.company.ranges.push(blockedRange);
-        allBlockedRanges.push(blockedRange);
+        allBlockedRanges.push(blockedRange); // Company ranges always fully blocked
       });
     }
 
-    // Include the professional's personal blocked dates (shown in their profile calendar)
-    if (professional?.blockedDates) {
-      professional.blockedDates.forEach((blocked) => {
-        const date = toIsoDate(blocked.date);
-        if (!date) return;
-        blockedCategories.personal.dates.push(date);
-        allBlockedDates.add(date);
-      });
-    }
-
-    if (professional?.blockedRanges) {
-      professional.blockedRanges.forEach((range) => {
-        const blockedRange = toBlockedRange(range);
-        if (!blockedRange) return;
-        blockedCategories.personal.ranges.push(blockedRange);
-        allBlockedRanges.push(blockedRange);
-      });
-    }
-
+    // Fetch team members
     const teamMembers =
       teamMemberIds.length > 0
         ? await User.find({
-            _id: { $in: teamMemberIds },
-          }).select("blockedDates blockedRanges")
+          _id: { $in: teamMemberIds },
+        }).select("_id blockedDates blockedRanges")
         : [];
 
+    // Process personal blocked dates for each team member (tracked per-member)
     teamMembers.forEach((member) => {
+      const memberId = String(member._id);
+
       if (member.blockedDates) {
         member.blockedDates.forEach((blocked) => {
           const date = toIsoDate(blocked.date);
           if (!date) return;
           blockedCategories.personal.dates.push(date);
-          allBlockedDates.add(date);
+          markMemberBlocked(date, memberId);
         });
       }
 
@@ -404,7 +437,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           const blockedRange = toBlockedRange(range);
           if (!blockedRange) return;
           blockedCategories.personal.ranges.push(blockedRange);
-          allBlockedRanges.push(blockedRange);
+          expandRangeAndMarkBlocked(blockedRange.startDate, blockedRange.endDate, memberId);
         });
       }
     });
@@ -476,9 +509,35 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     }
 
     const bookings = await Booking.find(bookingFilter).select(
-      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status"
+      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status assignedTeamMembers professional"
     );
 
+    // Build set of project resources for efficient lookup
+
+    const projectResources = new Set(teamMemberIds.map((id: any) => String(id)));
+    const finalBlockedDateSet = new Set<string>();
+
+    const rangeIntersectsBlockedDates = (
+      range: { startDate: string; endDate: string }
+    ): boolean => {
+      const start = new Date(range.startDate);
+      const end = new Date(range.endDate);
+
+      const cursor = new Date(start);
+      cursor.setUTCHours(0, 0, 0, 0);
+
+      while (cursor <= end) {
+        const key = cursor.toISOString().split('T')[0] + 'T00:00:00.000Z';
+        if (finalBlockedDateSet.has(key)) {
+          return true;
+        }
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+
+      return false;
+    };
+
+    // Track which bookings block which resources
     bookings.forEach((booking) => {
       const scheduledExecutionEndDate =
         booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
@@ -487,7 +546,21 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       const scheduledBufferEndDate =
         booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
 
-      // Block the execution period
+      // Find which of our project's resources are blocked by this booking
+      const blockedResourceIds: string[] = [];
+
+      // Only assignedTeamMembers are actually working on the booking and should be blocked
+      // The professional field is the project owner, not necessarily a worker
+      if (booking.assignedTeamMembers) {
+        booking.assignedTeamMembers.forEach((memberId: any) => {
+          const memberIdStr = String(memberId);
+          if (projectResources.has(memberIdStr)) {
+            blockedResourceIds.push(memberIdStr);
+          }
+        });
+      }
+
+      // Block the execution period for each blocked resource
       if (booking.scheduledStartDate && scheduledExecutionEndDate) {
         const blockedRange = toBlockedRange({
           startDate: booking.scheduledStartDate,
@@ -496,13 +569,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         });
         if (blockedRange) {
           blockedCategories.bookings.ranges.push(blockedRange);
-          allBlockedRanges.push(blockedRange);
+          // Mark each blocked resource for each day in the range
+          blockedResourceIds.forEach((resourceId) => {
+            expandRangeAndMarkBlocked(blockedRange.startDate, blockedRange.endDate, resourceId);
+          });
         }
       }
-      // Block the buffer period (if exists)
+      // Block the buffer period (if exists) for each blocked resource
       if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
-        // Don't extend buffer end date - use the actual scheduled end
-        // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
         const bufferRange = toBlockedRange({
           startDate: scheduledBufferStartDate,
           endDate: scheduledBufferEndDate.toISOString(),
@@ -510,13 +584,60 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         });
         if (bufferRange) {
           blockedCategories.bookings.ranges.push(bufferRange);
-          allBlockedRanges.push(bufferRange);
+          // Mark each blocked resource for each day in the range
+          blockedResourceIds.forEach((resourceId) => {
+            expandRangeAndMarkBlocked(bufferRange.startDate, bufferRange.endDate, resourceId);
+          });
         }
       }
     });
 
-    // Build resource policy from project settings using shared helper
-    const resourcePolicy = getResourcePolicy(project);
+    // Apply resource policy logic to determine which dates are blocked
+    // minResources = 1: any one resource can cover the date
+    // minResources > 1 with overlap = 100%: block if available < minResources
+    // minResources > 1 with overlap < 100%: only block if 0 resources available
+    //   (partial availability might still meet overlap requirement over execution window)
+    const useMultiResourceMode = totalResources > 0;
+    const requiredOverlap =
+      minResources <= 1 ? 100 : resourcePolicy.minOverlapPercentage;
+    const allowPartialAvailability = requiredOverlap < 100;
+
+    dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
+      const blockedCount = blockedMemberIds.size;
+      const availableResources = totalResources - blockedCount;
+
+      if (useMultiResourceMode) {
+        if (allowPartialAvailability) {
+          if (availableResources === 0) {
+            allBlockedDates.add(dateIso);
+            finalBlockedDateSet.add(dateIso); // 👈 ADD
+          }
+        } else {
+          if (availableResources < minResources) {
+            allBlockedDates.add(dateIso);
+            finalBlockedDateSet.add(dateIso); // 👈 ADD
+          }
+        }
+      } else {
+        // strict mode
+        allBlockedDates.add(dateIso);
+        finalBlockedDateSet.add(dateIso); // 👈 ADD
+      }
+
+    });
+
+    blockedCategories.personal.ranges.forEach((range) => {
+      if (rangeIntersectsBlockedDates(range)) {
+        allBlockedRanges.push(range);
+      }
+    });
+
+    blockedCategories.bookings.ranges.forEach((range) => {
+      if (rangeIntersectsBlockedDates(range)) {
+        allBlockedRanges.push(range);
+      }
+    });
+
 
     res.json({
       success: true,

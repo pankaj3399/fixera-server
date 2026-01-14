@@ -581,9 +581,10 @@ BookingSchema.pre('save', async function(next) {
   }
 
   // Cross-field validation for buffer dates
+  // Allow equal dates (represents 0 buffer duration when no buffer is configured)
   if (this.scheduledBufferStartDate && this.scheduledBufferEndDate) {
-    if (this.scheduledBufferStartDate >= this.scheduledBufferEndDate) {
-      return next(new Error('scheduledBufferStartDate must be before scheduledBufferEndDate'));
+    if (this.scheduledBufferStartDate > this.scheduledBufferEndDate) {
+      return next(new Error('scheduledBufferStartDate must be at or before scheduledBufferEndDate'));
     }
   }
 
