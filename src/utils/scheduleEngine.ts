@@ -72,6 +72,31 @@ const toValidObjectIds = (ids: string[]): mongoose.Types.ObjectId[] => {
 };
 
 /**
+ * Normalize, validate, and deduplicate resource IDs while preserving input order.
+ */
+const getOrderedResourceIds = (resources: any[] | undefined): string[] => {
+  if (!resources || !Array.isArray(resources) || resources.length === 0) {
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  const orderedIds: string[] = [];
+
+  for (const id of resources) {
+    if (id == null) continue;
+
+    const idStr = typeof id === "string" ? id : String(id);
+    if (!mongoose.isValidObjectId(idStr)) continue;
+    if (seenIds.has(idStr)) continue;
+
+    seenIds.add(idStr);
+    orderedIds.push(idStr);
+  }
+
+  return orderedIds;
+};
+
+/**
  * Validate and deduplicate resource IDs, converting to ObjectIds.
  * Handles both string IDs and existing ObjectId instances.
  * Returns validated, deduplicated ObjectIds.
@@ -79,33 +104,11 @@ const toValidObjectIds = (ids: string[]): mongoose.Types.ObjectId[] => {
 export const validateAndDedupeResourceIds = (
   resources: any[] | undefined
 ): mongoose.Types.ObjectId[] => {
-  if (!resources || !Array.isArray(resources) || resources.length === 0) {
-    return [];
-  }
-
-  const seenIds = new Set<string>();
-  const validIds: mongoose.Types.ObjectId[] = [];
-
-  for (const id of resources) {
-    if (id == null) continue;
-
-    // Convert to string for validation and deduplication
-    const idStr = typeof id === 'string' ? id : String(id);
-
-    // Validate the ID format
-    if (!mongoose.isValidObjectId(idStr)) continue;
-
-    // Skip duplicates
-    if (seenIds.has(idStr)) continue;
-
-    seenIds.add(idStr);
-    validIds.push(new mongoose.Types.ObjectId(idStr));
-  }
-
-  return validIds;
+  const orderedIds = getOrderedResourceIds(resources);
+  return orderedIds.map((id) => new mongoose.Types.ObjectId(id));
 };
 
-const getTimeZoneOffsetMinutes = (date: Date, timeZone: string) => {
+export const getTimeZoneOffsetMinutes = (date: Date, timeZone: string) => {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
@@ -135,12 +138,12 @@ const getTimeZoneOffsetMinutes = (date: Date, timeZone: string) => {
   return (utcTime - date.getTime()) / 60000;
 };
 
-const toZonedTime = (date: Date, timeZone: string) => {
+export const toZonedTime = (date: Date, timeZone: string) => {
   const offsetMinutes = getTimeZoneOffsetMinutes(date, timeZone);
   return new Date(date.getTime() + offsetMinutes * 60000);
 };
 
-const fromZonedTime = (zonedDate: Date, timeZone: string) => {
+export const fromZonedTime = (zonedDate: Date, timeZone: string) => {
   const offsetMinutes = getTimeZoneOffsetMinutes(zonedDate, timeZone);
   return new Date(zonedDate.getTime() - offsetMinutes * 60000);
 };
@@ -367,7 +370,7 @@ const buildBlockedData = async (
     blockedRanges.push({ start, end, reason: range.reason });
   });
 
-  const teamMemberIds = project.resources || [];
+  const teamMemberIds = getOrderedResourceIds(project.resources);
   if (teamMemberIds.length > 0) {
     const teamMembers = await User.find({
       _id: { $in: teamMemberIds },
@@ -416,33 +419,23 @@ const buildBlockedData = async (
   }
 
   const bookings = await Booking.find(bookingFilter).select(
-    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status"
+    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit status"
   );
 
   bookings.forEach((booking) => {
     // Block the execution period
-    // Legacy field fallbacks are kept for older bookings until data is normalized.
-    const scheduledExecutionEndDate =
-      booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
-    const scheduledBufferStartDate =
-      booking.scheduledBufferStartDate || (booking as any).bufferStartDate;
-    const scheduledBufferEndDate =
-      booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
-
-    if (booking.scheduledStartDate && scheduledExecutionEndDate) {
+    if (booking.scheduledStartDate && booking.scheduledExecutionEndDate) {
       blockedRanges.push({
         start: new Date(booking.scheduledStartDate),
-        end: new Date(scheduledExecutionEndDate),
+        end: new Date(booking.scheduledExecutionEndDate),
         reason: "booking",
       });
     }
     // Block the buffer period (if exists)
-    if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
-      // Don't extend buffer end date - use the actual scheduled end
-      // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
+    if (booking.scheduledBufferStartDate && booking.scheduledBufferEndDate && booking.scheduledExecutionEndDate) {
       blockedRanges.push({
-        start: new Date(scheduledBufferStartDate),
-        end: new Date(scheduledBufferEndDate),
+        start: new Date(booking.scheduledBufferStartDate),
+        end: new Date(booking.scheduledBufferEndDate),
         reason: "booking-buffer",
       });
     }
@@ -605,38 +598,33 @@ const assignBookingBlocks = (
   teamMemberIds: string[]
 ): void => {
   bookings.forEach((booking) => {
-    // Legacy field fallbacks for older bookings
-    const scheduledExecutionEndDate =
-      booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
-    const scheduledBufferStartDate =
-      booking.scheduledBufferStartDate || (booking as any).bufferStartDate;
-    const scheduledBufferEndDate =
-      booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
-
     // Determine which team members are affected by this booking
     const affectedMembers = new Set<string>();
 
+    const hasAssignedMembers =
+      booking.assignedTeamMembers && booking.assignedTeamMembers.length > 0;
+
     // If booking has assignedTeamMembers, use those
-    if (booking.assignedTeamMembers && booking.assignedTeamMembers.length > 0) {
+    if (hasAssignedMembers) {
       booking.assignedTeamMembers.forEach((memberId: any) => {
         const id = memberId.toString();
         if (teamMemberIdsSet.has(id)) {
           affectedMembers.add(id);
         }
       });
-    }
-
-    // Also check if professional is in our team
-    if (booking.professional) {
-      const profId = booking.professional.toString();
-      if (teamMemberIdsSet.has(profId)) {
-        affectedMembers.add(profId);
+    } else {
+      // Legacy bookings without assignedTeamMembers: fall back to professional/project data
+      if (booking.professional) {
+        const profId = booking.professional.toString();
+        if (teamMemberIdsSet.has(profId)) {
+          affectedMembers.add(profId);
+        }
       }
-    }
 
-    // If booking is for this project, all team members are affected
-    if (booking.project?.toString() === projectId?.toString()) {
-      teamMemberIds.forEach((id) => affectedMembers.add(id));
+      // If booking is for this project, assume all team members were involved (legacy)
+      if (booking.project?.toString() === projectId?.toString()) {
+        teamMemberIds.forEach((id) => affectedMembers.add(id));
+      }
     }
 
     // Add blocks only to affected members
@@ -651,19 +639,19 @@ const assignBookingBlocks = (
       }
 
       // Block the execution period
-      if (booking.scheduledStartDate && scheduledExecutionEndDate) {
+      if (booking.scheduledStartDate && booking.scheduledExecutionEndDate) {
         memberData.blockedRanges.push({
           start: new Date(booking.scheduledStartDate),
-          end: new Date(scheduledExecutionEndDate),
+          end: new Date(booking.scheduledExecutionEndDate),
           reason: "booking",
         });
       }
 
       // Block the buffer period (if exists)
-      if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
+      if (booking.scheduledBufferStartDate && booking.scheduledBufferEndDate && booking.scheduledExecutionEndDate) {
         memberData.blockedRanges.push({
-          start: new Date(scheduledBufferStartDate),
-          end: new Date(scheduledBufferEndDate),
+          start: new Date(booking.scheduledBufferStartDate),
+          end: new Date(booking.scheduledBufferEndDate),
           reason: "booking-buffer",
         });
       }
@@ -685,24 +673,8 @@ const buildPerMemberBlockedData = async (
   const perMemberData: PerMemberBlockedData = new Map();
 
   // Normalize all resource IDs to strings up-front using a Set for O(1) lookups
-  const rawResources = project.resources || [];
-  const teamMemberIdsSet = new Set<string>();
-  for (const id of rawResources) {
-    if (id == null) continue;
-    const idStr = typeof id === 'string' ? id : id.toString();
-    if (idStr) {
-      teamMemberIdsSet.add(idStr);
-    }
-  }
-
-  // Include professional in the team if not already included
-  const professionalId = project.professionalId?.toString() || professional?._id?.toString();
-  if (professionalId) {
-    teamMemberIdsSet.add(professionalId);
-  }
-
-  // Keep array for iteration where needed
-  const teamMemberIds: string[] = Array.from(teamMemberIdsSet);
+  const teamMemberIds = getOrderedResourceIds(project.resources);
+  const teamMemberIdsSet = new Set<string>(teamMemberIds);
 
   // Step 1: Collect company-level blocks (including customer blocks)
   const { companyBlockedDates, companyBlockedRanges } = collectCompanyBlocks(
@@ -744,7 +716,7 @@ const buildPerMemberBlockedData = async (
   }
 
   const bookings = await Booking.find(bookingFilter).select(
-    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate assignedTeamMembers professional project status"
+    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit assignedTeamMembers professional project status"
   );
 
   // Step 4: Assign booking blocks to affected members
@@ -899,15 +871,36 @@ const countAvailableResourcesForWindow = (
 };
 
 /**
+ * Check if a specific member is available during a time window.
+ */
+const isMemberAvailableForWindow = (
+  memberData: MemberBlockedData | undefined,
+  availability: Record<string, any>,
+  startUtc: Date,
+  endUtc: Date,
+  timeZone: string
+): boolean => {
+  if (!memberData) return false;
+  const startZoned = toZonedTime(startUtc, timeZone);
+
+  if (!isWorkingDay(availability, startZoned)) return false;
+
+  const dateKey = formatDateKey(startZoned);
+  if (memberData.blockedDates.has(dateKey)) return false;
+
+  return !memberTimeOverlapsRanges(memberData, startUtc, endUtc, timeZone);
+};
+
+/**
  * Compute overlap percentage for days mode.
- * Returns the percentage of execution days where at least minResources are available.
+ * Returns the percentage of execution days where all members in the subset are available.
  */
 const computeDaysOverlapPercentage = (
   perMemberBlocked: PerMemberBlockedData,
   availability: Record<string, any>,
   startZoned: Date,
   executionDays: number,
-  minResources: number,
+  memberIds: string[],
   timeZone: string
 ): number => {
   if (executionDays <= 0) return 100;
@@ -922,13 +915,13 @@ const computeDaysOverlapPercentage = (
     iterations++;
     // Only count working days
     if (isWorkingDay(availability, cursor)) {
-      const availableCount = countAvailableResourcesForDay(
-        perMemberBlocked,
-        availability,
-        cursor,
-        timeZone
-      );
-      if (availableCount >= minResources) {
+      const allAvailable = memberIds.every((memberId) => {
+        const memberData = perMemberBlocked.get(memberId);
+        return memberData
+          ? !isMemberDayBlocked(memberData, availability, cursor, timeZone)
+          : false;
+      });
+      if (allAvailable) {
         availableDays++;
       }
       daysCounted++;
@@ -941,7 +934,7 @@ const computeDaysOverlapPercentage = (
 
 /**
  * Compute overlap percentage for hours mode.
- * Returns the percentage of execution time where at least minResources are available.
+ * Returns the percentage of execution time where all members in the subset are available.
  * Samples at 30-minute intervals for efficiency.
  */
 const computeHoursOverlapPercentage = (
@@ -949,7 +942,7 @@ const computeHoursOverlapPercentage = (
   availability: Record<string, any>,
   startUtc: Date,
   endUtc: Date,
-  minResources: number,
+  memberIds: string[],
   timeZone: string
 ): number => {
   const totalMinutes = (endUtc.getTime() - startUtc.getTime()) / (1000 * 60);
@@ -970,15 +963,17 @@ const computeHoursOverlapPercentage = (
       Math.min(sampleTime.getTime() + sampleInterval * 60 * 1000, endUtc.getTime())
     );
 
-    const availableCount = countAvailableResourcesForWindow(
-      perMemberBlocked,
-      availability,
-      sampleTime,
-      sampleEnd,
-      timeZone
+    const allAvailable = memberIds.every((memberId) =>
+      isMemberAvailableForWindow(
+        perMemberBlocked.get(memberId),
+        availability,
+        sampleTime,
+        sampleEnd,
+        timeZone
+      )
     );
 
-    if (availableCount >= minResources) {
+    if (allAvailable) {
       availableSamples++;
     }
   }
@@ -986,16 +981,175 @@ const computeHoursOverlapPercentage = (
   return (availableSamples / totalSamples) * 100;
 };
 
+const getRequiredOverlapPercentage = (resourcePolicy: ResourcePolicy): number =>
+  resourcePolicy.minResources <= 1 ? 100 : resourcePolicy.minOverlapPercentage;
+
+const forEachSubset = (
+  resourceIds: string[],
+  subsetSize: number,
+  callback: (subset: string[]) => boolean
+): boolean => {
+  if (subsetSize <= 0 || resourceIds.length < subsetSize) {
+    return false;
+  }
+
+  const subset: string[] = [];
+  const maxStart = resourceIds.length;
+
+  const walk = (startIndex: number): boolean => {
+    if (subset.length === subsetSize) {
+      return callback([...subset]);
+    }
+
+    const remainingNeeded = subsetSize - subset.length;
+    for (let i = startIndex; i <= maxStart - remainingNeeded; i++) {
+      subset.push(resourceIds[i]);
+      if (walk(i + 1)) {
+        return true;
+      }
+      subset.pop();
+    }
+
+    return false;
+  };
+
+  return walk(0);
+};
+
+const findFirstEligibleSubsetForDays = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  startZoned: Date,
+  executionDays: number,
+  resourcePolicy: ResourcePolicy,
+  resourceIds: string[],
+  timeZone: string
+): string[] | null => {
+  const requiredOverlap = getRequiredOverlapPercentage(resourcePolicy);
+  let selectedSubset: string[] | null = null;
+
+  forEachSubset(resourceIds, resourcePolicy.minResources, (subset) => {
+    const overlapPercentage = computeDaysOverlapPercentage(
+      perMemberBlocked,
+      availability,
+      startZoned,
+      executionDays,
+      subset,
+      timeZone
+    );
+
+    if (overlapPercentage >= requiredOverlap) {
+      selectedSubset = subset;
+      return true;
+    }
+
+    return false;
+  });
+
+  return selectedSubset;
+};
+
+const findFirstEligibleSubsetForHours = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  startUtc: Date,
+  endUtc: Date,
+  resourcePolicy: ResourcePolicy,
+  resourceIds: string[],
+  timeZone: string,
+  bufferStartUtc?: Date,
+  bufferEndUtc?: Date
+): string[] | null => {
+  const requiredOverlap = getRequiredOverlapPercentage(resourcePolicy);
+  let selectedSubset: string[] | null = null;
+
+  forEachSubset(resourceIds, resourcePolicy.minResources, (subset) => {
+    const overlapPercentage = computeHoursOverlapPercentage(
+      perMemberBlocked,
+      availability,
+      startUtc,
+      endUtc,
+      subset,
+      timeZone
+    );
+
+    if (overlapPercentage >= requiredOverlap) {
+      if (bufferStartUtc && bufferEndUtc) {
+        if (
+          !isSubsetClearOfRanges(
+            perMemberBlocked,
+            subset,
+            bufferStartUtc,
+            bufferEndUtc,
+            timeZone
+          )
+        ) {
+          return false;
+        }
+      }
+
+      selectedSubset = subset;
+      return true;
+    }
+
+    return false;
+  });
+
+  return selectedSubset;
+};
+
+const computeBestOverlapPercentageForDays = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  startZoned: Date,
+  executionDays: number,
+  resourcePolicy: ResourcePolicy,
+  resourceIds: string[],
+  timeZone: string
+): number => {
+  let bestOverlap = 0;
+
+  forEachSubset(resourceIds, resourcePolicy.minResources, (subset) => {
+    const overlapPercentage = computeDaysOverlapPercentage(
+      perMemberBlocked,
+      availability,
+      startZoned,
+      executionDays,
+      subset,
+      timeZone
+    );
+    if (overlapPercentage > bestOverlap) {
+      bestOverlap = overlapPercentage;
+    }
+    return false;
+  });
+
+  return bestOverlap;
+};
+
+const isSubsetClearOfRanges = (
+  perMemberBlocked: PerMemberBlockedData,
+  subset: string[],
+  startUtc: Date,
+  endUtc: Date,
+  timeZone: string
+): boolean => {
+  return subset.every((memberId) => {
+    const memberData = perMemberBlocked.get(memberId);
+    if (!memberData) return false;
+    return !memberTimeOverlapsRanges(memberData, startUtc, endUtc, timeZone);
+  });
+};
+
 /**
  * Get resource policy from project with defaults applied.
- * totalResources includes the professional (+1) plus any additional team members.
+ * totalResources is the count of validated resources in the project.
  */
 export const getResourcePolicy = (project: any): ResourcePolicy => {
-  // Include professional in the count: resources array + 1 for the professional
-  const totalResources = (project.resources?.length || 0) + 1;
+  const totalResources = getOrderedResourceIds(project.resources).length;
   const minResources = Math.min(
     Math.max(project.minResources || 1, 1),
-    totalResources
+    totalResources || 1
   );
   const minOverlapPercentage = Math.min(
     Math.max(project.minOverlapPercentage ?? DEFAULT_MIN_OVERLAP_PERCENTAGE, 10),
@@ -1006,11 +1160,11 @@ export const getResourcePolicy = (project: any): ResourcePolicy => {
 };
 
 /**
- * Check if multi-resource mode is active (minResources > 1).
+ * Check if resource-based availability should be used (any resources present).
  */
 const isMultiResourceMode = (project: any): boolean => {
-  const { minResources, totalResources } = getResourcePolicy(project);
-  return minResources > 1 && totalResources > 1;
+  const { totalResources } = getResourcePolicy(project);
+  return totalResources > 0;
 };
 
 const loadProjectAndProfessional = async (projectId: string) => {
@@ -1158,8 +1312,7 @@ const isDayBlockedWithPolicy = (
   if (
     perMemberBlocked &&
     resourcePolicy &&
-    resourcePolicy.minResources > 1 &&
-    resourcePolicy.totalResources > 1
+    resourcePolicy.totalResources > 0
   ) {
     return isDayBlockedMultiResource(
       perMemberBlocked,
@@ -1309,17 +1462,18 @@ const getAvailableSlotsForDate = (
   notBefore?: Date,
   buffer?: Duration | null,
   perMemberBlocked?: PerMemberBlockedData,
-  resourcePolicy?: ResourcePolicy
+  resourcePolicy?: ResourcePolicy,
+  orderedResourceIds?: string[]
 ) => {
   const dateKey = formatDateKey(zonedDate);
-  const isMultiResource =
+  const useResourcePolicy =
     perMemberBlocked &&
     resourcePolicy &&
-    resourcePolicy.minResources > 1 &&
-    resourcePolicy.totalResources > 1;
+    orderedResourceIds &&
+    orderedResourceIds.length > 0;
 
   // In strict mode, check if date is fully blocked
-  if (!isMultiResource && blockedDates.has(dateKey)) return [];
+  if (!useResourcePolicy && blockedDates.has(dateKey)) return [];
 
   const hours = getWorkingHoursForDate(availability, zonedDate);
   if (!hours.available || hours.startMinutes === null || hours.endMinutes === null) {
@@ -1361,35 +1515,8 @@ const getAvailableSlotsForDate = (
     const slotStartUtc = fromZonedTime(slotStartZoned, timeZone);
     const slotEndUtc = new Date(slotStartUtc.getTime() + executionMinutes * 60000);
 
-    if (isMultiResource) {
-      // Multi-resource mode: check overlap percentage
-      const overlapPercentage = computeHoursOverlapPercentage(
-        perMemberBlocked!,
-        availability,
-        slotStartUtc,
-        slotEndUtc,
-        resourcePolicy!.minResources,
-        timeZone
-      );
-
-      if (overlapPercentage < resourcePolicy!.minOverlapPercentage) {
-        continue;
-      }
-    } else {
-      // Strict intersection mode: check if window overlaps any blocked ranges
-      const overlaps = windowOverlapsRanges(
-        slotStartUtc,
-        slotEndUtc,
-        blockedRanges,
-        timeZone
-      );
-
-      if (overlaps) {
-        continue;
-      }
-    }
-
-    // Buffer check (same for both modes - uses merged blocked data)
+    let bufferStartUtc: Date | undefined;
+    let bufferEndUtc: Date | undefined;
     if (buffer && buffer.value > 0) {
       const executionEndZoned = new Date(
         slotStartZoned.getTime() + executionMinutes * 60000
@@ -1410,11 +1537,43 @@ const getAvailableSlotsForDate = (
       );
 
       if (bufferStartZoned && bufferEndZoned > bufferStartZoned) {
-        const bufferStartUtc = fromZonedTime(bufferStartZoned, timeZone);
-        const bufferEndUtc = fromZonedTime(bufferEndZoned, timeZone);
-        if (
-          windowOverlapsRanges(bufferStartUtc, bufferEndUtc, blockedRanges, timeZone)
-        ) {
+        bufferStartUtc = fromZonedTime(bufferStartZoned, timeZone);
+        bufferEndUtc = fromZonedTime(bufferEndZoned, timeZone);
+      }
+    }
+
+    let selectedSubset: string[] | null = null;
+    if (useResourcePolicy) {
+      // Resource policy mode: find a single subset that covers the execution window
+      selectedSubset = findFirstEligibleSubsetForHours(
+        perMemberBlocked!,
+        availability,
+        slotStartUtc,
+        slotEndUtc,
+        resourcePolicy!,
+        orderedResourceIds!,
+        timeZone,
+        bufferStartUtc,
+        bufferEndUtc
+      );
+
+      if (!selectedSubset) {
+        continue;
+      }
+    } else {
+      // Strict intersection mode: check if window overlaps any blocked ranges
+      const overlaps = windowOverlapsRanges(
+        slotStartUtc,
+        slotEndUtc,
+        blockedRanges,
+        timeZone
+      );
+
+      if (overlaps) {
+        continue;
+      }
+      if (bufferStartUtc && bufferEndUtc) {
+        if (windowOverlapsRanges(bufferStartUtc, bufferEndUtc, blockedRanges, timeZone)) {
           continue;
         }
       }
@@ -1558,7 +1717,7 @@ const calculateBufferEnd = (
 /**
  * Build schedule proposals using pre-loaded project and professional data.
  * This avoids N+1 queries when called in bulk.
- * Supports multi-resource mode when project.minResources > 1.
+ * Supports resource policy mode when project has resources.
  */
 export const buildProjectScheduleProposalsWithData = async (
   project: any,
@@ -1583,6 +1742,11 @@ export const buildProjectScheduleProposalsWithData = async (
   // Get resource policy and determine if multi-resource mode is active
   const resourcePolicy = getResourcePolicy(project);
   const useMultiResource = isMultiResourceMode(project);
+  const orderedResourceIds = getOrderedResourceIds(project.resources);
+
+  if (orderedResourceIds.length === 0) {
+    return null;
+  }
 
   // Build blocked data (merged for strict mode, per-member for multi-resource)
   const { blockedDates, blockedRanges } = await buildBlockedData(
@@ -1634,7 +1798,8 @@ export const buildProjectScheduleProposalsWithData = async (
         prepEnd,
         durations.buffer,
         perMemberBlocked,
-        useMultiResource ? resourcePolicy : undefined
+        useMultiResource ? resourcePolicy : undefined,
+        useMultiResource ? orderedResourceIds : undefined
       );
 
       if (slots.length === 0) {
@@ -1694,16 +1859,17 @@ export const buildProjectScheduleProposalsWithData = async (
 
       // For multi-resource days mode, check overlap percentage across execution window
       if (useMultiResource && perMemberBlocked) {
-        const overlapPercentage = computeDaysOverlapPercentage(
+        const selectedSubset = findFirstEligibleSubsetForDays(
           perMemberBlocked,
           availability,
           currentDay,
           executionDays,
-          resourcePolicy.minResources,
+          resourcePolicy,
+          orderedResourceIds,
           timeZone
         );
 
-        if (overlapPercentage < resourcePolicy.minOverlapPercentage) {
+        if (!selectedSubset) {
           continue;
         }
       }
@@ -1840,6 +2006,12 @@ export const validateProjectScheduleSelection = async ({
   // Get resource policy and build per-member data if multi-resource mode
   const resourcePolicy = getResourcePolicy(project);
   const useMultiResource = isMultiResourceMode(project);
+  const orderedResourceIds = getOrderedResourceIds(project.resources);
+
+  if (orderedResourceIds.length === 0) {
+    return { valid: false, reason: "Project has no resources available" };
+  }
+
   let perMemberBlocked: PerMemberBlockedData | undefined;
   if (useMultiResource) {
     perMemberBlocked = await buildPerMemberBlockedData(
@@ -1888,7 +2060,8 @@ export const validateProjectScheduleSelection = async ({
       prepEnd,
       durations.buffer,
       perMemberBlocked,
-      useMultiResource ? resourcePolicy : undefined
+      useMultiResource ? resourcePolicy : undefined,
+      useMultiResource ? orderedResourceIds : undefined
     );
 
     const matchingSlot = slots.find((slot) => slot.startTime === startTime);
@@ -1927,19 +2100,36 @@ export const validateProjectScheduleSelection = async ({
   // For multi-resource days mode, also check overlap percentage across execution window
   if (useMultiResource && perMemberBlocked) {
     const executionDays = Math.max(1, Math.ceil(durations.execution.value));
-    const overlapPercentage = computeDaysOverlapPercentage(
+    const selectedSubset = findFirstEligibleSubsetForDays(
       perMemberBlocked,
       availability,
       selectedZoned,
       executionDays,
-      resourcePolicy.minResources,
+      resourcePolicy,
+      orderedResourceIds,
       timeZone
     );
 
-    if (overlapPercentage < resourcePolicy.minOverlapPercentage) {
+    if (!selectedSubset) {
+      const requiredOverlap = getRequiredOverlapPercentage(resourcePolicy);
+      const bestOverlap = computeBestOverlapPercentageForDays(
+        perMemberBlocked,
+        availability,
+        selectedZoned,
+        executionDays,
+        resourcePolicy,
+        orderedResourceIds,
+        timeZone
+      );
+      if (bestOverlap > 0) {
+        return {
+          valid: false,
+          reason: `Team availability (${Math.round(bestOverlap)}%) is below required ${requiredOverlap}%`
+        };
+      }
       return {
         valid: false,
-        reason: `Team availability (${Math.round(overlapPercentage)}%) is below required ${resourcePolicy.minOverlapPercentage}%`
+        reason: "Selected date does not have enough team members available"
       };
     }
   }
@@ -1990,6 +2180,24 @@ export const buildProjectScheduleWindow = async ({
     ? await buildBlockedData(project, professional, timeZone)
     : baseBlockedData;
 
+  const resourcePolicy = getResourcePolicy(project);
+  const useMultiResource = isMultiResourceMode(project);
+  const orderedResourceIds = getOrderedResourceIds(project.resources);
+
+  if (orderedResourceIds.length === 0) {
+    return null;
+  }
+
+  let perMemberBlocked: PerMemberBlockedData | undefined;
+  if (useMultiResource) {
+    perMemberBlocked = await buildPerMemberBlockedData(
+      project,
+      professional,
+      timeZone,
+      customerBlocks
+    );
+  }
+
   const prepEnd = calculatePrepEnd(
     durations.preparation,
     availability,
@@ -2035,16 +2243,51 @@ export const buildProjectScheduleWindow = async ({
       timeZone
     );
 
-    // Validate and deduplicate assignedTeamMembers (all project resources)
-    const assignedTeamMembers = validateAndDedupeResourceIds(project.resources);
+    const hasBuffer = durations.buffer?.value && durations.buffer.value > 0;
+    const bufferStartUtc =
+      hasBuffer && bufferStartZoned && bufferEndZoned > bufferStartZoned
+        ? fromZonedTime(bufferStartZoned, timeZone)
+        : undefined;
+    const bufferEndUtc =
+      hasBuffer && bufferStartZoned && bufferEndZoned > bufferStartZoned
+        ? fromZonedTime(bufferEndZoned, timeZone)
+        : undefined;
+
+    let selectedSubset: string[] | null = null;
+    if (useMultiResource && perMemberBlocked) {
+      selectedSubset = findFirstEligibleSubsetForHours(
+        perMemberBlocked,
+        availability,
+        fromZonedTime(selectedZoned, timeZone),
+        fromZonedTime(executionEndZoned, timeZone),
+        resourcePolicy,
+        orderedResourceIds,
+        timeZone,
+        bufferStartUtc,
+        bufferEndUtc
+      );
+      if (!selectedSubset) {
+        return null;
+      }
+    }
+
+    // Convert execution end once and reuse to avoid any precision differences
+    const executionEndUtc = fromZonedTime(executionEndZoned, timeZone);
+
+    const assignedTeamMembers = selectedSubset
+      ? validateAndDedupeResourceIds(selectedSubset)
+      : validateAndDedupeResourceIds(project.resources);
 
     return {
       scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
-      scheduledExecutionEndDate: fromZonedTime(executionEndZoned, timeZone),
-      scheduledBufferStartDate: bufferStartZoned
+      scheduledExecutionEndDate: executionEndUtc,
+      // When no buffer, buffer dates equal execution end (0 buffer duration)
+      scheduledBufferStartDate: hasBuffer && bufferStartZoned
         ? fromZonedTime(bufferStartZoned, timeZone)
-        : null,
-      scheduledBufferEndDate: fromZonedTime(bufferEndZoned, timeZone),
+        : executionEndUtc,
+      scheduledBufferEndDate: hasBuffer
+        ? fromZonedTime(bufferEndZoned, timeZone)
+        : executionEndUtc,
       scheduledBufferUnit: durations.buffer?.unit,
       scheduledStartTime: formatMinutesToTime(minutes),
       scheduledEndTime: formatMinutesToTime(
@@ -2059,11 +2302,36 @@ export const buildProjectScheduleWindow = async ({
   if (selectedZoned < prepStartDay) {
     return null;
   }
-  if (isDayBlocked(availability, selectedZoned, blockedDates, blockedRanges, timeZone)) {
+  if (
+    isDayBlockedWithPolicy(
+      availability,
+      selectedZoned,
+      blockedDates,
+      blockedRanges,
+      timeZone,
+      perMemberBlocked,
+      useMultiResource ? resourcePolicy : undefined
+    )
+  ) {
     return null;
   }
 
   const executionDays = Math.max(1, Math.ceil(durations.execution.value));
+  let selectedSubset: string[] | null = null;
+  if (useMultiResource && perMemberBlocked) {
+    selectedSubset = findFirstEligibleSubsetForDays(
+      perMemberBlocked,
+      availability,
+      selectedZoned,
+      executionDays,
+      resourcePolicy,
+      orderedResourceIds,
+      timeZone
+    );
+    if (!selectedSubset) {
+      return null;
+    }
+  }
   const executionEndDay = advanceWorkingDays(
     selectedZoned,
     executionDays,
@@ -2085,7 +2353,7 @@ export const buildProjectScheduleWindow = async ({
     durations.buffer
   );
   const bufferEndZoned = calculateBufferEnd(
-    executionEndDay,
+    executionEndZoned,
     durations.buffer,
     durations.execution.unit,
     availability,
@@ -2094,16 +2362,24 @@ export const buildProjectScheduleWindow = async ({
     timeZone
   );
 
-  // Validate and deduplicate assignedTeamMembers (all project resources)
-  const assignedTeamMembers = validateAndDedupeResourceIds(project.resources);
+  const hasBuffer = durations.buffer?.value && durations.buffer.value > 0;
+  // Convert execution end once and reuse to avoid any precision differences
+  const executionEndUtc = fromZonedTime(executionEndZoned, timeZone);
+
+  const assignedTeamMembers = selectedSubset
+    ? validateAndDedupeResourceIds(selectedSubset)
+    : validateAndDedupeResourceIds(project.resources);
 
   return {
     scheduledStartDate: fromZonedTime(selectedZoned, timeZone),
-    scheduledExecutionEndDate: fromZonedTime(executionEndZoned, timeZone),
-    scheduledBufferStartDate: bufferStartZoned
+    scheduledExecutionEndDate: executionEndUtc,
+    // When no buffer, buffer dates equal execution end (0 buffer duration)
+    scheduledBufferStartDate: hasBuffer && bufferStartZoned
       ? fromZonedTime(bufferStartZoned, timeZone)
-      : null,
-    scheduledBufferEndDate: fromZonedTime(bufferEndZoned, timeZone),
+      : executionEndUtc,
+    scheduledBufferEndDate: hasBuffer
+      ? fromZonedTime(bufferEndZoned, timeZone)
+      : executionEndUtc,
     scheduledBufferUnit: durations.buffer?.unit,
     assignedTeamMembers,
   };
