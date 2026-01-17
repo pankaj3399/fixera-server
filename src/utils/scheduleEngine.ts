@@ -1,3 +1,4 @@
+//fixera-server/src/utils/scheduleEngine.ts
 import mongoose from "mongoose";
 import Booking from "../models/booking";
 import Project from "../models/project";
@@ -22,6 +23,23 @@ export type ScheduleProposals = {
   earliestBookableDate: string;
   earliestProposal?: ProposalWindow;
   shortestThroughputProposal?: ProposalWindow;
+  _debug?: {
+    subprojectIndex?: number;
+    projectId?: string;
+    prepEnd: string;
+    searchStart: string;
+    preparationDuration: string;
+    executionDuration: string;
+    timeZone: string;
+    useMultiResource: boolean;
+    resourcePolicy: {
+      minResources: number;
+      totalResources: number;
+      minOverlapPercentage: number;
+    } | null;
+    earliestBookableDateRaw: string;
+    usedFallback: boolean;
+  };
 };
 
 type CustomerBlocks = {
@@ -1363,7 +1381,10 @@ const advanceWorkingDays = (
   availability: Record<string, any>,
   blockedDates: Set<string>,
   blockedRanges: Array<{ start: Date; end: Date }>,
-  timeZone: string
+  timeZone: string,
+  // Optional multi-resource parameters
+  perMemberBlocked?: PerMemberBlockedData,
+  resourcePolicy?: ResourcePolicy
 ) => {
   if (workingDays <= 0) {
     return startDate;
@@ -1371,9 +1392,33 @@ const advanceWorkingDays = (
 
   let cursor = startDate;
   let counted = 0;
+  const maxIterations = 366 * 2; // Guard against infinite loops
+  let iterations = 0;
 
-  while (counted < workingDays) {
-    if (!isDayBlocked(availability, cursor, blockedDates, blockedRanges, timeZone)) {
+  while (counted < workingDays && iterations < maxIterations) {
+    iterations++;
+
+    let dayIsBlocked = false;
+
+    if (perMemberBlocked && resourcePolicy && resourcePolicy.totalResources > 0) {
+      // Multi-resource mode: only block if not enough resources available
+      // For partial overlap (< 100%), work continues as long as at least 1 resource is available
+      const allowPartialAvailability = resourcePolicy.minOverlapPercentage < 100;
+      const minRequired = allowPartialAvailability ? 1 : resourcePolicy.minResources;
+
+      dayIsBlocked = isDayBlockedMultiResource(
+        perMemberBlocked,
+        availability,
+        cursor,
+        minRequired,
+        timeZone
+      );
+    } else {
+      // Single resource mode: use simple block check
+      dayIsBlocked = isDayBlocked(availability, cursor, blockedDates, blockedRanges, timeZone);
+    }
+
+    if (!dayIsBlocked) {
       counted += 1;
       if (counted >= workingDays) {
         return cursor;
@@ -1383,6 +1428,34 @@ const advanceWorkingDays = (
   }
 
   return cursor;
+};
+
+/**
+ * Count working days between two dates (inclusive) for throughput calculation.
+ * Counts all days that are working days based on availability schedule (e.g., Mon-Fri).
+ * Does NOT skip blocked days - blocked days still count as time passing (throughput).
+ * Only skips weekends and non-working days based on the professional's availability.
+ */
+const countWorkingDaysBetween = (
+  startDate: Date,
+  endDate: Date,
+  availability: Record<string, any>,
+): number => {
+  let cursor = startDate;
+  let count = 0;
+  const maxIterations = 366 * 2; // Guard against infinite loops
+  let iterations = 0;
+
+  while (cursor <= endDate && iterations < maxIterations) {
+    iterations++;
+    // Only check if it's a working day (Mon-Fri based on availability), not if it's blocked
+    if (isWorkingDay(availability, cursor)) {
+      count++;
+    }
+    cursor = addDaysZoned(cursor, 1);
+  }
+
+  return count;
 };
 
 const calculatePrepEnd = (
@@ -1808,6 +1881,22 @@ export const buildProjectScheduleProposalsWithData = async (
     executionMode === "hours" ? prepEnd : startOfDayZoned(prepEnd);
   const maxDays = 180;
 
+  const _debugInfo = {
+    subprojectIndex,
+    prepEnd: prepEnd.toISOString(),
+    searchStart: searchStart.toISOString(),
+    preparationDuration: durations.preparation ? `${durations.preparation.value} ${durations.preparation.unit}` : 'none',
+    executionDuration: `${execution.value} ${execution.unit}`,
+    timeZone,
+    useMultiResource,
+    resourcePolicy: resourcePolicy ? {
+      minResources: resourcePolicy.minResources,
+      totalResources: resourcePolicy.totalResources,
+      minOverlapPercentage: resourcePolicy.minOverlapPercentage,
+    } : null,
+    projectId: project._id?.toString(),
+  };
+
   let earliestBookableDate: Date | null = null;
   let earliestProposal: ProposalWindow | undefined;
   let shortestProposal: ProposalWindow | undefined;
@@ -1866,29 +1955,19 @@ export const buildProjectScheduleProposalsWithData = async (
         break;
       }
     } else {
-      // Days mode: use policy-aware day blocked check
-      const dayIsBlocked = isDayBlockedWithPolicy(
-        availability,
-        currentDay,
-        blockedDates,
-        blockedRanges,
-        timeZone,
-        perMemberBlocked,
-        useMultiResource ? resourcePolicy : undefined
-      );
-
-      if (dayIsBlocked) {
-        continue;
-      }
-
-      if (!earliestBookableDate) {
-        earliestBookableDate = startOfDayZoned(currentDay);
-      }
-
+      const currentDayStr = currentDay.toISOString();
       const executionDays = Math.max(1, Math.ceil(execution.value));
 
-      // For multi-resource days mode, check overlap percentage across execution window
-      if (useMultiResource && perMemberBlocked) {
+      // For multi-resource days mode, use window-based overlap check instead of
+      // strict per-day check. This allows start dates where not all minResources
+      // are available on the start day, as long as the execution window meets
+      // the overlap percentage requirement (matching availability endpoint logic).
+      if (useMultiResource && perMemberBlocked && resourcePolicy) {
+        // Still require it to be a working day
+        if (!isWorkingDay(availability, currentDay)) {
+          continue;
+        }
+
         const selectedSubset = findFirstEligibleSubsetForDays(
           perMemberBlocked,
           availability,
@@ -1902,6 +1981,26 @@ export const buildProjectScheduleProposalsWithData = async (
         if (!selectedSubset) {
           continue;
         }
+      } else {
+        // Single-resource or no policy: use strict per-day check
+        const dayIsBlocked = isDayBlockedWithPolicy(
+          availability,
+          currentDay,
+          blockedDates,
+          blockedRanges,
+          timeZone,
+          perMemberBlocked,
+          undefined
+        );
+
+        if (dayIsBlocked) {
+          continue;
+        }
+      }
+
+      // Only set earliestBookableDate after passing ALL checks
+      if (!earliestBookableDate) {
+        earliestBookableDate = startOfDayZoned(currentDay);
       }
 
       const executionEndDay = advanceWorkingDays(
@@ -1910,12 +2009,17 @@ export const buildProjectScheduleProposalsWithData = async (
         availability,
         blockedDates,
         blockedRanges,
-        timeZone
+        timeZone,
+        useMultiResource ? perMemberBlocked : undefined,
+        useMultiResource ? resourcePolicy : undefined
       );
-      const throughputDays =
-        Math.floor(
-          (executionEndDay.getTime() - currentDay.getTime()) / (1000 * 60 * 60 * 24)
-        ) + 1;
+      // Count working days (excluding only weekends) for throughput calculation
+      // Blocked days still count as throughput time - they delay but don't reduce throughput
+      const throughputDays = countWorkingDaysBetween(
+        currentDay,
+        executionEndDay,
+        availability
+      );
 
       if (!earliestProposal && throughputDays <= executionDays * 2) {
         const executionEndUtc = fromZonedTime(executionEndDay, timeZone);
@@ -1971,6 +2075,11 @@ export const buildProjectScheduleProposalsWithData = async (
     earliestBookableDate: fromZonedTime(fallbackDate, timeZone).toISOString(),
     earliestProposal,
     shortestThroughputProposal: shortestProposal,
+    _debug: {
+      ..._debugInfo,
+      earliestBookableDateRaw: fallbackDate.toISOString(),
+      usedFallback: !earliestBookableDate,
+    },
   };
 };
 
@@ -2109,27 +2218,18 @@ export const validateProjectScheduleSelection = async ({
     return { valid: false, reason: "Selected date is before prep window" };
   }
 
-  // Use policy-aware day blocked check
-  const dayIsBlocked = isDayBlockedWithPolicy(
-    availability,
-    selectedZoned,
-    blockedDates,
-    blockedRanges,
-    timeZone,
-    perMemberBlocked,
-    useMultiResource ? resourcePolicy : undefined
-  );
+  const executionDays = Math.max(1, Math.ceil(durations.execution.value));
 
-  if (dayIsBlocked) {
-    if (useMultiResource) {
-      return { valid: false, reason: "Selected date does not have enough team members available" };
+  // For multi-resource days mode, use window-based overlap check instead of
+  // strict per-day check. This allows dates where not all minResources are
+  // available on the start day, as long as the execution window meets the
+  // overlap percentage requirement.
+  if (useMultiResource && perMemberBlocked && resourcePolicy) {
+    // Still require it to be a working day
+    if (!isWorkingDay(availability, selectedZoned)) {
+      return { valid: false, reason: "Selected date is not a working day" };
     }
-    return { valid: false, reason: "Selected date is blocked" };
-  }
 
-  // For multi-resource days mode, also check overlap percentage across execution window
-  if (useMultiResource && perMemberBlocked) {
-    const executionDays = Math.max(1, Math.ceil(durations.execution.value));
     const selectedSubset = findFirstEligibleSubsetForDays(
       perMemberBlocked,
       availability,
@@ -2161,6 +2261,21 @@ export const validateProjectScheduleSelection = async ({
         valid: false,
         reason: "Selected date does not have enough team members available"
       };
+    }
+  } else {
+    // Single-resource or no policy: use strict per-day check
+    const dayIsBlocked = isDayBlockedWithPolicy(
+      availability,
+      selectedZoned,
+      blockedDates,
+      blockedRanges,
+      timeZone,
+      perMemberBlocked,
+      undefined
+    );
+
+    if (dayIsBlocked) {
+      return { valid: false, reason: "Selected date is blocked" };
     }
   }
 
@@ -2332,23 +2447,20 @@ export const buildProjectScheduleWindow = async ({
   if (selectedZoned < prepStartDay) {
     return null;
   }
-  if (
-    isDayBlockedWithPolicy(
-      availability,
-      selectedZoned,
-      blockedDates,
-      blockedRanges,
-      timeZone,
-      perMemberBlocked,
-      useMultiResource ? resourcePolicy : undefined
-    )
-  ) {
-    return null;
-  }
 
   const executionDays = Math.max(1, Math.ceil(durations.execution.value));
   let selectedSubset: string[] | null = null;
-  if (useMultiResource && perMemberBlocked) {
+
+  // For multi-resource days mode, use window-based overlap check instead of
+  // strict per-day check. This allows dates where not all minResources are
+  // available on the start day, as long as the execution window meets the
+  // overlap percentage requirement.
+  if (useMultiResource && perMemberBlocked && resourcePolicy) {
+    // Still require it to be a working day
+    if (!isWorkingDay(availability, selectedZoned)) {
+      return null;
+    }
+
     selectedSubset = findFirstEligibleSubsetForDays(
       perMemberBlocked,
       availability,
@@ -2359,6 +2471,21 @@ export const buildProjectScheduleWindow = async ({
       timeZone
     );
     if (!selectedSubset) {
+      return null;
+    }
+  } else {
+    // Single-resource or no policy: use strict per-day check
+    if (
+      isDayBlockedWithPolicy(
+        availability,
+        selectedZoned,
+        blockedDates,
+        blockedRanges,
+        timeZone,
+        perMemberBlocked,
+        undefined
+      )
+    ) {
       return null;
     }
   }
