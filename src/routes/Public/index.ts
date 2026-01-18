@@ -5,6 +5,7 @@ import { validateVAT } from "../../handlers/User/validateVat";
 import {
   getPublishedProject,
   getProjectScheduleProposals,
+  getProjectScheduleWindow,
   getProjectTeamAvailability,
   getProjectWorkingHours,
 } from "../../handlers/Project";
@@ -41,5 +42,8 @@ publicRouter
 publicRouter
   .route("/projects/:id/schedule-proposals")
   .get(schedulingRateLimiter, getProjectScheduleProposals);
+publicRouter
+  .route("/projects/:id/schedule-window")
+  .get(schedulingRateLimiter, getProjectScheduleWindow);
 
 export default publicRouter;

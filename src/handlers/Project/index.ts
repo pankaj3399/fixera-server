@@ -5,7 +5,7 @@ import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
-import { buildProjectScheduleProposals, getResourcePolicy, toZonedTime, fromZonedTime, type ResourcePolicy } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposals, buildProjectScheduleWindow, getResourcePolicy, toZonedTime, fromZonedTime, type ResourcePolicy } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 // import { seedServiceCategories } from '../../scripts/seedProject';
@@ -1119,6 +1119,7 @@ export const getProjectWorkingHours = async (req: Request, res: Response) => {
 
 export const getProjectScheduleProposals = async (req: Request, res: Response) => {
   try {
+    console.log('[SCHEDULE PROPOSALS API] Request for project:', req.params.id);
     const { id } = req.params;
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
 
@@ -1154,6 +1155,11 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       });
     }
 
+    console.log('[SCHEDULE PROPOSALS API] Response:', {
+      earliestProposal: proposals.earliestProposal,
+      shortestThroughputProposal: proposals.shortestThroughputProposal
+    });
+
     res.json({
       success: true,
       proposals,
@@ -1163,6 +1169,93 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
     res.status(500).json({
       success: false,
       error: "Failed to fetch schedule proposals",
+    });
+  }
+};
+
+/**
+ * Get the schedule window (including completion date) for a specific start date.
+ * This uses the same backend logic as booking creation to ensure consistency.
+ */
+export const getProjectScheduleWindow = async (req: Request, res: Response) => {
+  try {
+    console.log('[SCHEDULE WINDOW API] Request received:', {
+      projectId: req.params.id,
+      query: req.query
+    });
+
+    const { id } = req.params;
+    const {
+      subprojectIndex: subprojectIndexRaw,
+      startDate,
+      startTime,
+    } = req.query;
+
+    if (!startDate || typeof startDate !== "string") {
+      console.log('[SCHEDULE WINDOW API] Missing startDate');
+      return res.status(400).json({
+        success: false,
+        error: "startDate query parameter is required",
+      });
+    }
+
+    const project = await Project.findById(id).select("subprojects");
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found",
+      });
+    }
+
+    const subprojects = Array.isArray(project.subprojects)
+      ? project.subprojects
+      : [];
+    const subprojectIndexResult = parseSubprojectIndex(
+      subprojectIndexRaw as string | undefined,
+      subprojects.length
+    );
+    if (!subprojectIndexResult.valid) {
+      return res.status(400).json({
+        success: false,
+        error: subprojectIndexResult.error,
+      });
+    }
+    const subprojectIndex = subprojectIndexResult.index;
+
+    const window = await buildProjectScheduleWindow({
+      projectId: id,
+      subprojectIndex,
+      startDate,
+      startTime: typeof startTime === "string" ? startTime : undefined,
+    });
+
+    if (!window) {
+      console.log('[SCHEDULE WINDOW API] No window returned - date not available');
+      return res.status(400).json({
+        success: false,
+        error: "Selected date is not available or invalid",
+      });
+    }
+
+    const response = {
+      success: true,
+      window: {
+        scheduledStartDate: window.scheduledStartDate.toISOString(),
+        scheduledExecutionEndDate: window.scheduledExecutionEndDate.toISOString(),
+        scheduledBufferStartDate: window.scheduledBufferStartDate?.toISOString(),
+        scheduledBufferEndDate: window.scheduledBufferEndDate?.toISOString(),
+        scheduledBufferUnit: window.scheduledBufferUnit,
+        scheduledStartTime: window.scheduledStartTime,
+        scheduledEndTime: window.scheduledEndTime,
+      },
+    };
+    console.log('[SCHEDULE WINDOW API] Success response:', response);
+    res.json(response);
+  } catch (error) {
+    console.error("[SCHEDULE WINDOW API] Error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch schedule window",
     });
   }
 };

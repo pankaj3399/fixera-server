@@ -1401,16 +1401,15 @@ const advanceWorkingDays = (
     let dayIsBlocked = false;
 
     if (perMemberBlocked && resourcePolicy && resourcePolicy.totalResources > 0) {
-      // Multi-resource mode: only block if not enough resources available
-      // For partial overlap (< 100%), work continues as long as at least 1 resource is available
-      const allowPartialAvailability = resourcePolicy.minOverlapPercentage < 100;
-      const minRequired = allowPartialAvailability ? 1 : resourcePolicy.minResources;
-
+      // Multi-resource mode: a day counts as a working day only if minResources are available.
+      // The overlap percentage rule (e.g., 75%) is enforced at the window level by
+      // findFirstEligibleSubsetForDays, not here. This ensures consistency with
+      // the availability API's isStartDateValid logic.
       dayIsBlocked = isDayBlockedMultiResource(
         perMemberBlocked,
         availability,
         cursor,
-        minRequired,
+        resourcePolicy.minResources,
         timeZone
       );
     } else {
