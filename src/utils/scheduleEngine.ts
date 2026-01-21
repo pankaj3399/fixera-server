@@ -2000,6 +2000,7 @@ export const buildProjectScheduleProposalsWithData = async (
       // Only set earliestBookableDate after passing ALL checks
       if (!earliestBookableDate) {
         earliestBookableDate = startOfDayZoned(currentDay);
+        console.log('[SCHEDULE_PROPOSALS] Earliest bookable date found:', formatDateKey(earliestBookableDate));
       }
 
       const executionEndDay = advanceWorkingDays(
@@ -2053,6 +2054,12 @@ export const buildProjectScheduleProposalsWithData = async (
             timeZone
           );
           const bufferEndUtc = fromZonedTime(bufferEndZoned, timeZone);
+          console.log('[SCHEDULE_PROPOSALS] New shortest window found:', {
+            startDateZoned: formatDateKey(currentDay),
+            executionEndDateZoned: formatDateKey(executionEndDay),
+            throughputDays,
+            executionDays,
+          });
           shortestProposal = {
             start: fromZonedTime(currentDay, timeZone).toISOString(),
             end: bufferEndUtc.toISOString(),
@@ -2340,6 +2347,28 @@ export const buildProjectScheduleWindow = async ({
       timeZone,
       customerBlocks
     );
+
+    // Debug logging for resource blocked dates
+    console.log('[SCHEDULE_WINDOW] Resource Policy:', {
+      minResources: resourcePolicy.minResources,
+      totalResources: resourcePolicy.totalResources,
+      minOverlapPercentage: resourcePolicy.minOverlapPercentage,
+      timeZone,
+    });
+    console.log('[SCHEDULE_WINDOW] Per-Resource Blocked Data:');
+    perMemberBlocked.forEach((memberData, memberId) => {
+      const blockedDatesList = Array.from(memberData.blockedDates).sort();
+      const blockedRangesList = memberData.blockedRanges.map(r => ({
+        start: r.start.toISOString(),
+        end: r.end.toISOString(),
+        reason: r.reason,
+      }));
+      console.log(`  Resource ${memberId.slice(-6)}:`, {
+        blockedDates: blockedDatesList,
+        blockedRangesCount: blockedRangesList.length,
+        blockedRanges: blockedRangesList.slice(0, 5), // Show first 5 ranges
+      });
+    });
   }
 
   const prepEnd = calculatePrepEnd(
@@ -2450,6 +2479,13 @@ export const buildProjectScheduleWindow = async ({
   const executionDays = Math.max(1, Math.ceil(durations.execution.value));
   let selectedSubset: string[] | null = null;
 
+  console.log('[SCHEDULE_WINDOW] Calculating window for:', {
+    startDate,
+    startDateZoned: formatDateKey(selectedZoned),
+    executionDays,
+    useMultiResource,
+  });
+
   // For multi-resource days mode, use window-based overlap check instead of
   // strict per-day check. This allows dates where not all minResources are
   // available on the start day, as long as the execution window meets the
@@ -2457,7 +2493,27 @@ export const buildProjectScheduleWindow = async ({
   if (useMultiResource && perMemberBlocked && resourcePolicy) {
     // Still require it to be a working day
     if (!isWorkingDay(availability, selectedZoned)) {
+      console.log('[SCHEDULE_WINDOW] Start date is not a working day');
       return null;
+    }
+
+    // Log per-day resource availability for the execution window
+    console.log('[SCHEDULE_WINDOW] Checking overlap for execution window:');
+    let checkCursor = selectedZoned;
+    for (let i = 0; i < executionDays + 3; i++) { // Check a few extra days
+      const dateKey = formatDateKey(checkCursor);
+      const availableResources: string[] = [];
+      const blockedResources: string[] = [];
+      perMemberBlocked.forEach((memberData, memberId) => {
+        const isBlocked = isMemberDayBlocked(memberData, availability, checkCursor, timeZone);
+        if (isBlocked) {
+          blockedResources.push(memberId.slice(-6));
+        } else {
+          availableResources.push(memberId.slice(-6));
+        }
+      });
+      console.log(`  ${dateKey}: available=${availableResources.length} [${availableResources.join(',')}], blocked=${blockedResources.length} [${blockedResources.join(',')}]`);
+      checkCursor = addDaysZoned(checkCursor, 1);
     }
 
     selectedSubset = findFirstEligibleSubsetForDays(
@@ -2470,8 +2526,10 @@ export const buildProjectScheduleWindow = async ({
       timeZone
     );
     if (!selectedSubset) {
+      console.log('[SCHEDULE_WINDOW] No eligible subset found - date rejected');
       return null;
     }
+    console.log('[SCHEDULE_WINDOW] Selected subset:', selectedSubset.map(id => id.slice(-6)));
   } else {
     // Single-resource or no policy: use strict per-day check
     if (
@@ -2494,8 +2552,16 @@ export const buildProjectScheduleWindow = async ({
     availability,
     blockedDates,
     blockedRanges,
-    timeZone
+    timeZone,
+    useMultiResource ? perMemberBlocked : undefined,
+    useMultiResource ? resourcePolicy : undefined
   );
+
+  console.log('[SCHEDULE_WINDOW] Execution window result:', {
+    startDateZoned: formatDateKey(selectedZoned),
+    executionEndDateZoned: formatDateKey(executionEndDay),
+    executionDays,
+  });
 
   const executionHours = getWorkingHoursForDate(availability, executionEndDay);
   const executionEndMinutes =

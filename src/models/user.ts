@@ -426,6 +426,43 @@ UserSchema.pre("save", function (next) {
     if (this.role === "professional") {
         this.set("availability", undefined);
     }
+
+    // Clear fields that employees don't need - they only need:
+    // basic auth fields, employee.*, blockedDates, blockedRanges
+    if (this.role === "employee") {
+        // Professional-only fields
+        this.set("businessInfo", undefined);
+        this.set("hourlyRate", undefined);
+        this.set("currency", undefined);
+        this.set("serviceCategories", undefined);
+        this.set("availability", undefined);
+        this.set("companyAvailability", undefined);
+        this.set("companyBlockedDates", undefined);
+        this.set("companyBlockedRanges", undefined);
+
+        // Professional verification/approval fields
+        this.set("vatNumber", undefined);
+        this.set("isVatVerified", undefined);
+        this.set("idProofUrl", undefined);
+        this.set("idProofFileName", undefined);
+        this.set("idProofUploadedAt", undefined);
+        this.set("isIdVerified", undefined);
+        this.set("professionalStatus", undefined);
+        this.set("approvedBy", undefined);
+        this.set("approvedAt", undefined);
+        this.set("rejectionReason", undefined);
+
+        // Customer-only fields
+        this.set("customerType", undefined);
+        this.set("location", undefined);
+        this.set("loyaltyPoints", undefined);
+        this.set("loyaltyLevel", undefined);
+        this.set("totalSpent", undefined);
+        this.set("totalBookings", undefined);
+        this.set("lastLoyaltyUpdate", undefined);
+
+        this.set("profileCompletedAt", undefined);
+    }
     next();
 });
 
