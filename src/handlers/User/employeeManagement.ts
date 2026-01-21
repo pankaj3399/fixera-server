@@ -6,6 +6,7 @@ import bcrypt from 'bcrypt';
 import { sendTeamMemberInvitationEmail } from "../../utils/emailService";
 import crypto from 'crypto';
 import mongoose from 'mongoose';
+import { buildBookingBlockedRanges } from '../../utils/bookingBlocks';
 
 // Generate random password
 const generatePassword = (): string => {
@@ -241,10 +242,11 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
 
         console.log(`👥 EMPLOYEE: Retrieved ${employees.length} employees for ${professional.email}`);
 
-        res.status(200).json({
-            success: true,
-            data: {
-                employees: employees.map(member => ({
+        // Get booking blocked ranges for each employee
+        const employeesWithBookingBlocks = await Promise.all(
+            employees.map(async (member) => {
+                const bookingBlockedRanges = await buildBookingBlockedRanges(member._id as mongoose.Types.ObjectId);
+                return {
                     _id: member._id,
                     name: member.name,
                     email: member.employee?.hasEmail ? member.email : undefined,
@@ -257,8 +259,16 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
                     managedByCompany: member.employee?.managedByCompany,
                     availability: member.availability,
                     blockedDates: member.blockedDates,
-                    blockedRanges: member.blockedRanges
-                })),
+                    blockedRanges: member.blockedRanges,
+                    bookingBlockedRanges
+                };
+            })
+        );
+
+        res.status(200).json({
+            success: true,
+            data: {
+                employees: employeesWithBookingBlocks,
                 totalCount: employees.length
             }
         });
