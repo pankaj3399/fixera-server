@@ -490,6 +490,12 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       const start = new Date(startIso);
       const end = new Date(endIso);
 
+      // Validate dates before processing
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        console.warn(`[getProjectTeamAvailability] Invalid date range for member ${memberId}: ${startIso} - ${endIso}`);
+        return;
+      }
+
       // Convert to professional's timezone to get correct calendar days
       const startZoned = toZonedTime(start, timeZone);
       const endZoned = toZonedTime(end, timeZone);
@@ -608,18 +614,26 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     }
     const professionalObjectId = new mongoose.Types.ObjectId(project.professionalId);
 
+    // Booking filter - must match scheduleEngine.ts buildPerMemberBlockedData for consistency
+    // Both endpoints must use the same criteria to determine which bookings block resources
     const bookingFilter: any = {
       status: { $nin: ["completed", "cancelled", "refunded"] },
       scheduledStartDate: { $exists: true, $ne: null },
+      // Require valid end date to exist (matches scheduleEngine.ts)
+      $and: [
+        {
+          $or: [
+            { scheduledBufferEndDate: { $exists: true, $ne: null } },
+            { scheduledExecutionEndDate: { $exists: true, $ne: null } },
+          ],
+        },
+      ],
       $or: [
         { project: project._id },
-        // Include bookings where the professional (project owner) is booked on ANY project
-        { professional: professionalObjectId },
-        // Include bookings where the professional is assigned as a team member on OTHER projects
-        { assignedTeamMembers: professionalObjectId },
       ],
     };
 
+    // Add team member filters if we have valid IDs
     if (validatedTeamMemberIds.length > 0) {
       bookingFilter.$or.push(
         { assignedTeamMembers: { $in: validatedTeamMemberIds } },
@@ -940,6 +954,16 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       return true;
     };
 
+    // Debug: Log resource policy and blocked data summary
+    console.log(`[getProjectTeamAvailability] Project ${project._id}:`, {
+      totalResources,
+      minResources,
+      requiredOverlap,
+      executionDays,
+      teamMemberIds: validatedTeamMemberIds.map(id => String(id)),
+      dateBlockedMembersCount: dateBlockedMembers.size,
+    });
+
     // For each date in the range, check if it's a valid start date
     if (useMultiResourceMode && executionDays && executionDays > 0) {
       // Window-based check for multi-resource projects
@@ -949,6 +973,15 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
         // Skip weekends and company blocked dates (already in allBlockedDates)
         if (!allBlockedDates.has(dateKey) && isWorkingDay(dateKey)) {
+          const availableCount = getAvailableResourceCount(dateKey);
+          const blockedMembers = dateBlockedMembers.get(dateKey);
+
+          // Debug: Log availability check for each date
+          if (availableCount < minResources) {
+            console.log(`[getProjectTeamAvailability] Date ${dateKey.split('T')[0]}: ${availableCount}/${totalResources} available (need ${minResources}), blocked members:`,
+              blockedMembers ? Array.from(blockedMembers) : []);
+          }
+
           const isValid = isStartDateValid(dateKey);
           if (!isValid) {
             allBlockedDates.add(dateKey);

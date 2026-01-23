@@ -50,21 +50,37 @@ export const buildBookingBlockedRanges = async (
       booking.scheduledBufferEndDate || (booking as any).scheduledEndDate;
 
     if (booking.scheduledStartDate && scheduledExecutionEndDate) {
-      ranges.push({
-        startDate: new Date(booking.scheduledStartDate).toISOString(),
-        endDate: new Date(scheduledExecutionEndDate).toISOString(),
-        reason: "booking",
-      });
+      const startDate = new Date(booking.scheduledStartDate);
+      const endDate = new Date(scheduledExecutionEndDate);
+
+      // Validate dates before creating range
+      if (!Number.isNaN(startDate.getTime()) && !Number.isNaN(endDate.getTime())) {
+        ranges.push({
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          reason: "booking",
+        });
+      } else {
+        console.warn(`[buildBookingBlockedRanges] Invalid dates for booking ${booking._id} - start: ${booking.scheduledStartDate}, end: ${scheduledExecutionEndDate}`);
+      }
     }
 
     if (scheduledBufferStartDate && scheduledBufferEndDate && scheduledExecutionEndDate) {
-      // Don't extend buffer end date - use the actual scheduled end
-      // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
-      ranges.push({
-        startDate: new Date(scheduledBufferStartDate).toISOString(),
-        endDate: new Date(scheduledBufferEndDate).toISOString(),
-        reason: "booking-buffer",
-      });
+      const bufferStart = new Date(scheduledBufferStartDate);
+      const bufferEnd = new Date(scheduledBufferEndDate);
+
+      // Validate buffer dates before creating range
+      if (!Number.isNaN(bufferStart.getTime()) && !Number.isNaN(bufferEnd.getTime())) {
+        // Don't extend buffer end date - use the actual scheduled end
+        // Extending to UTC 23:59:59 causes timezone issues (bleeds into next day in other timezones)
+        ranges.push({
+          startDate: bufferStart.toISOString(),
+          endDate: bufferEnd.toISOString(),
+          reason: "booking-buffer",
+        });
+      } else {
+        console.warn(`[buildBookingBlockedRanges] Invalid buffer dates for booking ${booking._id} - start: ${scheduledBufferStartDate}, end: ${scheduledBufferEndDate}`);
+      }
     }
   });
 
