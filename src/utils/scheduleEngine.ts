@@ -133,9 +133,17 @@ export const validateAndDedupeResourceIds = (
  *
  * Example: If utcDate is 2024-03-15T10:00:00Z and timeZone is "America/New_York" (UTC-4),
  * the result's getUTCHours() will return 6 (the local hour in New York).
+ *
+ * @throws Error if the timezone is invalid or the DateTime cannot be created
  */
 export const toZonedTime = (date: Date, timeZone: string): Date => {
   const dt = DateTime.fromJSDate(date, { zone: "utc" }).setZone(timeZone);
+  if (!dt.isValid) {
+    throw new Error(
+      `toZonedTime: Invalid DateTime produced for timezone "${timeZone}". ` +
+      `Reason: ${dt.invalidReason || "unknown"}, Explanation: ${dt.invalidExplanation || "none"}`
+    );
+  }
   // Create a new Date using the local time components as if they were UTC
   return new Date(Date.UTC(
     dt.year,
@@ -154,6 +162,8 @@ export const toZonedTime = (date: Date, timeZone: string): Date => {
  *
  * Example: If zonedDate's getUTCHours() returns 6 and timeZone is "America/New_York" (UTC-4),
  * the result will be the actual UTC time: 2024-03-15T10:00:00Z.
+ *
+ * @throws Error if the timezone is invalid or the DateTime cannot be created
  */
 export const fromZonedTime = (zonedDate: Date, timeZone: string): Date => {
   // Interpret the UTC components of zonedDate as local time in the target timezone
@@ -169,6 +179,12 @@ export const fromZonedTime = (zonedDate: Date, timeZone: string): Date => {
     },
     { zone: timeZone }
   );
+  if (!dt.isValid) {
+    throw new Error(
+      `fromZonedTime: Invalid DateTime produced for timezone "${timeZone}". ` +
+      `Reason: ${dt.invalidReason || "unknown"}, Explanation: ${dt.invalidExplanation || "none"}`
+    );
+  }
   return dt.toJSDate();
 };
 
@@ -1863,6 +1879,10 @@ export const buildProjectScheduleProposalsWithData = async (
     timeZone
   );
 
+  // Collect company-only blocked dates for multi-resource start date validation
+  // Personal/customer blocks should not veto multi-resource start dates - only company-level blocks should
+  const { companyBlockedDates } = collectCompanyBlocks(professional, timeZone);
+
   // Build per-member blocked data if in multi-resource mode
   let perMemberBlocked: PerMemberBlockedData | undefined;
   if (useMultiResource) {
@@ -1979,10 +1999,11 @@ export const buildProjectScheduleProposalsWithData = async (
         }
 
         // Skip dates that are company-blocked - they cannot be start dates
-        // This matches the calendar availability logic which excludes blocked dates entirely
+        // Only company-level blocks veto multi-resource start dates (not personal/customer blocks)
+        // Personal blocks are handled by the per-member overlap calculation
         const dateKey = formatDateKey(currentDay);
-        if (blockedDates.has(dateKey)) {
-          console.log(`[SCHEDULE_PROPOSALS] Skipping ${dateKey} - date is in blockedDates (company/merged block)`);
+        if (companyBlockedDates.has(dateKey)) {
+          console.log(`[SCHEDULE_PROPOSALS] Skipping ${dateKey} - date is company-blocked`);
           continue;
         }
 

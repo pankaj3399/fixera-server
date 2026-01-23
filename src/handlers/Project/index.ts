@@ -954,15 +954,17 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       return true;
     };
 
-    // Debug: Log resource policy and blocked data summary
-    console.log(`[getProjectTeamAvailability] Project ${project._id}:`, {
-      totalResources,
-      minResources,
-      requiredOverlap,
-      executionDays,
-      teamMemberIds: validatedTeamMemberIds.map(id => String(id)),
-      dateBlockedMembersCount: dateBlockedMembers.size,
-    });
+    // Debug: Log resource policy and blocked data summary (gated behind debug flag)
+    if (debugEnabled) {
+      console.log(`[getProjectTeamAvailability] Project ${project._id}:`, {
+        totalResources,
+        minResources,
+        requiredOverlap,
+        executionDays,
+        teamMemberIds: validatedTeamMemberIds.map(id => String(id)),
+        dateBlockedMembersCount: dateBlockedMembers.size,
+      });
+    }
 
     // For each date in the range, check if it's a valid start date
     if (useMultiResourceMode && executionDays && executionDays > 0) {
@@ -976,8 +978,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           const availableCount = getAvailableResourceCount(dateKey);
           const blockedMembers = dateBlockedMembers.get(dateKey);
 
-          // Debug: Log availability check for each date
-          if (availableCount < minResources) {
+          // Debug: Log availability check for each date (gated behind debug flag)
+          if (debugEnabled && availableCount < minResources) {
             console.log(`[getProjectTeamAvailability] Date ${dateKey.split('T')[0]}: ${availableCount}/${totalResources} available (need ${minResources}), blocked members:`,
               blockedMembers ? Array.from(blockedMembers) : []);
           }

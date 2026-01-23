@@ -17,40 +17,73 @@ dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/fixera";
 
-// Test configuration
-const PROJECT_ID = "69725e17668c218a4677df53";
-const PROFESSIONAL_EMAILS = ["anafariya@gmail.com", "ana@auraehealth.com"];
-const CUSTOMER_EMAIL = "test2026@gmail.com";
+// Read configuration from environment variables or CLI args
+// Usage: PROJECT_ID=xxx PROFESSIONAL_EMAILS=a@b.com,c@d.com CUSTOMER_EMAIL=e@f.com npx tsx src/scripts/addTestBookings.ts
+// Or: npx tsx src/scripts/addTestBookings.ts <projectId> <professionalEmails> <customerEmail>
+const getConfig = (): { projectId: string; professionalEmails: string[]; customerEmail: string } => {
+  // Try CLI args first (process.argv[2], [3], [4])
+  const cliProjectId = process.argv[2];
+  const cliProfessionalEmails = process.argv[3];
+  const cliCustomerEmail = process.argv[4];
+
+  // Fall back to environment variables
+  const projectId = cliProjectId || process.env.TEST_PROJECT_ID;
+  const professionalEmailsRaw = cliProfessionalEmails || process.env.TEST_PROFESSIONAL_EMAILS;
+  const customerEmail = cliCustomerEmail || process.env.TEST_CUSTOMER_EMAIL;
+
+  // Validate required configuration
+  const missing: string[] = [];
+  if (!projectId) missing.push("PROJECT_ID (env: TEST_PROJECT_ID or CLI arg 1)");
+  if (!professionalEmailsRaw) missing.push("PROFESSIONAL_EMAILS (env: TEST_PROFESSIONAL_EMAILS or CLI arg 2)");
+  if (!customerEmail) missing.push("CUSTOMER_EMAIL (env: TEST_CUSTOMER_EMAIL or CLI arg 3)");
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required configuration:\n  - ${missing.join("\n  - ")}\n\n` +
+      `Usage:\n` +
+      `  Environment: TEST_PROJECT_ID=xxx TEST_PROFESSIONAL_EMAILS=a@b.com,c@d.com TEST_CUSTOMER_EMAIL=e@f.com npx tsx src/scripts/addTestBookings.ts\n` +
+      `  CLI args: npx tsx src/scripts/addTestBookings.ts <projectId> <professionalEmails> <customerEmail>`
+    );
+  }
+
+  const professionalEmails = professionalEmailsRaw!.split(",").map(e => e.trim());
+  if (professionalEmails.length < 2) {
+    throw new Error("PROFESSIONAL_EMAILS must contain at least 2 comma-separated email addresses");
+  }
+
+  return { projectId: projectId!, professionalEmails, customerEmail: customerEmail! };
+};
 
 async function main() {
+  // Get and validate configuration before connecting
+  const config = getConfig();
+  const { projectId, professionalEmails, customerEmail } = config;
+
   try {
     console.log("Connecting to MongoDB...");
     await mongoose.connect(MONGODB_URI);
     console.log("Connected to MongoDB");
 
     // Find the professionals
-    const professionals = await User.find({ email: { $in: PROFESSIONAL_EMAILS } }).select("_id email name");
+    const professionals = await User.find({ email: { $in: professionalEmails } }).select("_id email name");
     console.log("\nFound professionals:");
     professionals.forEach(p => console.log(`  - ${p.email}: ${p._id}`));
 
     if (professionals.length < 2) {
-      console.error("ERROR: Could not find both professionals. Found:", professionals.length);
-      process.exit(1);
+      throw new Error(`Could not find both professionals. Found: ${professionals.length}. Expected emails: ${professionalEmails.join(", ")}`);
     }
 
     // Find the customer
-    const customer = await User.findOne({ email: CUSTOMER_EMAIL }).select("_id email");
+    const customer = await User.findOne({ email: customerEmail }).select("_id email");
     if (!customer) {
-      console.error(`ERROR: Could not find customer with email ${CUSTOMER_EMAIL}`);
-      process.exit(1);
+      throw new Error(`Could not find customer with email ${customerEmail}`);
     }
     console.log(`\nFound customer: ${customer.email}: ${customer._id}`);
 
     // Find the project
-    const project = await Project.findById(PROJECT_ID).select("_id title resources minResources minOverlapPercentage");
+    const project = await Project.findById(projectId).select("_id title resources minResources minOverlapPercentage");
     if (!project) {
-      console.error(`ERROR: Could not find project with ID ${PROJECT_ID}`);
-      process.exit(1);
+      throw new Error(`Could not find project with ID ${projectId}`);
     }
     console.log(`\nFound project: ${project._id}`);
     console.log(`  - Title: ${(project as any).title || "N/A"}`);
@@ -140,7 +173,7 @@ async function main() {
 
     console.log("\n=== TEST SETUP COMPLETE ===\n");
     console.log("Summary:");
-    console.log(`  - Project ID: ${PROJECT_ID}`);
+    console.log(`  - Project ID: ${projectId}`);
     console.log(`  - Blocked Resource: ${professionalToBlock.email} (${professionalToBlock._id})`);
     console.log(`  - Available Resource: ${otherProfessional.email} (${otherProfessional._id})`);
     console.log(`  - Blocked dates: March 2-6, 9-13, 16-20, 2026`);
@@ -148,8 +181,8 @@ async function main() {
 
     console.log("\n=== HOW TO TEST ===\n");
     console.log("1. Start the server: npm run dev");
-    console.log("2. Login as test2026@gmail.com");
-    console.log(`3. Open project ${PROJECT_ID} booking form`);
+    console.log(`2. Login as ${customerEmail}`);
+    console.log(`3. Open project ${projectId} booking form`);
     console.log("4. Check the calendar for March 2026");
     console.log("\nEXPECTED RESULTS:");
     console.log("  - If minResources=2 and totalResources=2:");
@@ -168,12 +201,19 @@ async function main() {
     console.log(`db.bookings.deleteMany({ _id: { $in: [${createdBookings.map(id => `ObjectId("${id}")`).join(", ")}] } })`);
 
   } catch (error) {
-    console.error("Error:", error);
-    process.exit(1);
+    console.error("Error:", error instanceof Error ? error.message : error);
+    process.exitCode = 1;
   } finally {
-    await mongoose.disconnect();
-    console.log("\nDisconnected from MongoDB");
+    // Ensure DB connection is closed even on error
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.disconnect();
+      console.log("\nDisconnected from MongoDB");
+    }
   }
 }
 
-main();
+main().catch((error) => {
+  // Handle errors thrown before DB connection (e.g., config validation)
+  console.error("Fatal error:", error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+});
