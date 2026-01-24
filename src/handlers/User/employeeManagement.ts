@@ -242,10 +242,43 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
 
         console.log(`👥 EMPLOYEE: Retrieved ${employees.length} employees for ${professional.email}`);
 
+        // Helper to convert date to ISO string (handles Date objects, {$date: "..."} format, and strings)
+        const toISOString = (date: any): string | null => {
+            if (!date) return null;
+            // Handle MongoDB Extended JSON format {$date: "..."}
+            if (typeof date === 'object' && date.$date) {
+                return typeof date.$date === 'string' ? date.$date : new Date(date.$date).toISOString();
+            }
+            // Handle Date objects
+            if (date instanceof Date) {
+                return date.toISOString();
+            }
+            // Handle string dates
+            if (typeof date === 'string') {
+                return date;
+            }
+            // Try to convert to Date
+            const parsed = new Date(date);
+            return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+        };
+
         // Get booking blocked ranges for each employee
         const employeesWithBookingBlocks = await Promise.all(
             employees.map(async (member) => {
                 const bookingBlockedRanges = await buildBookingBlockedRanges(member._id as mongoose.Types.ObjectId);
+
+                // Normalize blockedRanges dates to ISO strings
+                const normalizedBlockedRanges = (member.blockedRanges || []).map((range: any) => ({
+                    startDate: toISOString(range.startDate),
+                    endDate: toISOString(range.endDate),
+                    reason: range.reason,
+                    createdAt: toISOString(range.createdAt),
+                    _id: range._id
+                })).filter((range: any) => range.startDate && range.endDate);
+
+                // Normalize blockedDates to ISO strings
+                const normalizedBlockedDates = (member.blockedDates || []).map((date: any) => toISOString(date)).filter(Boolean);
+
                 return {
                     _id: member._id,
                     name: member.name,
@@ -258,8 +291,8 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
                     isActive: member.employee?.isActive,
                     managedByCompany: member.employee?.managedByCompany,
                     availability: member.availability,
-                    blockedDates: member.blockedDates,
-                    blockedRanges: member.blockedRanges,
+                    blockedDates: normalizedBlockedDates,
+                    blockedRanges: normalizedBlockedRanges,
                     bookingBlockedRanges
                 };
             })
