@@ -2537,6 +2537,15 @@ export const buildProjectScheduleWindow = async ({
 
     // Convert execution end once and reuse to avoid any precision differences
     const executionEndUtc = fromZonedTime(executionEndZoned, timeZone);
+    const executionStartDay = startOfDayZoned(selectedZoned);
+    const executionEndDay = startOfDayZoned(
+      toZonedTime(executionEndUtc, timeZone)
+    );
+    const throughputDays = countWorkingDaysBetween(
+      executionStartDay,
+      executionEndDay,
+      availability
+    );
 
     const assignedTeamMembers = selectedSubset
       ? validateAndDedupeResourceIds(selectedSubset)
@@ -2558,6 +2567,7 @@ export const buildProjectScheduleWindow = async ({
         minutes + Math.round(durations.execution.value * 60)
       ),
       assignedTeamMembers,
+      throughputDays,
     };
   }
 
