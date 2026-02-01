@@ -175,15 +175,6 @@ export const resetEmployeePassword = async (req: Request, res: Response, next: N
                 msg: "Employee not found or not associated with your company"
             });
         }
-
-        // Only allow for employees managed by company (non-email employees)
-        if (employee.employee?.hasEmail && !employee.employee?.managedByCompany) {
-            return res.status(403).json({
-                success: false,
-                msg: "Can only reset passwords for company-managed employees"
-            });
-        }
-
         console.log(`🔒 PASSWORD: Professional ${professional.email} resetting password for employee ${employee.name}`);
 
         // Hash new password
