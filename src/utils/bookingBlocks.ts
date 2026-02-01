@@ -2,7 +2,18 @@ import Booking from "../models/booking";
 import { Types } from "mongoose";
 import { toISOString } from "./dateUtils";
 
-type BookingBlockedRange = { startDate: string; endDate: string; reason?: string };
+type BookingBlockedRange = {
+  startDate: string;
+  endDate: string;
+  reason?: string;
+  bookingId?: string;
+  location?: {
+    address?: string;
+    city?: string;
+    country?: string;
+    postalCode?: string;
+  };
+};
 
 export const buildBookingBlockedRanges = async (
   userId: Types.ObjectId | string
@@ -36,7 +47,7 @@ export const buildBookingBlockedRanges = async (
   };
 
   const bookings = await Booking.find(bookingFilter).select(
-    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate"
+    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location"
   );
 
   const ranges: BookingBlockedRange[] = [];
@@ -60,6 +71,8 @@ export const buildBookingBlockedRanges = async (
           startDate: startDateISO,
           endDate: endDateISO,
           reason: "booking",
+          bookingId: booking._id.toString(),
+          location: booking.location,
         });
       } else {
         console.warn(`[buildBookingBlockedRanges] Invalid dates for booking ${booking._id} - start: ${booking.scheduledStartDate}, end: ${scheduledExecutionEndDate}`);
@@ -78,6 +91,8 @@ export const buildBookingBlockedRanges = async (
           startDate: bufferStartISO,
           endDate: bufferEndISO,
           reason: "booking-buffer",
+          bookingId: booking._id.toString(),
+          location: booking.location,
         });
       } else {
         console.warn(`[buildBookingBlockedRanges] Invalid buffer dates for booking ${booking._id} - start: ${scheduledBufferStartDate}, end: ${scheduledBufferEndDate}`);
