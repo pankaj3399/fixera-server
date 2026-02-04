@@ -6,6 +6,9 @@ import User from "../models/user";
 import { DEFAULT_AVAILABILITY, resolveAvailability } from "./availabilityHelpers";
 import { DateTime } from "luxon";
 
+// Module-level debug flag for schedule engine logging
+const ENABLE_SCHEDULE_DEBUG = process.env.ENABLE_SCHEDULE_DEBUG === "true";
+
 type DurationUnit = "hours" | "days";
 
 type Duration = {
@@ -1481,14 +1484,16 @@ const advanceWorkingDays = (
     );
     allowedSoloDays = Math.max(0, workingDays - requiredOverlapDays);
 
-    console.log('[ADVANCE_WORKING_DAYS] Solo day calculation:', {
-      workingDays,
-      overlapPercentage: resourcePolicy.minOverlapPercentage,
-      requiredOverlapDays,
-      allowedSoloDays,
-      subsetSize: selectedSubset.length,
-      minResources,
-    });
+    if (ENABLE_SCHEDULE_DEBUG) {
+      console.log('[ADVANCE_WORKING_DAYS] Solo day calculation:', {
+        workingDays,
+        overlapPercentage: resourcePolicy.minOverlapPercentage,
+        requiredOverlapDays,
+        allowedSoloDays,
+        subsetSize: selectedSubset.length,
+        minResources,
+      });
+    }
   }
 
   while (counted < workingDays && iterations < maxIterations) {
@@ -1548,7 +1553,7 @@ const advanceWorkingDays = (
         soloDaysUsed += 1;
       }
       if (counted >= workingDays) {
-        if (allowedSoloDays > 0) {
+        if (ENABLE_SCHEDULE_DEBUG) {
           console.log('[ADVANCE_WORKING_DAYS] Final result:', {
             startDate: formatDateKey(startDate),
             endDate: formatDateKey(cursor),

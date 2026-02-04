@@ -3,7 +3,7 @@ import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { sendTeamMemberInvitationEmail } from "../../utils/emailService";
+import { sendTeamMemberInvitationEmail, generateOTP, sendOTPEmail } from "../../utils/emailService";
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { buildBookingBlockedRanges } from '../../utils/bookingBlocks';
@@ -12,6 +12,12 @@ import { toISOString } from '../../utils/dateUtils';
 // Generate random password
 const generatePassword = (): string => {
     return crypto.randomBytes(8).toString('hex');
+};
+
+// Validate email format
+const isValidEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
 };
 
 // Invite employee with email
@@ -427,6 +433,13 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
             });
         }
 
+        if (!isValidEmail(normalizedEmail)) {
+            return res.status(400).json({
+                success: false,
+                msg: "Invalid email format"
+            });
+        }
+
         const existingUser = await User.findOne({ email: normalizedEmail });
         if (existingUser && existingUser._id.toString() !== employeeId) {
             return res.status(400).json({
@@ -449,21 +462,34 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
         }
 
         employee.email = normalizedEmail;
-        employee.isEmailVerified = true;
+        employee.isEmailVerified = false;
         employee.employee = employee.employee || {};
         employee.employee.hasEmail = true;
 
+        // Generate verification OTP and set expiry
+        const otp = generateOTP();
+        const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+        employee.verificationCode = otp;
+        employee.verificationCodeExpires = otpExpiry;
+
         await employee.save();
+
+        // Send verification email
+        const emailSent = await sendOTPEmail(normalizedEmail, otp, employee.name);
+        if (!emailSent) {
+            console.error("❌ EMPLOYEE: Failed to send verification email to:", normalizedEmail);
+        }
 
         res.status(200).json({
             success: true,
-            msg: "Employee email updated successfully",
+            msg: "Employee email updated. A verification email has been sent.",
             data: {
                 employee: {
                     _id: employee._id,
                     name: employee.name,
                     email: employee.email,
-                    hasEmail: employee.employee?.hasEmail
+                    hasEmail: employee.employee?.hasEmail,
+                    isEmailVerified: employee.isEmailVerified
                 }
             }
         });
@@ -476,7 +502,7 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
     }
 };
 
-// Remove employee (permanent)
+// Remove employee (soft delete - marks as inactive)
 export const removeEmployee = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = req.cookies?.['auth-token'];
@@ -523,7 +549,9 @@ export const removeEmployee = async (req: Request, res: Response, next: NextFunc
             });
         }
 
-        await employee.deleteOne();
+        // Soft delete: mark as inactive instead of hard delete to preserve referential integrity
+        employee.employee!.isActive = false;
+        await employee.save();
 
         res.status(200).json({
             success: true,
