@@ -1417,6 +1417,26 @@ const isDayBlockedWithPolicy = (
   return isDayBlocked(availability, zonedDate, blockedDates, blockedRanges, timeZone);
 };
 
+/**
+ * Count how many members from a specific subset are available on a given day.
+ */
+const countAvailableSubsetMembersForDay = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  zonedDate: Date,
+  timeZone: string,
+  subset: string[]
+): number => {
+  let count = 0;
+  for (const memberId of subset) {
+    const memberData = perMemberBlocked.get(memberId);
+    if (memberData && !isMemberDayBlocked(memberData, availability, zonedDate, timeZone)) {
+      count++;
+    }
+  }
+  return count;
+};
+
 const advanceWorkingDays = (
   startDate: Date,
   workingDays: number,
@@ -1426,7 +1446,9 @@ const advanceWorkingDays = (
   timeZone: string,
   // Optional multi-resource parameters
   perMemberBlocked?: PerMemberBlockedData,
-  resourcePolicy?: ResourcePolicy
+  resourcePolicy?: ResourcePolicy,
+  // Optional: the selected subset of resources for this execution
+  selectedSubset?: string[]
 ) => {
   if (workingDays <= 0) {
     return startDate;
@@ -1437,21 +1459,82 @@ const advanceWorkingDays = (
   const maxIterations = 366 * 2; // Guard against infinite loops
   let iterations = 0;
 
+  // Calculate allowed solo days based on overlap percentage
+  // For example: 75% overlap with 5 days = ceil(5 * 0.75) = 4 overlap days, 1 solo day allowed
+  // Solo days are days where at least 1 resource can work alone (not all minResources available)
+  let allowedSoloDays = 0;
+  let soloDaysUsed = 0;
+  const minResources = resourcePolicy?.minResources ?? 1;
+
+  if (
+    perMemberBlocked &&
+    resourcePolicy &&
+    resourcePolicy.totalResources > 0 &&
+    selectedSubset &&
+    selectedSubset.length > 0 &&
+    resourcePolicy.minOverlapPercentage < 100
+  ) {
+    // Calculate: requiredOverlapDays = ceil(workingDays * overlapPercentage / 100)
+    // allowedSoloDays = workingDays - requiredOverlapDays
+    const requiredOverlapDays = Math.ceil(
+      workingDays * resourcePolicy.minOverlapPercentage / 100
+    );
+    allowedSoloDays = Math.max(0, workingDays - requiredOverlapDays);
+
+    console.log('[ADVANCE_WORKING_DAYS] Solo day calculation:', {
+      workingDays,
+      overlapPercentage: resourcePolicy.minOverlapPercentage,
+      requiredOverlapDays,
+      allowedSoloDays,
+      subsetSize: selectedSubset.length,
+      minResources,
+    });
+  }
+
   while (counted < workingDays && iterations < maxIterations) {
     iterations++;
 
     let dayIsBlocked = false;
+    let isSoloDay = false;
 
-    if (perMemberBlocked && resourcePolicy && resourcePolicy.totalResources > 0) {
-      // Multi-resource mode: a day counts as a working day only if minResources are available.
-      // The overlap percentage rule (e.g., 75%) is enforced at the window level by
-      // findFirstEligibleSubsetForDays, not here. This ensures consistency with
-      // the availability API's isStartDateValid logic.
+    if (
+      perMemberBlocked &&
+      resourcePolicy &&
+      resourcePolicy.totalResources > 0 &&
+      selectedSubset &&
+      selectedSubset.length > 0
+    ) {
+      // Multi-resource mode with subset: check availability against the selected subset
+      if (!isWorkingDay(availability, cursor)) {
+        dayIsBlocked = true;
+      } else {
+        const availableInSubset = countAvailableSubsetMembersForDay(
+          perMemberBlocked,
+          availability,
+          cursor,
+          timeZone,
+          selectedSubset
+        );
+
+        if (availableInSubset >= minResources) {
+          // Full overlap day - all required resources available
+          dayIsBlocked = false;
+        } else if (availableInSubset >= 1 && soloDaysUsed < allowedSoloDays) {
+          // Solo day - at least 1 resource available and we have budget for solo days
+          dayIsBlocked = false;
+          isSoloDay = true;
+        } else {
+          // Not enough resources and no solo day budget remaining
+          dayIsBlocked = true;
+        }
+      }
+    } else if (perMemberBlocked && resourcePolicy && resourcePolicy.totalResources > 0) {
+      // Multi-resource mode without subset: use original logic (minResources check)
       dayIsBlocked = isDayBlockedMultiResource(
         perMemberBlocked,
         availability,
         cursor,
-        resourcePolicy.minResources,
+        minResources,
         timeZone
       );
     } else {
@@ -1461,7 +1544,19 @@ const advanceWorkingDays = (
 
     if (!dayIsBlocked) {
       counted += 1;
+      if (isSoloDay) {
+        soloDaysUsed += 1;
+      }
       if (counted >= workingDays) {
+        if (allowedSoloDays > 0) {
+          console.log('[ADVANCE_WORKING_DAYS] Final result:', {
+            startDate: formatDateKey(startDate),
+            endDate: formatDateKey(cursor),
+            totalDaysCounted: counted,
+            soloDaysUsed,
+            allowedSoloDays,
+          });
+        }
         return cursor;
       }
     }
@@ -2006,6 +2101,9 @@ export const buildProjectScheduleProposalsWithData = async (
       const currentDayStr = currentDay.toISOString();
       const executionDays = Math.max(1, Math.ceil(execution.value));
 
+      // Track selected subset for multi-resource mode (used in advanceWorkingDays for overlap %)
+      let selectedSubset: string[] | null = null;
+
       // For multi-resource days mode, use window-based overlap check instead of
       // strict per-day check. This allows start dates where not all minResources
       // are available on the start day, as long as the execution window meets
@@ -2046,7 +2144,7 @@ export const buildProjectScheduleProposalsWithData = async (
           continue;
         }
 
-        const selectedSubset = findFirstEligibleSubsetForDays(
+        selectedSubset = findFirstEligibleSubsetForDays(
           perMemberBlocked,
           availability,
           currentDay,
@@ -2092,7 +2190,8 @@ export const buildProjectScheduleProposalsWithData = async (
         blockedRanges,
         timeZone,
         useMultiResource ? perMemberBlocked : undefined,
-        useMultiResource ? resourcePolicy : undefined
+        useMultiResource ? resourcePolicy : undefined,
+        selectedSubset ?? undefined
       );
       // Count working days (excluding only weekends) for throughput calculation
       // Blocked days still count as throughput time - they delay but don't reduce throughput
@@ -2655,7 +2754,8 @@ export const buildProjectScheduleWindow = async ({
     blockedRanges,
     timeZone,
     useMultiResource ? perMemberBlocked : undefined,
-    useMultiResource ? resourcePolicy : undefined
+    useMultiResource ? resourcePolicy : undefined,
+    selectedSubset ?? undefined
   );
 
   console.log('[SCHEDULE_WINDOW] Execution window result:', {
