@@ -416,6 +416,14 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
         }
 
         const { employeeId } = req.params;
+
+        if (!employeeId || !mongoose.Types.ObjectId.isValid(employeeId)) {
+            return res.status(400).json({
+                success: false,
+                msg: "Invalid employee ID"
+            });
+        }
+
         const { email } = req.body;
 
         if (!email || typeof email !== 'string') {
@@ -441,7 +449,7 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
         }
 
         const existingUser = await User.findOne({ email: normalizedEmail });
-        if (existingUser && existingUser._id.toString() !== employeeId) {
+        if (existingUser && (existingUser._id as mongoose.Types.ObjectId).toString() !== employeeId) {
             return res.status(400).json({
                 success: false,
                 msg: "User with this email already exists"
@@ -557,6 +565,13 @@ export const removeEmployee = async (req: Request, res: Response, next: NextFunc
         }
 
         const { employeeId } = req.params;
+
+        if (!employeeId || !mongoose.Types.ObjectId.isValid(employeeId)) {
+            return res.status(400).json({
+                success: false,
+                msg: "Invalid employee ID"
+            });
+        }
 
         const employee = await User.findOne({
             _id: employeeId,
