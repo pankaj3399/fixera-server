@@ -461,6 +461,23 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
             });
         }
 
+        // No-op check: if email is unchanged and already verified, skip OTP flow
+        if (normalizedEmail === employee.email && employee.isEmailVerified === true) {
+            return res.status(200).json({
+                success: true,
+                msg: "Email unchanged",
+                data: {
+                    employee: {
+                        _id: employee._id,
+                        name: employee.name,
+                        email: employee.email,
+                        hasEmail: employee.employee?.hasEmail,
+                        isEmailVerified: employee.isEmailVerified
+                    }
+                }
+            });
+        }
+
         // Generate verification OTP and set expiry
         const otp = generateOTP();
         const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
