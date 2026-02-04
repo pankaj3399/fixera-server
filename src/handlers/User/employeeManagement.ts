@@ -461,24 +461,29 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
             });
         }
 
+        // Generate verification OTP and set expiry
+        const otp = generateOTP();
+        const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        // Send verification email BEFORE saving to avoid stale unverifiable records
+        const emailSent = await sendOTPEmail(normalizedEmail, otp, employee.name);
+        if (!emailSent) {
+            console.error("❌ EMPLOYEE: Failed to send verification email to:", normalizedEmail);
+            return res.status(500).json({
+                success: false,
+                msg: "Failed to send verification email. Email was not updated."
+            });
+        }
+
+        // Only persist changes after email is successfully sent
         employee.email = normalizedEmail;
         employee.isEmailVerified = false;
         employee.employee = employee.employee || {};
         employee.employee.hasEmail = true;
-
-        // Generate verification OTP and set expiry
-        const otp = generateOTP();
-        const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
         employee.verificationCode = otp;
         employee.verificationCodeExpires = otpExpiry;
 
         await employee.save();
-
-        // Send verification email
-        const emailSent = await sendOTPEmail(normalizedEmail, otp, employee.name);
-        if (!emailSent) {
-            console.error("❌ EMPLOYEE: Failed to send verification email to:", normalizedEmail);
-        }
 
         res.status(200).json({
             success: true,
