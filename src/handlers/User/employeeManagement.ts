@@ -464,16 +464,10 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
         let emailSent = false;
 
         if (wasNonEmailEmployee) {
-            // Generate new secure password and send invitation
+            // Generate new secure password and send invitation email first
             const newPassword = generatePassword();
-            const hashedPassword = await bcrypt.hash(newPassword, 12);
-            employee.password = hashedPassword;
-            employee.employee.managedByCompany = false;
-            employee.isEmailVerified = true;
 
-            await employee.save();
-
-            // Send invitation email with new credentials
+            // Send invitation email before saving - if email fails, don't lock user out
             try {
                 await sendTeamMemberInvitationEmail(
                     normalizedEmail,
@@ -486,7 +480,19 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
                 console.log(`📧 EMPLOYEE: Invitation email sent to ${normalizedEmail}`);
             } catch (emailError) {
                 console.error(`❌ EMPLOYEE: Failed to send invitation email:`, emailError);
+                return res.status(500).json({
+                    success: false,
+                    msg: "Failed to send invitation email. Employee email not updated."
+                });
             }
+
+            // Only update password and save after email succeeds
+            const hashedPassword = await bcrypt.hash(newPassword, 12);
+            employee.password = hashedPassword;
+            employee.employee.managedByCompany = false;
+            employee.isEmailVerified = true;
+
+            await employee.save();
         } else {
             // Just updating email for existing email employee
             employee.isEmailVerified = true;
