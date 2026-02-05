@@ -428,7 +428,7 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
         }
 
         const existingUser = await User.findOne({ email: normalizedEmail });
-        if (existingUser && existingUser._id.toString() !== employeeId) {
+        if (existingUser && (existingUser._id as mongoose.Types.ObjectId).toString() !== employeeId) {
             return res.status(400).json({
                 success: false,
                 msg: "User with this email already exists"
@@ -448,23 +448,57 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
             });
         }
 
+        const wasNonEmailEmployee = !employee.employee?.hasEmail || employee.employee?.managedByCompany;
+
         employee.email = normalizedEmail;
-        employee.isEmailVerified = true;
         employee.employee = employee.employee || {};
         employee.employee.hasEmail = true;
 
-        await employee.save();
+        let emailSent = false;
+
+        if (wasNonEmailEmployee) {
+            // Generate new secure password and send invitation
+            const newPassword = generatePassword();
+            const hashedPassword = await bcrypt.hash(newPassword, 12);
+            employee.password = hashedPassword;
+            employee.employee.managedByCompany = false;
+            employee.isEmailVerified = true;
+
+            await employee.save();
+
+            // Send invitation email with new credentials
+            try {
+                await sendTeamMemberInvitationEmail(
+                    normalizedEmail,
+                    employee.name,
+                    professional.businessInfo?.companyName || professional.name,
+                    normalizedEmail,
+                    newPassword
+                );
+                emailSent = true;
+                console.log(`📧 EMPLOYEE: Invitation email sent to ${normalizedEmail}`);
+            } catch (emailError) {
+                console.error(`❌ EMPLOYEE: Failed to send invitation email:`, emailError);
+            }
+        } else {
+            // Just updating email for existing email employee
+            employee.isEmailVerified = true;
+            await employee.save();
+        }
 
         res.status(200).json({
             success: true,
-            msg: "Employee email updated successfully",
+            msg: wasNonEmailEmployee
+                ? "Employee email linked and invitation sent"
+                : "Employee email updated successfully",
             data: {
                 employee: {
                     _id: employee._id,
                     name: employee.name,
                     email: employee.email,
                     hasEmail: employee.employee?.hasEmail
-                }
+                },
+                emailSent
             }
         });
     } catch (error) {
@@ -523,11 +557,12 @@ export const removeEmployee = async (req: Request, res: Response, next: NextFunc
             });
         }
 
-        await employee.deleteOne();
+        employee.employee!.isActive = false;
+        await employee.save();
 
         res.status(200).json({
             success: true,
-            msg: "Employee removed successfully"
+            msg: "Employee deactivated successfully"
         });
     } catch (error) {
         console.error("❌ EMPLOYEE: Error removing employee:", error);
