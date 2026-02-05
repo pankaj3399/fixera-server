@@ -8,7 +8,7 @@ import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handle
 import { uploadIdProof, updateProfessionalProfile, submitForVerification } from "../../handlers/User/profileManagement";
 import { upload } from "../../utils/s3Upload";
 import { getLoyaltyStatus, addSpending, getLeaderboard } from "../../handlers/User/loyaltyManagement";
-import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation } from "../../handlers/User/employeeManagement";
+import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
 import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
 import {
     updateEmployeeAvailabilityPreference,
@@ -61,6 +61,8 @@ userRouter.route("/loyalty/leaderboard").get(getLeaderboard)
 userRouter.route("/employee/invite").post(inviteEmployee)
 userRouter.route("/employee/list").get(getEmployees)
 userRouter.route("/employee/:employeeId/status").put(updateEmployeeStatus)
+userRouter.route("/employee/:employeeId/email").put(updateEmployeeEmail)
+userRouter.route("/employee/:employeeId").delete(removeEmployee)
 userRouter.route("/employee/accept-invitation").post(acceptInvitation)
 
 // Password Management Routes

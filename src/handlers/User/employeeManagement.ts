@@ -234,12 +234,19 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
             });
         }
 
-        // Get all employees for this professional
-        const employees = await User.find({
+        const includeInactive = req.query.includeInactive === 'true';
+        const employeeQuery: Record<string, any> = {
             role: 'employee',
-            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString(),
-            'employee.isActive': true
-        }).select('-password -verificationCode -verificationCodeExpires');
+            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
+        };
+
+        if (!includeInactive) {
+            employeeQuery['employee.isActive'] = true;
+        }
+
+        // Get all employees for this professional
+        const employees = await User.find(employeeQuery)
+            .select('-password -verificationCode -verificationCodeExpires');
 
         console.log(`👥 EMPLOYEE: Retrieved ${employees.length} employees for ${professional.email}`);
 
@@ -363,6 +370,215 @@ export const updateEmployeeStatus = async (req: Request, res: Response, next: Ne
 
     } catch (error) {
         console.error("❌ EMPLOYEE: Error updating employee status:", error);
+        res.status(500).json({
+            success: false,
+            msg: "Internal server error"
+        });
+    }
+};
+
+// Update employee email (link or change)
+export const updateEmployeeEmail = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const token = req.cookies?.['auth-token'];
+
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                msg: "Authentication required"
+            });
+        }
+
+        let decoded: { id: string } | null = null;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+        } catch (err) {
+            return res.status(401).json({
+                success: false,
+                msg: "Invalid authentication token"
+            });
+        }
+
+        await connecToDatabase();
+        const professional = await User.findById(decoded.id);
+
+        if (!professional || professional.role !== 'professional') {
+            return res.status(403).json({
+                success: false,
+                msg: "Only professionals can update employee emails"
+            });
+        }
+
+        const { employeeId } = req.params;
+        const { email } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+            return res.status(400).json({
+                success: false,
+                msg: "Invalid employeeId"
+            });
+        }
+
+        if (!email || typeof email !== 'string') {
+            return res.status(400).json({
+                success: false,
+                msg: "Email is required"
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+        if (!normalizedEmail) {
+            return res.status(400).json({
+                success: false,
+                msg: "Email is required"
+            });
+        }
+
+        const existingUser = await User.findOne({ email: normalizedEmail });
+        if (existingUser && (existingUser._id as mongoose.Types.ObjectId).toString() !== employeeId) {
+            return res.status(400).json({
+                success: false,
+                msg: "User with this email already exists"
+            });
+        }
+
+        const employee = await User.findOne({
+            _id: employeeId,
+            role: 'employee',
+            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
+        });
+
+        if (!employee) {
+            return res.status(404).json({
+                success: false,
+                msg: "Employee not found"
+            });
+        }
+
+        const wasNonEmailEmployee = !employee.employee?.hasEmail || employee.employee?.managedByCompany;
+
+        employee.email = normalizedEmail;
+        employee.employee = employee.employee || {};
+        employee.employee.hasEmail = true;
+
+        let emailSent = false;
+
+        if (wasNonEmailEmployee) {
+            // Generate new secure password and send invitation email first
+            const newPassword = generatePassword();
+
+            // Send invitation email before saving - if email fails, don't lock user out
+            try {
+                await sendTeamMemberInvitationEmail(
+                    normalizedEmail,
+                    employee.name,
+                    professional.businessInfo?.companyName || professional.name,
+                    normalizedEmail,
+                    newPassword
+                );
+                emailSent = true;
+                console.log(`📧 EMPLOYEE: Invitation email sent to ${normalizedEmail}`);
+            } catch (emailError) {
+                console.error(`❌ EMPLOYEE: Failed to send invitation email:`, emailError);
+                return res.status(500).json({
+                    success: false,
+                    msg: "Failed to send invitation email. Employee email not updated."
+                });
+            }
+
+            // Only update password and save after email succeeds
+            const hashedPassword = await bcrypt.hash(newPassword, 12);
+            employee.password = hashedPassword;
+            employee.employee.managedByCompany = false;
+            employee.isEmailVerified = true;
+
+            await employee.save();
+        } else {
+            // Just updating email for existing email employee
+            employee.isEmailVerified = true;
+            await employee.save();
+        }
+
+        res.status(200).json({
+            success: true,
+            msg: wasNonEmailEmployee
+                ? "Employee email linked and invitation sent"
+                : "Employee email updated successfully",
+            data: {
+                employee: {
+                    _id: employee._id,
+                    name: employee.name,
+                    email: employee.email,
+                    hasEmail: employee.employee?.hasEmail
+                },
+                emailSent
+            }
+        });
+    } catch (error) {
+        console.error("❌ EMPLOYEE: Error updating employee email:", error);
+        res.status(500).json({
+            success: false,
+            msg: "Internal server error"
+        });
+    }
+};
+
+// Remove employee (permanent)
+export const removeEmployee = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const token = req.cookies?.['auth-token'];
+
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                msg: "Authentication required"
+            });
+        }
+
+        let decoded: { id: string } | null = null;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+        } catch (err) {
+            return res.status(401).json({
+                success: false,
+                msg: "Invalid authentication token"
+            });
+        }
+
+        await connecToDatabase();
+        const professional = await User.findById(decoded.id);
+
+        if (!professional || professional.role !== 'professional') {
+            return res.status(403).json({
+                success: false,
+                msg: "Only professionals can remove employees"
+            });
+        }
+
+        const { employeeId } = req.params;
+
+        const employee = await User.findOne({
+            _id: employeeId,
+            role: 'employee',
+            'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
+        });
+
+        if (!employee) {
+            return res.status(404).json({
+                success: false,
+                msg: "Employee not found"
+            });
+        }
+
+        employee.employee!.isActive = false;
+        await employee.save();
+
+        res.status(200).json({
+            success: true,
+            msg: "Employee deactivated successfully"
+        });
+    } catch (error) {
+        console.error("❌ EMPLOYEE: Error removing employee:", error);
         res.status(500).json({
             success: false,
             msg: "Internal server error"
