@@ -519,7 +519,8 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
       });
     }
 
-    const { phone } = req.body;
+    const { phone: rawPhone } = req.body;
+    const phone = typeof rawPhone === "string" ? rawPhone.trim() : "";
 
     if (!phone) {
       return res.status(400).json({
@@ -528,8 +529,8 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
       });
     }
 
-    // Basic phone validation
-    if (phone.length < 10 || phone.length > 15) {
+    // Basic phone validation (E.164-ish)
+    if (!/^\+?\d{10,15}$/.test(phone)) {
       return res.status(400).json({
         success: false,
         msg: "Invalid phone number format"
