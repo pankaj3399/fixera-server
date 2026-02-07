@@ -4,6 +4,9 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
+import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
+
+const phoneUtil = PhoneNumberUtil.getInstance();
 
 // Upload ID proof
 export const uploadIdProof = async (req: Request, res: Response, next: NextFunction) => {
@@ -492,6 +495,152 @@ export const submitForVerification = async (req: Request, res: Response, next: N
     return res.status(500).json({
       success: false,
       msg: "Failed to submit profile for verification"
+    });
+  }
+};
+
+// Update phone number
+export const updatePhoneNumber = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const token = req.cookies?.['auth-token'];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        msg: "Authentication required"
+      });
+    }
+
+    let decoded: { id: string } | null = null;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    } catch (err) {
+      console.error('Token verification error:', err);
+      return res.status(401).json({
+        success: false,
+        msg: "Invalid authentication token"
+      });
+    }
+
+    const { phone } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        msg: "Phone number is required"
+      });
+    }
+
+    // Normalize and validate phone using google-libphonenumber
+    
+    let normalizedPhone: string;
+    try {
+      // Parse number with default region 'US' (or change to appropriate default) if not in international format
+      // If the input starts with +, it will form an international number
+      const number = phoneUtil.parseAndKeepRawInput(String(phone), 'US');
+      
+      if (!phoneUtil.isValidNumber(number)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Invalid phone number format"
+        });
+      }
+      
+      normalizedPhone = phoneUtil.format(number, PhoneNumberFormat.E164);
+    } catch (error) {
+       return res.status(400).json({
+        success: false,
+        msg: "Invalid phone number format"
+      });
+    }
+
+    await connecToDatabase();
+    
+    // Check if phone is already in use by another user
+    const existingUser = await User.findOne({ phone: normalizedPhone });
+    if (existingUser && existingUser._id.toString() !== decoded.id) {
+       return res.status(400).json({
+        success: false,
+        msg: "Phone number is already in use by another account"
+      });
+    }
+
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        msg: "User not found"
+      });
+    }
+
+    let phoneChanged = false;
+    // Only update if phone number has changed
+    if (user.phone !== normalizedPhone) {
+      phoneChanged = true;
+      user.phone = normalizedPhone;
+      user.isPhoneVerified = false;
+      
+      try {
+        await user.save();
+      } catch (error: any) {
+        // Handle concurrent duplicate key error
+        if (error.code === 11000) {
+           return res.status(400).json({
+            success: false,
+            msg: "Phone number is already in use by another account"
+          });
+        }
+        throw error;
+      }
+      
+      console.log(`📱 Phone: Updated phone number for ${user.email} -> ${normalizedPhone}`);
+    } else {
+      console.log(`📱 Phone: No change in phone number for ${user.email}`);
+    }
+
+    // Return updated user data
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      isEmailVerified: user.isEmailVerified || false,
+      isPhoneVerified: user.isPhoneVerified || false,
+      vatNumber: user.vatNumber,
+      isVatVerified: user.isVatVerified || false,
+      idProofUrl: user.idProofUrl,
+      idProofFileName: user.idProofFileName,
+      idProofUploadedAt: user.idProofUploadedAt,
+      isIdVerified: user.isIdVerified || false,
+      businessInfo: user.businessInfo,
+      hourlyRate: user.hourlyRate,
+      currency: user.currency,
+      serviceCategories: user.serviceCategories,
+      blockedDates: user.blockedDates,
+      blockedRanges: user.blockedRanges,
+      companyAvailability: user.companyAvailability,
+      companyBlockedDates: user.companyBlockedDates,
+      companyBlockedRanges: user.companyBlockedRanges,
+      profileCompletedAt: user.profileCompletedAt,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt
+    };
+
+    return res.status(200).json({
+      success: true,
+      msg: phoneChanged
+        ? "Phone number updated successfully. Please verify your new number."
+        : "No changes to phone number",
+      user: userResponse
+    });
+
+  } catch (error: any) {
+    console.error('Phone update error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to update phone number"
     });
   }
 };

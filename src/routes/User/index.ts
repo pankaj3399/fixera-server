@@ -5,7 +5,7 @@ import emailVerificationRoutes from "./verify/email";
 import { protect } from "../../middlewares/auth";
 import { GetCurrentUser } from "../../handlers";
 import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handlers/User/validateVat";
-import { uploadIdProof, updateProfessionalProfile, submitForVerification } from "../../handlers/User/profileManagement";
+import { uploadIdProof, updateProfessionalProfile, submitForVerification, updatePhoneNumber } from "../../handlers/User/profileManagement";
 import { upload } from "../../utils/s3Upload";
 import { getLoyaltyStatus, addSpending, getLeaderboard } from "../../handlers/User/loyaltyManagement";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
@@ -46,6 +46,7 @@ userRouter.use(protect)
 userRouter.route('/me').get(GetCurrentUser)
 userRouter.route("/verify-phone").post(VerifyPhone)
 userRouter.route("/verify-phone-check").post(VerifyPhoneCheck)
+userRouter.route("/phone").put(updatePhoneNumber)
 userRouter.use("/verify-email", emailVerificationRoutes);
 userRouter.route("/vat/validate").post(validateVAT)
 userRouter.route("/vat").put(updateUserVAT)
