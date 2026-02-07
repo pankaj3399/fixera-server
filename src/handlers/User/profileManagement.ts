@@ -574,8 +574,10 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
       });
     }
 
+    let phoneChanged = false;
     // Only update if phone number has changed
     if (user.phone !== normalizedPhone) {
+      phoneChanged = true;
       user.phone = normalizedPhone;
       user.isPhoneVerified = false;
       
@@ -628,7 +630,9 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
 
     return res.status(200).json({
       success: true,
-      msg: "Phone number updated successfully. Please verify your new number.",
+      msg: phoneChanged
+        ? "Phone number updated successfully. Please verify your new number."
+        : "No changes to phone number",
       user: userResponse
     });
 
