@@ -495,3 +495,116 @@ export const submitForVerification = async (req: Request, res: Response, next: N
     });
   }
 };
+
+// Update phone number
+export const updatePhoneNumber = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const token = req.cookies?.['auth-token'];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        msg: "Authentication required"
+      });
+    }
+
+    let decoded: { id: string } | null = null;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    } catch (err) {
+      console.error('Token verification error:', err);
+      return res.status(401).json({
+        success: false,
+        msg: "Invalid authentication token"
+      });
+    }
+
+    const { phone: rawPhone } = req.body;
+    const phone = typeof rawPhone === "string" ? rawPhone.trim() : "";
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        msg: "Phone number is required"
+      });
+    }
+
+    // Basic phone validation (E.164-ish)
+    if (!/^\+?\d{10,15}$/.test(phone)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid phone number format"
+      });
+    }
+
+    await connecToDatabase();
+    
+    // Check if phone is already in use
+    const existingUser = await User.findOne({ phone });
+    if (existingUser && existingUser._id.toString() !== decoded.id) {
+       return res.status(400).json({
+        success: false,
+        msg: "Phone number is already in use by another account"
+      });
+    }
+
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        msg: "User not found"
+      });
+    }
+
+    // Update phone and reset verification status
+    user.phone = phone;
+    user.isPhoneVerified = false;
+    
+    await user.save();
+
+    console.log(`📱 Phone: Updated phone number for ${user.email}`);
+
+    // Return updated user data
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      isEmailVerified: user.isEmailVerified || false,
+      isPhoneVerified: user.isPhoneVerified || false,
+      vatNumber: user.vatNumber,
+      isVatVerified: user.isVatVerified || false,
+      idProofUrl: user.idProofUrl,
+      idProofFileName: user.idProofFileName,
+      idProofUploadedAt: user.idProofUploadedAt,
+      isIdVerified: user.isIdVerified || false,
+      businessInfo: user.businessInfo,
+      hourlyRate: user.hourlyRate,
+      currency: user.currency,
+      serviceCategories: user.serviceCategories,
+      blockedDates: user.blockedDates,
+      blockedRanges: user.blockedRanges,
+      companyAvailability: user.companyAvailability,
+      companyBlockedDates: user.companyBlockedDates,
+      companyBlockedRanges: user.companyBlockedRanges,
+      profileCompletedAt: user.profileCompletedAt,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt
+    };
+
+    return res.status(200).json({
+      success: true,
+      msg: "Phone number updated successfully. Please verify your new number.",
+      user: userResponse
+    });
+
+  } catch (error: any) {
+    console.error('Phone update error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to update phone number"
+    });
+  }
+};
