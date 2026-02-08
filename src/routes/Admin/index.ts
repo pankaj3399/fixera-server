@@ -1,13 +1,14 @@
 import { Router } from "express";
-import { protect, authMiddleware } from "../../middlewares/auth";
 import {
   getPendingProfessionals,
   getProfessionalDetails,
+  requireAdmin,
   approveProfessional,
   rejectProfessional,
   suspendProfessional,
   reactivateProfessional,
   verifyIdProof,
+  reviewIdChanges,
   getApprovalStats
 } from "../../handlers/Admin/professionalApprovals";
 import {
@@ -31,7 +32,7 @@ import {
 const adminRouter = Router();
 
 // All admin routes require authentication and admin role
-adminRouter.use(authMiddleware(['admin']));
+adminRouter.use(requireAdmin);
 
 // Professional approval routes
 adminRouter.route('/professionals').get(getPendingProfessionals);
@@ -41,6 +42,7 @@ adminRouter.route('/professionals/:professionalId/reject').put(rejectProfessiona
 adminRouter.route('/professionals/:professionalId/suspend').put(suspendProfessional);
 adminRouter.route('/professionals/:professionalId/reactivate').put(reactivateProfessional);
 adminRouter.route('/professionals/:professionalId/verify-id').put(verifyIdProof);
+adminRouter.route('/professionals/:professionalId/id-changes').put(reviewIdChanges);
 adminRouter.route('/stats/approvals').get(getApprovalStats);
 
 // Loyalty system management routes

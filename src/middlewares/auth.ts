@@ -3,15 +3,6 @@ import jwt from 'jsonwebtoken';
 import User, { IUser } from '../models/user';
 import connectToDatabase from '../config/db'; // Import your database connection
 
-// Extend the Express Request interface to include a 'user' property
-declare global {
-  namespace Express {
-    interface Request {
-      user?: IUser;
-    }
-  }
-}
-
 export const protect = async (req: Request, res: Response, next: NextFunction) => {
   try {
     let token: string | undefined;

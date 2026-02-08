@@ -21,14 +21,23 @@ export interface IUser extends Document {
     idProofFileName?: string;
     idProofUploadedAt?: Date;
     isIdVerified?: boolean;
+    idCountryOfIssue?: string;
+    idExpirationDate?: Date;
+    pendingIdChanges?: {
+        field: string;
+        oldValue: string;
+        newValue: string;
+    }[];
     professionalId?: string;
     // Professional approval fields
     professionalStatus?: 'pending' | 'approved' | 'rejected' | 'suspended';
     approvedBy?: string; // Admin user ID who approved
     approvedAt?: Date;
     rejectionReason?: string;
+    lastIdChangeRejectionReason?: string;
     // Customer-specific fields
     customerType?: CustomerType;
+    businessName?: string; // For business customers
     location?: {
         type: 'Point';
         coordinates: [number, number]; // [longitude, latitude]
@@ -189,6 +198,23 @@ const UserSchema = new Schema({
         type: Boolean,
         default: false
     },
+    idCountryOfIssue: {
+        type: String,
+        required: false,
+        trim: true
+    },
+    idExpirationDate: {
+        type: Date,
+        required: false
+    },
+    pendingIdChanges: {
+        type: [{
+            field: { type: String, required: true },
+            oldValue: { type: String, required: true },
+            newValue: { type: String, required: true }
+        }],
+        default: undefined
+    },
     // Professional approval fields
     professionalStatus: {
         type: String,
@@ -209,6 +235,11 @@ const UserSchema = new Schema({
         required: false
     },
     rejectionReason: {
+        type: String,
+        required: false,
+        maxlength: 500
+    },
+    lastIdChangeRejectionReason: {
         type: String,
         required: false,
         maxlength: 500
@@ -383,6 +414,12 @@ const UserSchema = new Schema({
         managedByCompany: { type: Boolean, default: false }
     },
     // Customer-specific fields
+    businessName: {
+        type: String,
+        required: false,
+        trim: true,
+        maxlength: 200
+    },
     customerType: {
         type: String,
         enum: ['individual', 'business'],
@@ -423,6 +460,11 @@ const UserSchema = new Schema({
 });
 
 UserSchema.pre("save", function (next) {
+    const isBusinessCustomer = this.role === "customer" && this.customerType === "business";
+    if (!isBusinessCustomer) {
+        this.set("businessName", undefined);
+    }
+
     if (this.role === "professional") {
         this.set("availability", undefined);
     }
@@ -447,10 +489,14 @@ UserSchema.pre("save", function (next) {
         this.set("idProofFileName", undefined);
         this.set("idProofUploadedAt", undefined);
         this.set("isIdVerified", undefined);
+        this.set("idCountryOfIssue", undefined);
+        this.set("idExpirationDate", undefined);
+        this.set("pendingIdChanges", undefined);
         this.set("professionalStatus", undefined);
         this.set("approvedBy", undefined);
         this.set("approvedAt", undefined);
         this.set("rejectionReason", undefined);
+        this.set("lastIdChangeRejectionReason", undefined);
 
         // Customer-only fields
         this.set("customerType", undefined);

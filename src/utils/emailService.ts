@@ -300,6 +300,105 @@ export const sendProfessionalRejectionEmail = async (email: string, professional
   }
 };
 
+// Send professional ID change rejection email (account remains approved)
+export const sendProfessionalIdChangeRejectionEmail = async (
+  email: string,
+  professionalName: string,
+  reason: string
+): Promise<boolean> => {
+  try {
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("ID Document Update Rejected")}
+        
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          
+          <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
+            Your recent ID document update was reviewed and could not be approved at this time.
+            <strong>Your professional account remains approved and active.</strong>
+          </p>
+
+          <div style="background: #fff3cd; border: 1px solid #ffeeba; border-radius: 8px; padding: 16px; margin: 20px 0;">
+            <p style="margin: 0; color: #856404;"><strong>Reason:</strong> ${reason}</p>
+          </div>
+
+          <p style="color: #666; line-height: 1.6;">
+            Please upload an updated document that addresses the issue above. If you have questions, reply to this email and our team will help.
+          </p>
+          
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "ID document rejected — account remains approved";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = { 
+      name: "Fixera Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+
+    return true;
+  } catch (error: any) {
+    return false;
+  }
+};
+
+// Send professional ID change approval email (account was already approved, ID update accepted)
+export const sendProfessionalIdChangeApprovalEmail = async (
+  email: string,
+  professionalName: string
+): Promise<boolean> => {
+  try {
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("ID Document Update Approved")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
+            Your recent ID document update has been reviewed and approved by our team.
+            <strong>Your professional account remains approved and active.</strong>
+          </p>
+
+          <div style="background: #e8f5e8; border: 1px solid #4CAF50; border-radius: 8px; padding: 16px; margin: 20px 0;">
+            <p style="margin: 0; color: #2E7D32;"><strong>Your updated ID information is now on file.</strong></p>
+          </div>
+
+          <p style="color: #666; line-height: 1.6;">
+            No further action is needed. If you have any questions, reply to this email and our team will help.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "ID document update approved — account remains approved";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+
+    return true;
+  } catch (error: any) {
+    return false;
+  }
+};
+
 // Send professional suspension email
 export const sendProfessionalSuspensionEmail = async (email: string, name: string, reason: string): Promise<boolean> => {
   try {
