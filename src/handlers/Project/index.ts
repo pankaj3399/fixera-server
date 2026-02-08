@@ -73,22 +73,32 @@ const toLocalMidnightUtc = (date: Date, timeZone: string) => {
   return fromZonedTime(localMidnightZoned, timeZone);
 };
 
-const buildWeekendDates = (
+const buildNonWorkingDates = (
   rangeStart: Date,
   rangeEnd: Date,
-  timeZone: string
+  timeZone: string,
+  availability: Record<string, any>
 ) => {
-  const weekends: string[] = [];
+  const nonWorking: string[] = [];
+  const dayNames = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+  ];
   const cursor = new Date(rangeStart);
   while (cursor <= rangeEnd) {
     const zoned = toZonedTime(cursor, timeZone);
-    const day = zoned.getUTCDay();
-    if (day === 0 || day === 6) {
-      weekends.push(toLocalMidnightUtc(cursor, timeZone).toISOString());
+    const dayAvailability = availability[dayNames[zoned.getUTCDay()]];
+    if (!dayAvailability || dayAvailability.available === false) {
+      nonWorking.push(toLocalMidnightUtc(cursor, timeZone).toISOString());
     }
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
-  return weekends;
+  return nonWorking;
 };
 
 /**
@@ -441,11 +451,17 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     // Get professional's timezone for proper date handling
     const timeZone = professional?.businessInfo?.timezone || "UTC";
 
+    const availability = resolveAvailability(professional?.companyAvailability);
     const { rangeStart, rangeEnd } = getDateRange(startDate, endDate, 180);
-    const weekendDates = buildWeekendDates(rangeStart, rangeEnd, timeZone);
+    const nonWorkingDates = buildNonWorkingDates(
+      rangeStart,
+      rangeEnd,
+      timeZone,
+      availability
+    );
 
     const blockedCategories = {
-      weekends: weekendDates,
+      weekends: nonWorkingDates,
       company: {
         dates: [] as string[],
         ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
@@ -512,7 +528,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     };
 
     // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
-    const allBlockedDates = new Set<string>(weekendDates);
+    const allBlockedDates = new Set<string>(nonWorkingDates);
     const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
 
     if (professional?.companyBlockedDates) {
@@ -806,6 +822,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const useMultiResourceMode = validatedTeamMemberIds.length > 0;
     const requiredOverlap =
       minResources <= 1 ? 100 : resourcePolicy.minOverlapPercentage;
+    const requiresFullOverlap =
+      resourcePolicy.minOverlapPercentage === 100 || minResources >= totalResources;
 
     // Get execution duration from project or subprojects for window-based checks
     let executionDays: number | null = null;
@@ -835,116 +853,6 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       }
     }
 
-    // Get working hours availability to determine working days
-    const availability = resolveAvailability(professional?.companyAvailability);
-
-    // Helper to check if a date is a working day (not weekend, not company blocked)
-    const isWorkingDay = (dateKey: string): boolean => {
-      const normalizedKey = normalizeDateKey(dateKey);
-      if (!normalizedKey) return false;
-      // Check if it's in weekend dates
-      if (weekendDates.includes(normalizedKey)) return false;
-
-      // Check company blocked dates
-      if (blockedCategories.company.dates.some(d => normalizeDateKey(d) === normalizedKey)) return false;
-
-      // Check working hours availability
-      const date = new Date(normalizedKey);
-      const zoned = toZonedTime(date, timeZone);
-      const dayOfWeek = zoned.getUTCDay();
-      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-      const dayAvailability = availability[dayNames[dayOfWeek]];
-      if (!dayAvailability || dayAvailability.available === false) return false;
-
-      return true;
-    };
-
-    // Helper to get available resource count for a date
-    const getAvailableResourceCount = (dateKey: string): number => {
-      const blockedMembers = dateBlockedMembers.get(dateKey);
-      const blockedCount = blockedMembers ? blockedMembers.size : 0;
-      return totalResources - blockedCount;
-    };
-
-    // Helper to count working days between two dates (inclusive) for throughput calculation
-    // This counts calendar working days (e.g., Mon-Fri), regardless of blocked status
-    const countWorkingDaysBetween = (startDateKey: string, endDateKey: string): number => {
-      const startKey = normalizeDateKey(startDateKey);
-      const endKey = normalizeDateKey(endDateKey);
-      if (!startKey || !endKey) return 0;
-      const start = new Date(startKey);
-      const end = new Date(endKey);
-      let count = 0;
-      const MS_PER_DAY = 24 * 60 * 60 * 1000;
-      const startUtcDay = Date.UTC(
-        start.getUTCFullYear(),
-        start.getUTCMonth(),
-        start.getUTCDate()
-      );
-      const endUtcDay = Date.UTC(
-        end.getUTCFullYear(),
-        end.getUTCMonth(),
-        end.getUTCDate()
-      );
-      const actualDaySpan = Math.max(0, Math.floor((endUtcDay - startUtcDay) / MS_PER_DAY));
-      const SAFETY_CAP_DAYS = 366 * 5;
-      const maxIterations = Math.min(actualDaySpan + 1, SAFETY_CAP_DAYS);
-      let iterations = 0;
-
-      const cursor = new Date(start);
-      while (cursor <= end && iterations < maxIterations) {
-        const cursorKey = normalizeDateKey(cursor.toISOString());
-        if (isWorkingDay(cursorKey)) {
-          count++;
-        }
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-        iterations++;
-      }
-      return count;
-    };
-
-    // Helper to check if a start date meets throughput and overlap constraints
-    const isStartDateValid = (startDateKey: string): boolean => {
-      if (!executionDays || executionDays <= 0) {
-        // No execution duration defined, fall back to simple resource check
-        return getAvailableResourceCount(startDateKey) >= minResources;
-      }
-
-      // Walk forward until we find enough fully-available working days.
-      // We intentionally do NOT cap by throughput here; throughput is a
-      // suggestion concern, not an availability blocker.
-      const startDate = new Date(startDateKey);
-      if (Number.isNaN(startDate.getTime())) {
-        return false;
-      }
-      const rangeEndKey = normalizeDateKey(rangeEnd.toISOString());
-      const rangeEndDate = rangeEndKey ? new Date(rangeEndKey) : new Date(rangeEnd);
-      let daysWithMinResources = 0;
-      const cursor = new Date(startDate);
-      const SAFETY_CEILING_DAYS = 366 * 5;
-      let iterations = 0;
-
-      while (
-        daysWithMinResources < executionDays &&
-        iterations < SAFETY_CEILING_DAYS &&
-        cursor <= rangeEndDate
-      ) {
-        iterations++;
-        const cursorKey = normalizeDateKey(cursor.toISOString());
-
-        if (isWorkingDay(cursorKey)) {
-          const availableCount = getAvailableResourceCount(cursorKey);
-          if (availableCount >= minResources) {
-            daysWithMinResources++;
-          }
-        }
-
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-      }
-
-      // Valid only if we can complete within the known evaluation window.
-      return daysWithMinResources >= executionDays;
-    };
 
     // Debug: Log resource policy and blocked data summary (gated behind debug flag)
     if (debugEnabled) {
@@ -958,55 +866,37 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       });
     }
 
-    // For each date in the range, check if it's a valid start date
-    if (useMultiResourceMode && executionDays && executionDays > 0) {
-      // Window-based check for multi-resource projects
-      const cursor = new Date(rangeStart);
-      while (cursor <= rangeEnd) {
-        const dateKey = normalizeDateKey(cursor.toISOString());
-
-        // Skip weekends and company blocked dates (already in allBlockedDates)
-        if (!allBlockedDates.has(dateKey) && isWorkingDay(dateKey)) {
-          const availableCount = getAvailableResourceCount(dateKey);
-          const blockedMembers = dateBlockedMembers.get(dateKey);
-
-          // Debug: Log availability check for each date (gated behind debug flag)
-          if (debugEnabled && availableCount < minResources) {
-            console.log(`[getProjectTeamAvailability] Date ${dateKey.split('T')[0]}: ${availableCount}/${totalResources} available (need ${minResources}), blocked members:`,
-              blockedMembers ? Array.from(blockedMembers) : []);
-          }
-
-          const isValid = isStartDateValid(dateKey);
-          if (!isValid) {
-            allBlockedDates.add(dateKey);
-            finalBlockedDateSet.add(dateKey);
-          }
-        }
-
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-      }
-    } else {
-      // Simple per-day check for single resource or no execution duration
+    // Per-day blocking for multi-resource availability:
+    // - If 100% overlap is required, block any day where not all resources are available.
+    // - Otherwise, block only days where all resources are unavailable.
+    if (useMultiResourceMode) {
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
         const blockedCount = blockedMemberIds.size;
         const availableResources = totalResources - blockedCount;
 
-        if (useMultiResourceMode) {
-          if (availableResources < minResources) {
+        if (requiresFullOverlap) {
+          if (availableResources < totalResources) {
             allBlockedDates.add(dateIso);
             finalBlockedDateSet.add(dateIso);
           }
-        } else {
-          // strict mode - any blocked member blocks the date
+          return;
+        }
+
+        if (availableResources <= 0) {
           allBlockedDates.add(dateIso);
           finalBlockedDateSet.add(dateIso);
         }
       });
+    } else {
+      // strict mode - any blocked member blocks the date
+      dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
+        allBlockedDates.add(dateIso);
+        finalBlockedDateSet.add(dateIso);
+      });
     }
 
-    // In multi-resource mode with window-based checking, don't add individual booking/personal ranges
-    // because the window-based overlap check already determines which start dates are valid.
-    // Adding these ranges would cause the frontend to double-block dates that passed the overlap check.
+    // In multi-resource days mode, don't add individual booking/personal ranges.
+    // We only want to block explicit dates (all resources unavailable or full overlap).
     const useWindowBasedCheck = useMultiResourceMode && executionDays && executionDays > 0;
 
     if (!useWindowBasedCheck) {
