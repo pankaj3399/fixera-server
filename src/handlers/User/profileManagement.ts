@@ -658,6 +658,7 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
     const trimmedCity = typeof city === 'string' ? city.trim() : undefined;
     const trimmedCountry = typeof country === 'string' ? country.trim() : undefined;
     const trimmedPostalCode = typeof postalCode === 'string' ? postalCode.trim() : undefined;
+    const trimmedBusinessName = typeof businessName === 'string' ? businessName.trim() : businessName;
 
     await connecToDatabase();
     const user = await User.findById(decoded.id);
@@ -676,10 +677,10 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       });
     }
 
-    const hasNonEmptyLocation = [trimmedAddress, trimmedCity, trimmedCountry, trimmedPostalCode]
-      .some((value) => !!value && value.length > 0);
+    const hasLocationField = [trimmedAddress, trimmedCity, trimmedCountry, trimmedPostalCode]
+      .some((value) => value !== undefined);
 
-    if (hasNonEmptyLocation) {
+    if (hasLocationField) {
       // Update location fields
       if (!user.location) {
         user.location = {
@@ -690,10 +691,10 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
         user.location.coordinates = [0, 0];
       }
 
-      if (trimmedAddress) user.location.address = trimmedAddress;
-      if (trimmedCity) user.location.city = trimmedCity;
-      if (trimmedCountry) user.location.country = trimmedCountry;
-      if (trimmedPostalCode) user.location.postalCode = trimmedPostalCode;
+      if (trimmedAddress !== undefined) user.location.address = trimmedAddress;
+      if (trimmedCity !== undefined) user.location.city = trimmedCity;
+      if (trimmedCountry !== undefined) user.location.country = trimmedCountry;
+      if (trimmedPostalCode !== undefined) user.location.postalCode = trimmedPostalCode;
     }
 
     // Business name only for business customers
@@ -704,12 +705,12 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
           msg: "Business name can only be set for business customers"
         });
       }
-      user.businessName = businessName;
+      user.businessName = trimmedBusinessName ? trimmedBusinessName : undefined;
     }
 
     await user.save();
 
-    console.log(`🏠 Customer Profile: Updated for ${user.email}`);
+    console.log(`🏠 Customer Profile: Updated for ${user._id.toString()}`);
 
     return res.status(200).json({
       success: true,
@@ -833,7 +834,8 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
     await user.save();
 
-    console.log(`🔄 ID Info: Updated for ${user.email}, re-verification triggered. Changes: ${JSON.stringify(changes)}`);
+    const changedFields = changes.map((change) => change.field);
+    console.log(`🔄 ID Info: Updated for userId=${user._id.toString()}. Fields: ${changedFields.join(', ')}`);
 
     return res.status(200).json({
       success: true,

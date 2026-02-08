@@ -3,7 +3,7 @@ import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { sendProfessionalApprovalEmail, sendProfessionalRejectionEmail, sendProfessionalSuspensionEmail, sendProfessionalReactivationEmail } from "../../utils/emailService";
-import { deleteFromS3, parseS3KeyFromUrl } from "../../utils/s3Upload";
+import { deleteFromS3, getPresignedUrl, parseS3KeyFromUrl } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
 
 declare global {
@@ -582,7 +582,12 @@ export const reviewIdChanges = async (req: Request, res: Response, next: NextFun
             const oldKey = getS3KeyFromValue(oldValue);
             if (oldKey) {
               professional.idProofFileName = oldKey;
-              professional.idProofUrl = undefined;
+              try {
+                professional.idProofUrl = await getPresignedUrl(oldKey, 7 * 24 * 60 * 60);
+              } catch (presignError) {
+                console.warn(`⚠️ ID Proof: Failed to presign restored upload ${oldKey}:`, presignError);
+                professional.idProofUrl = undefined;
+              }
             } else {
               professional.idProofUrl = undefined;
               professional.idProofFileName = undefined;
@@ -629,7 +634,7 @@ export const reviewIdChanges = async (req: Request, res: Response, next: NextFun
             name: professional.name,
             email: professional.email,
             professionalStatus: professional.professionalStatus,
-            rejectionReason: professional.rejectionReason
+            lastIdChangeRejectionReason: professional.lastIdChangeRejectionReason
           }
         }
       });

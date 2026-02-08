@@ -460,9 +460,13 @@ const UserSchema = new Schema({
 });
 
 UserSchema.pre("save", function (next) {
+    const isBusinessCustomer = this.role === "customer" && this.customerType === "business";
+    if (!isBusinessCustomer) {
+        this.set("businessName", undefined);
+    }
+
     if (this.role === "professional") {
         this.set("availability", undefined);
-        this.set("businessName", undefined);
     }
 
     // Clear fields that employees don't need - they only need:
@@ -496,7 +500,6 @@ UserSchema.pre("save", function (next) {
 
         // Customer-only fields
         this.set("customerType", undefined);
-        this.set("businessName", undefined);
         this.set("location", undefined);
         this.set("loyaltyPoints", undefined);
         this.set("loyaltyLevel", undefined);
