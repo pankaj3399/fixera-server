@@ -102,7 +102,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
       if (!user.pendingIdChanges) user.pendingIdChanges = [];
       user.pendingIdChanges.push({
         field: 'idProofDocument',
-        oldValue: previousIdProofUrl || previousIdProofFileName || 'unknown',
+        oldValue: previousIdProofUrl || previousIdProofFileName || '',
         newValue: uploadResult.key
       });
       user.rejectionReason = undefined;
@@ -654,6 +654,10 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
     }
 
     const { address, city, country, postalCode, businessName } = req.body;
+    const trimmedAddress = typeof address === 'string' ? address.trim() : undefined;
+    const trimmedCity = typeof city === 'string' ? city.trim() : undefined;
+    const trimmedCountry = typeof country === 'string' ? country.trim() : undefined;
+    const trimmedPostalCode = typeof postalCode === 'string' ? postalCode.trim() : undefined;
 
     await connecToDatabase();
     const user = await User.findById(decoded.id);
@@ -672,17 +676,25 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       });
     }
 
-    // Update location fields
-    if (!user.location) {
-      user.location = {
-        type: 'Point'
-      };
-    }
+    const hasNonEmptyLocation = [trimmedAddress, trimmedCity, trimmedCountry, trimmedPostalCode]
+      .some((value) => !!value && value.length > 0);
 
-    if (address !== undefined) user.location.address = address;
-    if (city !== undefined) user.location.city = city;
-    if (country !== undefined) user.location.country = country;
-    if (postalCode !== undefined) user.location.postalCode = postalCode;
+    if (hasNonEmptyLocation) {
+      // Update location fields
+      if (!user.location) {
+        user.location = {
+          type: 'Point',
+          coordinates: [0, 0]
+        };
+      } else if (!user.location.coordinates || user.location.coordinates.length !== 2) {
+        user.location.coordinates = [0, 0];
+      }
+
+      if (trimmedAddress) user.location.address = trimmedAddress;
+      if (trimmedCity) user.location.city = trimmedCity;
+      if (trimmedCountry) user.location.country = trimmedCountry;
+      if (trimmedPostalCode) user.location.postalCode = trimmedPostalCode;
+    }
 
     // Business name only for business customers
     if (businessName !== undefined) {
@@ -812,7 +824,10 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
     // Trigger re-verification: set status to pending
     const wasApproved = user.professionalStatus === 'approved';
-    user.professionalStatus = 'pending';
+    const shouldSetPending = user.professionalStatus === 'approved' || user.professionalStatus === 'pending';
+    if (shouldSetPending) {
+      user.professionalStatus = 'pending';
+    }
     user.isIdVerified = false;
     user.rejectionReason = undefined;
 
@@ -822,9 +837,11 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
     return res.status(200).json({
       success: true,
-      msg: wasApproved
-        ? "ID information updated. Your professional status has been set to pending for re-verification."
-        : "ID information updated. Your profile is pending verification.",
+      msg: shouldSetPending
+        ? (wasApproved
+          ? "ID information updated. Your professional status has been set to pending for re-verification."
+          : "ID information updated. Your profile is pending verification.")
+        : "ID information updated.",
       data: {
         changes,
         professionalStatus: user.professionalStatus,

@@ -3,6 +3,7 @@ import { protect, authMiddleware } from "../../middlewares/auth";
 import {
   getPendingProfessionals,
   getProfessionalDetails,
+  requireAdmin,
   approveProfessional,
   rejectProfessional,
   suspendProfessional,
@@ -35,15 +36,15 @@ const adminRouter = Router();
 adminRouter.use(authMiddleware(['admin']));
 
 // Professional approval routes
-adminRouter.route('/professionals').get(getPendingProfessionals);
-adminRouter.route('/professionals/:professionalId').get(getProfessionalDetails);
-adminRouter.route('/professionals/:professionalId/approve').put(approveProfessional);
-adminRouter.route('/professionals/:professionalId/reject').put(rejectProfessional);
-adminRouter.route('/professionals/:professionalId/suspend').put(suspendProfessional);
-adminRouter.route('/professionals/:professionalId/reactivate').put(reactivateProfessional);
-adminRouter.route('/professionals/:professionalId/verify-id').put(verifyIdProof);
-adminRouter.route('/professionals/:professionalId/id-changes').put(reviewIdChanges);
-adminRouter.route('/stats/approvals').get(getApprovalStats);
+adminRouter.route('/professionals').get(requireAdmin, getPendingProfessionals);
+adminRouter.route('/professionals/:professionalId').get(requireAdmin, getProfessionalDetails);
+adminRouter.route('/professionals/:professionalId/approve').put(requireAdmin, approveProfessional);
+adminRouter.route('/professionals/:professionalId/reject').put(requireAdmin, rejectProfessional);
+adminRouter.route('/professionals/:professionalId/suspend').put(requireAdmin, suspendProfessional);
+adminRouter.route('/professionals/:professionalId/reactivate').put(requireAdmin, reactivateProfessional);
+adminRouter.route('/professionals/:professionalId/verify-id').put(requireAdmin, verifyIdProof);
+adminRouter.route('/professionals/:professionalId/id-changes').put(requireAdmin, reviewIdChanges);
+adminRouter.route('/stats/approvals').get(requireAdmin, getApprovalStats);
 
 // Loyalty system management routes
 adminRouter.route('/loyalty/config').get(getLoyaltyConfig);

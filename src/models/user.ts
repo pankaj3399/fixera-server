@@ -34,6 +34,7 @@ export interface IUser extends Document {
     approvedBy?: string; // Admin user ID who approved
     approvedAt?: Date;
     rejectionReason?: string;
+    lastIdChangeRejectionReason?: string;
     // Customer-specific fields
     customerType?: CustomerType;
     businessName?: string; // For business customers
@@ -234,6 +235,11 @@ const UserSchema = new Schema({
         required: false
     },
     rejectionReason: {
+        type: String,
+        required: false,
+        maxlength: 500
+    },
+    lastIdChangeRejectionReason: {
         type: String,
         required: false,
         maxlength: 500
@@ -456,6 +462,7 @@ const UserSchema = new Schema({
 UserSchema.pre("save", function (next) {
     if (this.role === "professional") {
         this.set("availability", undefined);
+        this.set("businessName", undefined);
     }
 
     // Clear fields that employees don't need - they only need:
@@ -485,9 +492,11 @@ UserSchema.pre("save", function (next) {
         this.set("approvedBy", undefined);
         this.set("approvedAt", undefined);
         this.set("rejectionReason", undefined);
+        this.set("lastIdChangeRejectionReason", undefined);
 
         // Customer-only fields
         this.set("customerType", undefined);
+        this.set("businessName", undefined);
         this.set("location", undefined);
         this.set("loyaltyPoints", undefined);
         this.set("loyaltyLevel", undefined);
