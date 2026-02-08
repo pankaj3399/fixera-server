@@ -478,6 +478,26 @@ export const submitForVerification = async (req: Request, res: Response, next: N
       missingRequirements.push('Company name');
     }
 
+    if (!user.businessInfo?.address || !user.businessInfo?.city || !user.businessInfo?.country || !user.businessInfo?.postalCode) {
+      missingRequirements.push('Company address');
+    }
+
+    if (!user.idCountryOfIssue) {
+      missingRequirements.push('ID country of issue');
+    }
+
+    if (!user.idExpirationDate) {
+      missingRequirements.push('ID expiration date');
+    } else if (user.idExpirationDate <= new Date()) {
+      missingRequirements.push('ID expiration date (must be in the future)');
+    }
+
+    const companyAvailability = user.companyAvailability || {};
+    const hasCompanyDayAvailable = Object.values(companyAvailability).some((day: any) => day?.available);
+    if (!hasCompanyDayAvailable) {
+      missingRequirements.push('Company availability (at least one available day)');
+    }
+
     if (missingRequirements.length > 0) {
       return res.status(400).json({
         success: false,
@@ -491,9 +511,12 @@ export const submitForVerification = async (req: Request, res: Response, next: N
       });
     }
 
-    // Update status to pending
+    // Update status to pending and mark onboarding complete
     user.professionalStatus = 'pending';
     user.rejectionReason = undefined; 
+    if (!user.professionalOnboardingCompletedAt) {
+      user.professionalOnboardingCompletedAt = new Date();
+    }
     await user.save();
     return res.status(200).json({
       success: true,
@@ -745,6 +768,13 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     // Track changes for admin review
     const changes: { field: string; oldValue: string; newValue: string }[] = [];
 
+    if (idCountryOfIssue !== undefined && idCountryOfIssue.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        msg: "ID country of issue is required"
+      });
+    }
+
     if (idCountryOfIssue !== undefined && idCountryOfIssue !== (user.idCountryOfIssue || '')) {
       changes.push({
         field: 'idCountryOfIssue',
@@ -754,8 +784,27 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     }
 
     if (idExpirationDate !== undefined) {
+      if (!idExpirationDate) {
+        return res.status(400).json({
+          success: false,
+          msg: "ID expiration date is required"
+        });
+      }
+      const parsedExpiration = new Date(idExpirationDate);
+      if (Number.isNaN(parsedExpiration.getTime())) {
+        return res.status(400).json({
+          success: false,
+          msg: "Invalid ID expiration date"
+        });
+      }
+      if (parsedExpiration <= new Date()) {
+        return res.status(400).json({
+          success: false,
+          msg: "ID expiration date must be in the future"
+        });
+      }
       const oldDate = user.idExpirationDate ? user.idExpirationDate.toISOString().split('T')[0] : '';
-      const newDate = idExpirationDate ? new Date(idExpirationDate).toISOString().split('T')[0] : '';
+      const newDate = parsedExpiration.toISOString().split('T')[0];
       if (oldDate !== newDate) {
         changes.push({
           field: 'idExpirationDate',
@@ -774,16 +823,21 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
     // Apply changes
     if (idCountryOfIssue !== undefined) user.idCountryOfIssue = idCountryOfIssue;
-    if (idExpirationDate !== undefined) user.idExpirationDate = new Date(idExpirationDate);
+    if (idExpirationDate !== undefined) {
+      user.idExpirationDate = new Date(idExpirationDate);
+      user.idExpiryEmailSentAt = undefined;
+    }
 
     // Store pending changes for admin review
     user.pendingIdChanges = changes;
 
-    // Trigger re-verification: set status to pending
+    // Trigger re-verification only if already approved
     const wasApproved = user.professionalStatus === 'approved';
-    user.professionalStatus = 'pending';
+    if (wasApproved) {
+      user.professionalStatus = 'pending';
+      user.rejectionReason = undefined;
+    }
     user.isIdVerified = false;
-    user.rejectionReason = undefined;
 
     await user.save();
 
@@ -793,7 +847,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
       success: true,
       msg: wasApproved
         ? "ID information updated. Your professional status has been set to pending for re-verification."
-        : "ID information updated. Your profile is pending verification.",
+        : "ID information updated successfully.",
       data: {
         changes,
         professionalStatus: user.professionalStatus,

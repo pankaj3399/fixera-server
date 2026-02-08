@@ -14,6 +14,7 @@ import serviceCategoryRouter from './routes/ServiceCategory';
 import professionalRouter from './routes/Professional';
 import searchRouter from './routes/Search';
 import bookingRouter from './routes/Booking';
+import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
 
 dotenv.config();
 
@@ -66,6 +67,7 @@ connectDB()
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
+    startIdExpiryScheduler();
   })
   .catch((error) => {
     console.error('Failed to connect to MongoDB at startup:', error);

@@ -23,6 +23,7 @@ export interface IUser extends Document {
     isIdVerified?: boolean;
     idCountryOfIssue?: string;
     idExpirationDate?: Date;
+    idExpiryEmailSentAt?: Date;
     pendingIdChanges?: {
         field: string;
         oldValue: string;
@@ -30,7 +31,7 @@ export interface IUser extends Document {
     }[];
     professionalId?: string;
     // Professional approval fields
-    professionalStatus?: 'pending' | 'approved' | 'rejected' | 'suspended';
+    professionalStatus?: 'draft' | 'pending' | 'approved' | 'rejected' | 'suspended';
     approvedBy?: string; // Admin user ID who approved
     approvedAt?: Date;
     rejectionReason?: string;
@@ -102,6 +103,7 @@ export interface IUser extends Document {
         createdAt?: Date;
     }[];
     profileCompletedAt?: Date;
+    professionalOnboardingCompletedAt?: Date;
     // Loyalty system fields
     loyaltyPoints?: number;
     loyaltyLevel?: 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
@@ -206,6 +208,10 @@ const UserSchema = new Schema({
         type: Date,
         required: false
     },
+    idExpiryEmailSentAt: {
+        type: Date,
+        required: false
+    },
     pendingIdChanges: [{
         field: { type: String, required: true },
         oldValue: { type: String, required: true },
@@ -214,9 +220,9 @@ const UserSchema = new Schema({
     // Professional approval fields
     professionalStatus: {
         type: String,
-        enum: ['pending', 'approved', 'rejected', 'suspended'],
+        enum: ['draft', 'pending', 'approved', 'rejected', 'suspended'],
         default: function(this: IUser) {
-            return this.role === 'professional' ? 'pending' : undefined;
+            return this.role === 'professional' ? 'draft' : undefined;
         },
         required: function(this: IUser) {
             return this.role === 'professional';
@@ -362,6 +368,10 @@ const UserSchema = new Schema({
         type: Date,
         required: false
     },
+    professionalOnboardingCompletedAt: {
+        type: Date,
+        required: false
+    },
     // Loyalty system fields
     loyaltyPoints: {
         type: Number,
@@ -477,6 +487,7 @@ UserSchema.pre("save", function (next) {
         this.set("isIdVerified", undefined);
         this.set("idCountryOfIssue", undefined);
         this.set("idExpirationDate", undefined);
+        this.set("idExpiryEmailSentAt", undefined);
         this.set("pendingIdChanges", undefined);
         this.set("professionalStatus", undefined);
         this.set("approvedBy", undefined);
@@ -493,6 +504,7 @@ UserSchema.pre("save", function (next) {
         this.set("lastLoyaltyUpdate", undefined);
 
         this.set("profileCompletedAt", undefined);
+        this.set("professionalOnboardingCompletedAt", undefined);
     }
     next();
 });

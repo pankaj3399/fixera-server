@@ -158,6 +158,60 @@ export const sendWelcomeEmail = async (email: string, userName: string): Promise
   }
 };
 
+// Send ID expired email to professionals
+export const sendIdExpiredEmail = async (email: string, userName: string): Promise<boolean> => {
+  try {
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Action Required: ID Expired")}
+        
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${userName},</h2>
+          
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            Our records show that your ID document has expired. To keep your professional profile active, please upload a valid ID and update your expiration date.
+          </p>
+          
+          <div style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">Required Action</h3>
+            <p style="color: #333; margin: 0; line-height: 1.6;">
+              Upload a valid ID document and provide the updated expiration date.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/onboarding"
+               style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+              Update ID Now
+            </a>
+          </div>
+          
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            If you have questions, reply to this email and our support team will help.
+          </p>
+          
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Fixera: Your ID Has Expired";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    return false;
+  }
+};
+
 // Send professional approval email
 export const sendProfessionalApprovalEmail = async (email: string, professionalName: string): Promise<boolean> => {
   try {
