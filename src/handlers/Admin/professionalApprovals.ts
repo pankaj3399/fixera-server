@@ -610,6 +610,146 @@ export const verifyIdProof = async (req: Request, res: Response, next: NextFunct
   }
 };
 
+// Review and resolve pending ID changes for a professional
+export const reviewIdChanges = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const token = req.cookies?.['auth-token'];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        msg: "Authentication required"
+      });
+    }
+
+    let decoded: { id: string } | null = null;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    } catch (err) {
+      return res.status(401).json({
+        success: false,
+        msg: "Invalid authentication token"
+      });
+    }
+
+    const { professionalId } = req.params;
+    const { action, reason } = req.body; // action: 'approve' | 'reject'
+
+    if (!action || !['approve', 'reject'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Action must be 'approve' or 'reject'"
+      });
+    }
+
+    if (action === 'reject' && (!reason || reason.trim().length < 10)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Rejection reason must be at least 10 characters"
+      });
+    }
+
+    await connecToDatabase();
+    const adminUser = await User.findById(decoded.id);
+
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        msg: "Admin access required"
+      });
+    }
+
+    const professional = await User.findOne({
+      _id: professionalId,
+      role: 'professional'
+    });
+
+    if (!professional) {
+      return res.status(404).json({
+        success: false,
+        msg: "Professional not found"
+      });
+    }
+
+    if (!professional.pendingIdChanges || professional.pendingIdChanges.length === 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "No pending ID changes to review"
+      });
+    }
+
+    if (action === 'approve') {
+      // Clear pending changes, re-approve professional
+      professional.pendingIdChanges = [];
+      professional.professionalStatus = 'approved';
+      professional.isIdVerified = true;
+      professional.approvedBy = (adminUser._id as mongoose.Types.ObjectId).toString();
+      professional.approvedAt = new Date();
+      professional.rejectionReason = undefined;
+      await professional.save();
+
+      console.log(`✅ Admin: ID changes approved for ${professional.email} by ${adminUser.email}`);
+
+      return res.status(200).json({
+        success: true,
+        msg: "ID changes approved. Professional re-approved.",
+        data: {
+          professional: {
+            _id: professional._id,
+            name: professional.name,
+            email: professional.email,
+            professionalStatus: professional.professionalStatus
+          }
+        }
+      });
+    } else {
+      // Reject: revert the changes
+      for (const change of professional.pendingIdChanges) {
+        if (change.field === 'idCountryOfIssue') {
+          professional.idCountryOfIssue = change.oldValue || undefined;
+        } else if (change.field === 'idExpirationDate') {
+          professional.idExpirationDate = change.oldValue ? new Date(change.oldValue) : undefined;
+        }
+      }
+
+      professional.pendingIdChanges = [];
+      professional.professionalStatus = 'rejected';
+      professional.rejectionReason = reason.trim();
+      await professional.save();
+
+      // Send rejection email
+      try {
+        await sendProfessionalRejectionEmail(professional.email, professional.name, reason.trim());
+      } catch (emailError) {
+        console.error(`Failed to send ID change rejection email to ${professional.email}:`, emailError);
+      }
+
+      console.log(`❌ Admin: ID changes rejected for ${professional.email} by ${adminUser.email}`);
+
+      return res.status(200).json({
+        success: true,
+        msg: "ID changes rejected. Previous values restored.",
+        data: {
+          professional: {
+            _id: professional._id,
+            name: professional.name,
+            email: professional.email,
+            professionalStatus: professional.professionalStatus,
+            rejectionReason: professional.rejectionReason
+          }
+        }
+      });
+    }
+
+  } catch (error: any) {
+    console.error('Review ID changes error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to review ID changes"
+    });
+  }
+};
+
 // Get approval stats for dashboard
 export const getApprovalStats = async (req: Request, res: Response, next: NextFunction) => {
   try {

@@ -8,6 +8,7 @@ import {
   suspendProfessional,
   reactivateProfessional,
   verifyIdProof,
+  reviewIdChanges,
   getApprovalStats
 } from "../../handlers/Admin/professionalApprovals";
 import {
@@ -41,6 +42,7 @@ adminRouter.route('/professionals/:professionalId/reject').put(rejectProfessiona
 adminRouter.route('/professionals/:professionalId/suspend').put(suspendProfessional);
 adminRouter.route('/professionals/:professionalId/reactivate').put(reactivateProfessional);
 adminRouter.route('/professionals/:professionalId/verify-id').put(verifyIdProof);
+adminRouter.route('/professionals/:professionalId/id-changes').put(reviewIdChanges);
 adminRouter.route('/stats/approvals').get(getApprovalStats);
 
 // Loyalty system management routes

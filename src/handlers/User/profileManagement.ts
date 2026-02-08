@@ -84,11 +84,28 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
     // Upload to S3
     const uploadResult = await uploadToS3(req.file, fileName);
 
+    // Track if this is a re-upload for an already-approved professional
+    const wasApproved = user.professionalStatus === 'approved';
+    const hadPreviousId = !!user.idProofUrl;
+
     // Update user record
     user.idProofUrl = uploadResult.url;
     user.idProofFileName = uploadResult.key;
     user.idProofUploadedAt = new Date();
     user.isIdVerified = false; // Reset verification status when new file is uploaded
+
+    // If re-uploading ID while approved, trigger re-verification
+    if (wasApproved && hadPreviousId) {
+      user.professionalStatus = 'pending';
+      if (!user.pendingIdChanges) user.pendingIdChanges = [];
+      user.pendingIdChanges.push({
+        field: 'idProofDocument',
+        oldValue: 'Previous document',
+        newValue: 'New document uploaded'
+      });
+      user.rejectionReason = undefined;
+    }
+
     await user.save();
 
     console.log(`✅ ID Proof: Successfully uploaded for ${user.email}`);
@@ -492,6 +509,303 @@ export const submitForVerification = async (req: Request, res: Response, next: N
     return res.status(500).json({
       success: false,
       msg: "Failed to submit profile for verification"
+    });
+  }
+};
+
+// Update phone number
+export const updatePhone = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const token = req.cookies?.['auth-token'];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        msg: "Authentication required"
+      });
+    }
+
+    let decoded: { id: string } | null = null;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    } catch (err) {
+      return res.status(401).json({
+        success: false,
+        msg: "Invalid authentication token"
+      });
+    }
+
+    const { phone } = req.body;
+
+    if (!phone || typeof phone !== 'string') {
+      return res.status(400).json({
+        success: false,
+        msg: "Phone number is required"
+      });
+    }
+
+    const trimmedPhone = phone.trim();
+
+    // Basic phone format validation (international format)
+    if (!/^\+?[1-9]\d{6,14}$/.test(trimmedPhone)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid phone number format. Use international format (e.g., +32123456789)"
+      });
+    }
+
+    await connecToDatabase();
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        msg: "User not found"
+      });
+    }
+
+    // Only allow customer, professional, and employee roles
+    if (!['customer', 'professional', 'employee'].includes(user.role)) {
+      return res.status(403).json({
+        success: false,
+        msg: "Phone update is not available for this role"
+      });
+    }
+
+    // Check if same as current
+    if (user.phone === trimmedPhone) {
+      return res.status(400).json({
+        success: false,
+        msg: "New phone number is the same as the current one"
+      });
+    }
+
+    // Check uniqueness
+    const existingUser = await User.findOne({ phone: trimmedPhone, _id: { $ne: user._id } });
+    if (existingUser) {
+      return res.status(409).json({
+        success: false,
+        msg: "This phone number is already in use by another account"
+      });
+    }
+
+    user.phone = trimmedPhone;
+    user.isPhoneVerified = false;
+    await user.save();
+
+    console.log(`📱 Phone: Updated phone for ${user.email} to ${trimmedPhone}`);
+
+    return res.status(200).json({
+      success: true,
+      msg: "Phone number updated successfully. Please verify your new phone number.",
+      data: {
+        phone: user.phone,
+        isPhoneVerified: user.isPhoneVerified
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Update phone error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to update phone number"
+    });
+  }
+};
+
+// Update customer profile (address, business name for business customers)
+export const updateCustomerProfile = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const token = req.cookies?.['auth-token'];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        msg: "Authentication required"
+      });
+    }
+
+    let decoded: { id: string } | null = null;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    } catch (err) {
+      return res.status(401).json({
+        success: false,
+        msg: "Invalid authentication token"
+      });
+    }
+
+    const { address, city, country, postalCode, businessName } = req.body;
+
+    await connecToDatabase();
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        msg: "User not found"
+      });
+    }
+
+    if (user.role !== 'customer') {
+      return res.status(403).json({
+        success: false,
+        msg: "Customer profile updates are only available for customers"
+      });
+    }
+
+    // Update location fields
+    if (!user.location) {
+      user.location = {
+        type: 'Point',
+        coordinates: [0, 0]
+      };
+    }
+
+    if (address !== undefined) user.location.address = address;
+    if (city !== undefined) user.location.city = city;
+    if (country !== undefined) user.location.country = country;
+    if (postalCode !== undefined) user.location.postalCode = postalCode;
+
+    // Business name only for business customers
+    if (businessName !== undefined) {
+      if (user.customerType !== 'business') {
+        return res.status(400).json({
+          success: false,
+          msg: "Business name can only be set for business customers"
+        });
+      }
+      user.businessName = businessName;
+    }
+
+    await user.save();
+
+    console.log(`🏠 Customer Profile: Updated for ${user.email}`);
+
+    return res.status(200).json({
+      success: true,
+      msg: "Customer profile updated successfully",
+      data: {
+        location: user.location,
+        businessName: user.businessName,
+        customerType: user.customerType
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Update customer profile error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to update customer profile"
+    });
+  }
+};
+
+// Update ID information (triggers re-verification for professionals)
+export const updateIdInfo = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const token = req.cookies?.['auth-token'];
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        msg: "Authentication required"
+      });
+    }
+
+    let decoded: { id: string } | null = null;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    } catch (err) {
+      return res.status(401).json({
+        success: false,
+        msg: "Invalid authentication token"
+      });
+    }
+
+    const { idCountryOfIssue, idExpirationDate } = req.body;
+
+    await connecToDatabase();
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        msg: "User not found"
+      });
+    }
+
+    if (user.role !== 'professional') {
+      return res.status(403).json({
+        success: false,
+        msg: "ID info updates are only available for professionals"
+      });
+    }
+
+    // Track changes for admin review
+    const changes: { field: string; oldValue: string; newValue: string }[] = [];
+
+    if (idCountryOfIssue !== undefined && idCountryOfIssue !== (user.idCountryOfIssue || '')) {
+      changes.push({
+        field: 'idCountryOfIssue',
+        oldValue: user.idCountryOfIssue || '',
+        newValue: idCountryOfIssue
+      });
+    }
+
+    if (idExpirationDate !== undefined) {
+      const oldDate = user.idExpirationDate ? user.idExpirationDate.toISOString().split('T')[0] : '';
+      const newDate = idExpirationDate ? new Date(idExpirationDate).toISOString().split('T')[0] : '';
+      if (oldDate !== newDate) {
+        changes.push({
+          field: 'idExpirationDate',
+          oldValue: oldDate,
+          newValue: newDate
+        });
+      }
+    }
+
+    if (changes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "No changes detected"
+      });
+    }
+
+    // Apply changes
+    if (idCountryOfIssue !== undefined) user.idCountryOfIssue = idCountryOfIssue;
+    if (idExpirationDate !== undefined) user.idExpirationDate = new Date(idExpirationDate);
+
+    // Store pending changes for admin review
+    user.pendingIdChanges = changes;
+
+    // Trigger re-verification: set status to pending
+    const wasApproved = user.professionalStatus === 'approved';
+    user.professionalStatus = 'pending';
+    user.isIdVerified = false;
+    user.rejectionReason = undefined;
+
+    await user.save();
+
+    console.log(`🔄 ID Info: Updated for ${user.email}, re-verification triggered. Changes: ${JSON.stringify(changes)}`);
+
+    return res.status(200).json({
+      success: true,
+      msg: wasApproved
+        ? "ID information updated. Your professional status has been set to pending for re-verification."
+        : "ID information updated. Your profile is pending verification.",
+      data: {
+        changes,
+        professionalStatus: user.professionalStatus,
+        isIdVerified: user.isIdVerified
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Update ID info error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to update ID information"
     });
   }
 };

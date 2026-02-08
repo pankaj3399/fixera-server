@@ -21,6 +21,13 @@ export interface IUser extends Document {
     idProofFileName?: string;
     idProofUploadedAt?: Date;
     isIdVerified?: boolean;
+    idCountryOfIssue?: string;
+    idExpirationDate?: Date;
+    pendingIdChanges?: {
+        field: string;
+        oldValue: string;
+        newValue: string;
+    }[];
     professionalId?: string;
     // Professional approval fields
     professionalStatus?: 'pending' | 'approved' | 'rejected' | 'suspended';
@@ -29,6 +36,7 @@ export interface IUser extends Document {
     rejectionReason?: string;
     // Customer-specific fields
     customerType?: CustomerType;
+    businessName?: string; // For business customers
     location?: {
         type: 'Point';
         coordinates: [number, number]; // [longitude, latitude]
@@ -189,6 +197,20 @@ const UserSchema = new Schema({
         type: Boolean,
         default: false
     },
+    idCountryOfIssue: {
+        type: String,
+        required: false,
+        trim: true
+    },
+    idExpirationDate: {
+        type: Date,
+        required: false
+    },
+    pendingIdChanges: [{
+        field: { type: String, required: true },
+        oldValue: { type: String, required: true },
+        newValue: { type: String, required: true }
+    }],
     // Professional approval fields
     professionalStatus: {
         type: String,
@@ -383,6 +405,12 @@ const UserSchema = new Schema({
         managedByCompany: { type: Boolean, default: false }
     },
     // Customer-specific fields
+    businessName: {
+        type: String,
+        required: false,
+        trim: true,
+        maxlength: 200
+    },
     customerType: {
         type: String,
         enum: ['individual', 'business'],
@@ -447,6 +475,9 @@ UserSchema.pre("save", function (next) {
         this.set("idProofFileName", undefined);
         this.set("idProofUploadedAt", undefined);
         this.set("isIdVerified", undefined);
+        this.set("idCountryOfIssue", undefined);
+        this.set("idExpirationDate", undefined);
+        this.set("pendingIdChanges", undefined);
         this.set("professionalStatus", undefined);
         this.set("approvedBy", undefined);
         this.set("approvedAt", undefined);
