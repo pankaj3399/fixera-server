@@ -180,8 +180,6 @@ export interface IProject extends Document {
   intakeMeeting?: IIntakeMeeting;
   renovationPlanning?: IRenovationPlanning;
   resources: string[];
-  minResources?: number;
-  minOverlapPercentage?: number;
   description: string;
   priceModel: string;
   keywords: string[];
@@ -484,7 +482,7 @@ const ProjectSchema = new Schema<IProject>(
       type: Number,
       min: 0,
       max: 100,
-      default: 70,
+      default: 90,
     },
     // Step 1: Basic Info
     professionalId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -509,8 +507,6 @@ const ProjectSchema = new Schema<IProject>(
     intakeMeeting: IntakeMeetingSchema,
     renovationPlanning: RenovationPlanningSchema,
     resources: [{ type: String }],
-    minResources: { type: Number, min: 1 },
-    minOverlapPercentage: { type: Number, min: 0, max: 100, default: 90 },
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {
       type: String,

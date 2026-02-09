@@ -7,6 +7,7 @@ import {
   buildProjectScheduleWindow,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
+import { addWorkingDays } from "../Project/scheduling";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -19,12 +20,31 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       rfqData, // Service type, description, answers, budget, etc.
       preferredStartDate,
       preferredStartTime,
+      estimatedUsage,
       selectedSubprojectIndex,
+      selectedExtraOptions,
       urgency,
       customerBlocks
     } = req.body;
     const resolvedPreferredStartDate = preferredStartDate || rfqData?.preferredStartDate;
     const resolvedPreferredStartTime = preferredStartTime || rfqData?.preferredStartTime;
+    const normalizedEstimatedUsage =
+      typeof estimatedUsage === "number"
+        ? estimatedUsage
+        : typeof estimatedUsage === "string"
+        ? Number.parseFloat(estimatedUsage)
+        : undefined;
+    const normalizedExtraOptionIndexes = Array.isArray(selectedExtraOptions)
+      ? selectedExtraOptions
+          .map((item: any) => {
+            if (typeof item === "number") return item;
+            if (typeof item === "string") return Number.parseInt(item, 10);
+            if (item && typeof item.index === "number") return item.index;
+            if (item && typeof item.index === "string") return Number.parseInt(item.index, 10);
+            return null;
+          })
+          .filter((idx: number | null): idx is number => typeof idx === "number" && Number.isFinite(idx) && idx >= 0)
+      : [];
 
     const resolveDurationValue = (
       source?: { value?: number; unit?: 'hours' | 'days' } | null
@@ -99,10 +119,12 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       projectDoc: any,
       teamMembers: IUser[]
     ): Promise<{ start: Date; end: Date } | null> => {
-      if (bookingDoc.scheduledStartDate && bookingDoc.scheduledEndDate) {
+      const scheduledEnd =
+        bookingDoc.scheduledBufferEndDate || bookingDoc.scheduledExecutionEndDate;
+      if (bookingDoc.scheduledStartDate && scheduledEnd) {
         return {
           start: new Date(bookingDoc.scheduledStartDate),
-          end: new Date(bookingDoc.scheduledEndDate)
+          end: new Date(scheduledEnd)
         };
       }
 
@@ -150,6 +172,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     let projectDoc: any = null;
     let projectResourceIds: string[] = [];
     let projectTeamMembers: IUser[] = [];
+    let schedulePlan: { scheduleStart: Date; scheduleEnd: Date; bufferEnd: Date } | null = null;
 
     // Validate required fields
     if (!bookingType || (bookingType !== 'professional' && bookingType !== 'project')) {
@@ -194,13 +217,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           // Calculate base price
           if (subproject.pricing.type === 'fixed' && subproject.pricing.amount) {
             calculatedTotal = subproject.pricing.amount;
-          } else if (subproject.pricing.type === 'unit' && subproject.pricing.amount && estimatedUsage) {
-            calculatedTotal = subproject.pricing.amount * estimatedUsage;
+          } else if (subproject.pricing.type === 'unit' && subproject.pricing.amount && normalizedEstimatedUsage) {
+            calculatedTotal = subproject.pricing.amount * normalizedEstimatedUsage;
           }
 
           // Calculate add-ons total
-          if (selectedExtraOptions && Array.isArray(selectedExtraOptions) && selectedExtraOptions.length > 0) {
-            addOnsTotal = selectedExtraOptions.reduce((sum: number, idx: number) => {
+          if (normalizedExtraOptionIndexes.length > 0) {
+            addOnsTotal = normalizedExtraOptionIndexes.reduce((sum: number, idx: number) => {
               const option = project.extraOptions?.[idx];
               return sum + (option?.price || 0);
             }, 0);
@@ -212,7 +235,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
             basePrice: calculatedTotal - addOnsTotal,
             addOnsTotal,
             grandTotal: calculatedTotal,
-            selectedExtraOptions
+            selectedExtraOptions: normalizedExtraOptionIndexes
           });
         }
       }
@@ -323,6 +346,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
 
       bookingData.project = projectId;
       bookingData.professional = project.professionalId;
+      projectDoc = project;
 
       let fallbackTeamMembers: mongoose.Types.ObjectId[] | null = null;
       // Validate and normalize resource IDs, filtering out invalid entries and duplicates
@@ -379,6 +403,14 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           ? parsedSubprojectIndex
           : undefined;
 
+      if (typeof subprojectIndex === "number") {
+        bookingData.selectedSubprojectIndex = subprojectIndex;
+      }
+
+      if (typeof normalizedEstimatedUsage === "number" && !Number.isNaN(normalizedEstimatedUsage)) {
+        bookingData.estimatedUsage = normalizedEstimatedUsage;
+      }
+
       const validation = await validateProjectScheduleSelection({
         projectId,
         subprojectIndex,
@@ -432,10 +464,53 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         if (window.assignedTeamMembers && window.assignedTeamMembers.length > 0) {
           bookingData.assignedTeamMembers = window.assignedTeamMembers;
         }
+
+        const scheduleStart = window.scheduledStartDate;
+        const scheduleEnd = window.scheduledExecutionEndDate || scheduleStart;
+        const bufferEnd = window.scheduledBufferEndDate || scheduleEnd;
+        if (scheduleStart && scheduleEnd && bufferEnd) {
+          schedulePlan = { scheduleStart, scheduleEnd, bufferEnd };
+        }
       }
 
       if (!bookingData.assignedTeamMembers && fallbackTeamMembers) {
         bookingData.assignedTeamMembers = fallbackTeamMembers;
+      }
+
+      type SelectedExtraOption = {
+        index: number;
+        name: string;
+        description?: string;
+        price: number;
+      };
+
+      const selectedExtras: SelectedExtraOption[] =
+        normalizedExtraOptionIndexes.length > 0
+          ? normalizedExtraOptionIndexes.flatMap((idx) => {
+              const option = project.extraOptions?.[idx];
+              if (!option) return [];
+              return [{
+                index: idx,
+                name: option.name,
+                description: option.description,
+                price: option.price ?? 0,
+              }];
+            })
+          : [];
+
+      if (selectedExtras.length > 0) {
+        bookingData.selectedExtraOptions = selectedExtras;
+      }
+
+      const assignedResourceIds = Array.isArray(bookingData.assignedTeamMembers)
+        ? bookingData.assignedTeamMembers.map((id: any) => (id ? id.toString() : null)).filter(Boolean)
+        : [];
+      if (assignedResourceIds.length > 0) {
+        projectResourceIds = Array.from(new Set(assignedResourceIds));
+      } else if (Array.isArray(project.resources)) {
+        projectResourceIds = Array.from(
+          new Set(project.resources.map((id: any) => (id ? id.toString() : null)).filter(Boolean))
+        );
       }
     }
 
@@ -998,9 +1073,9 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
         });
 
         booking.scheduledStartDate = scheduleStart;
-        // Use bufferEnd for scheduledEndDate so professional's calendar is blocked including buffer time
-        booking.scheduledEndDate = bufferEnd;
         booking.scheduledExecutionEndDate = scheduleEnd;
+        booking.scheduledBufferStartDate = scheduleEnd;
+        booking.scheduledBufferEndDate = bufferEnd;
         await booking.save();
 
         // Block execution + buffer in team calendars via blockedRanges with a reason tag.
@@ -1143,57 +1218,3 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
   }
 };
 
-// Submit post-booking answers
-export const submitPostBookingAnswers = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const userId = req.user?._id;
-    const { bookingId } = req.params;
-    const { answers } = req.body;
-
-    if (!answers || !Array.isArray(answers)) {
-      return res.status(400).json({
-        success: false,
-        msg: "Answers are required and must be an array"
-      });
-    }
-
-    const booking = await Booking.findById(bookingId);
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        msg: "Booking not found"
-      });
-    }
-
-    // Only the customer who made the booking can submit answers
-    if (booking.customer.toString() !== userId?.toString()) {
-      return res.status(403).json({
-        success: false,
-        msg: "You do not have permission to submit answers for this booking"
-      });
-    }
-
-    // Validate answer format
-    const validatedAnswers = answers.map((answer: any, index: number) => ({
-      questionId: answer.questionId || `q-${index}`,
-      question: answer.question || '',
-      answer: answer.answer || ''
-    })).filter((a: any) => a.question && a.answer);
-
-    // Update booking with post-booking data
-    booking.postBookingData = validatedAnswers;
-    await booking.save();
-
-    console.log('[BOOKING] Post-booking answers saved for booking:', bookingId);
-
-    return res.status(200).json({
-      success: true,
-      msg: "Post-booking answers submitted successfully",
-      booking
-    });
-
-  } catch (error: any) {
-    console.error('Submit post-booking answers error:', error);
-    next(error);
-  }
-};

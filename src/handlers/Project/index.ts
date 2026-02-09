@@ -8,6 +8,7 @@ import User from "../../models/user";
 import { buildProjectScheduleProposals, buildProjectScheduleWindow, getResourcePolicy, toZonedTime, fromZonedTime, type ResourcePolicy } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
+import { calculateFirstAvailableDate } from "./scheduling";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 const toIsoDate = (value?: Date | string | null) => {
@@ -15,6 +16,23 @@ const toIsoDate = (value?: Date | string | null) => {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date.toISOString();
+};
+
+const buildProfessionalOwnershipFilter = (professionalId: string) => {
+  if (!professionalId) {
+    return { professionalId: null };
+  }
+
+  if (mongoose.isValidObjectId(professionalId)) {
+    return {
+      $or: [
+        { professionalId },
+        { professionalId: new mongoose.Types.ObjectId(professionalId) },
+      ],
+    };
+  }
+
+  return { professionalId };
 };
 
 const toBlockedRange = (range?: {
@@ -333,8 +351,8 @@ export const getProject = async (req: Request, res: Response) => {
     const ownershipFilter = buildProfessionalOwnershipFilter(professionalId.toString());
     console.log('🔐 Ownership filter:', JSON.stringify(ownershipFilter, null, 2));
 
-    const projectId = Types.ObjectId.isValid(id)
-      ? new Types.ObjectId(id)
+    const projectId = mongoose.Types.ObjectId.isValid(id)
+      ? new mongoose.Types.ObjectId(id)
       : id;
     const query = {
       $and: [
@@ -665,7 +683,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         error: "Invalid professional ID in project"
       });
     }
-    const professionalObjectId = new mongoose.Types.ObjectId(project.professionalId);
+    const professionalObjectId = new mongoose.Types.ObjectId(String(project.professionalId));
 
     // Booking filter - must match scheduleEngine.ts buildPerMemberBlockedData for consistency
     // Both endpoints must use the same criteria to determine which bookings block resources
@@ -1339,8 +1357,8 @@ export const duplicateProject = async (req: Request, res: Response) => {
     const ownershipFilter = buildProfessionalOwnershipFilter(
       professionalId.toString()
     );
-    const projectId = Types.ObjectId.isValid(id)
-      ? new Types.ObjectId(id)
+    const projectId = mongoose.Types.ObjectId.isValid(id)
+      ? new mongoose.Types.ObjectId(id)
       : id;
     const original = await Project.findOne({
       ...ownershipFilter,
@@ -1388,8 +1406,8 @@ export const deleteProject = async (req: Request, res: Response) => {
     const ownershipFilter = buildProfessionalOwnershipFilter(
       professionalId.toString()
     );
-    const projectId = Types.ObjectId.isValid(id)
-      ? new Types.ObjectId(id)
+    const projectId = mongoose.Types.ObjectId.isValid(id)
+      ? new mongoose.Types.ObjectId(id)
       : id;
     const result = await Project.findOneAndDelete({
       ...ownershipFilter,
@@ -1421,8 +1439,8 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
     const ownershipFilter = buildProfessionalOwnershipFilter(
       professionalId.toString()
     );
-    const projectId = Types.ObjectId.isValid(id)
-      ? new Types.ObjectId(id)
+    const projectId = mongoose.Types.ObjectId.isValid(id)
+      ? new mongoose.Types.ObjectId(id)
       : id;
     const project = await Project.findOne({
       ...ownershipFilter,

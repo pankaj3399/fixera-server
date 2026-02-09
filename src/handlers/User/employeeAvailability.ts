@@ -4,6 +4,7 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
+import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
 
 // They can only block specific dates
 export const updateEmployeeAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {

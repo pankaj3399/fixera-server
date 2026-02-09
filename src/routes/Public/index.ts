@@ -46,10 +46,4 @@ publicRouter
   .route("/projects/:id/schedule-window")
   .get(schedulingRateLimiter, getProjectScheduleWindow);
 
-// Schedule proposals (public endpoint for suggested dates/times)
-publicRouter.route("/projects/:id/schedule-proposals").get(getProjectScheduleProposals);
-
-// Professional working hours (public endpoint for hours mode bookings)
-publicRouter.route("/projects/:id/working-hours").get(getProjectProfessionalWorkingHours);
-
 export default publicRouter;

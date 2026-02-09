@@ -71,11 +71,11 @@ export const buildBookingBlockedRanges = async (
           startDate: startDateISO,
           endDate: endDateISO,
           reason: "booking",
-          bookingId: booking._id.toString(),
+          bookingId: String(booking._id),
           location: booking.location,
         });
       } else {
-        console.warn(`[buildBookingBlockedRanges] Invalid dates for booking ${booking._id} - start: ${booking.scheduledStartDate}, end: ${scheduledExecutionEndDate}`);
+        console.warn(`[buildBookingBlockedRanges] Invalid dates for booking ${String(booking._id)} - start: ${booking.scheduledStartDate}, end: ${scheduledExecutionEndDate}`);
       }
     }
 
@@ -91,11 +91,11 @@ export const buildBookingBlockedRanges = async (
           startDate: bufferStartISO,
           endDate: bufferEndISO,
           reason: "booking-buffer",
-          bookingId: booking._id.toString(),
+          bookingId: String(booking._id),
           location: booking.location,
         });
       } else {
-        console.warn(`[buildBookingBlockedRanges] Invalid buffer dates for booking ${booking._id} - start: ${scheduledBufferStartDate}, end: ${scheduledBufferEndDate}`);
+        console.warn(`[buildBookingBlockedRanges] Invalid buffer dates for booking ${String(booking._id)} - start: ${scheduledBufferStartDate}, end: ${scheduledBufferEndDate}`);
       }
     }
   });

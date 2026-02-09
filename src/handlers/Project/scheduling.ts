@@ -496,14 +496,14 @@ const getExecutionContext = (project: IProject, options?: ScheduleOptions) => {
 
   const resolvePreparation = () => {
     const getPreparationDuration = (candidate?: IProject['subprojects'][number]) => {
-      if (!candidate) {
+      if (!candidate?.preparationDuration) {
         return undefined;
       }
-      if (typeof candidate.deliveryPreparation !== 'number' || candidate.deliveryPreparation <= 0) {
+      const { value, unit } = candidate.preparationDuration;
+      if (typeof value !== 'number' || value <= 0) {
         return undefined;
       }
-      const unit = (candidate.deliveryPreparationUnit || 'days') as 'hours' | 'days';
-      return { value: candidate.deliveryPreparation, unit };
+      return { value, unit: (unit || 'days') as 'hours' | 'days' };
     };
 
     const directPreparation = getPreparationDuration(subproject);
