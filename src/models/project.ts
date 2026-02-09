@@ -10,13 +10,13 @@ export interface ICertification {
 
 export interface IDistance {
   address: string;
+  countryCode?: string; // ISO 3166-1 alpha-2 country code (e.g., "US", "NL", "DE")
   useCompanyAddress: boolean;
   maxKmRange: number;
   noBorders: boolean;
-  borderLevel?: 'none' | 'country' | 'province'; // Configurable border filtering level
-  coordinates?: {
-    latitude: number;
-    longitude: number;
+  location?: {
+    type: "Point";
+    coordinates: [number, number];
   };
 }
 
@@ -39,7 +39,7 @@ export interface IPricing {
   type: "fixed" | "unit" | "rfq";
   amount?: number;
   priceRange?: { min: number; max: number };
-  minProjectValue?: number;
+  minOrderQuantity?: number; // Unit pricing: minimum order quantity
 }
 
 export interface IIncludedItem {
@@ -59,6 +59,11 @@ export interface IExecutionDuration {
   value: number;
   unit: "hours" | "days";
   range?: { min: number; max: number };
+}
+
+export interface IPreparationDuration {
+  value: number;
+  unit: "hours" | "days";
 }
 
 export interface IBuffer {
@@ -87,8 +92,7 @@ export interface ISubproject {
   included: IIncludedItem[];
   materialsIncluded: boolean;
   materials?: IMaterial[]; // List of materials if materialsIncluded is true
-  deliveryPreparation: number;
-  deliveryPreparationUnit?: "hours" | "days";
+  preparationDuration: IPreparationDuration;
   executionDuration: IExecutionDuration;
   buffer?: IBuffer;
   intakeDuration?: IIntakeDuration;
@@ -176,6 +180,8 @@ export interface IProject extends Document {
   intakeMeeting?: IIntakeMeeting;
   renovationPlanning?: IRenovationPlanning;
   resources: string[];
+  minResources?: number;
+  minOverlapPercentage?: number;
   description: string;
   priceModel: string;
   keywords: string[];
@@ -206,14 +212,14 @@ export interface IProject extends Document {
   status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
   // Booking lifecycle status (only applicable when project is published and has active bookings)
   bookingStatus?:
-    | "rfq"
-    | "quoted"
-    | "booked"
-    | "execution"
-    | "completed"
-    | "cancelled"
-    | "dispute"
-    | "warranty";
+  | "rfq"
+  | "quoted"
+  | "booked"
+  | "execution"
+  | "completed"
+  | "cancelled"
+  | "dispute"
+  | "warranty";
   qualityChecks: IQualityCheck[];
   adminFeedback?: string;
   submittedAt?: Date;
@@ -240,25 +246,48 @@ const CertificationSchema = new Schema<ICertification>({
 // Distance Schema
 const DistanceSchema = new Schema<IDistance>({
   address: { type: String, required: true },
+  countryCode: {
+    type: String,
+    validate: {
+      validator: (value: string) =>
+        !value || /^[A-Z]{2}$/.test(value),
+      message: "countryCode must be a valid ISO 3166-1 alpha-2 code (e.g., 'US', 'NL', 'DE')",
+    },
+  },
   useCompanyAddress: { type: Boolean, default: false },
   maxKmRange: { type: Number, required: true, min: 1, max: 200 },
   noBorders: { type: Boolean, default: false },
-  borderLevel: {
-    type: String,
-    enum: ['none', 'country', 'province'],
-    default: 'country' // Default to country-level for backward compatibility
-  },
-  coordinates: {
-    latitude: {
-      type: Number,
-      min: -90,
-      max: 90
+  location: {
+    type: {
+      type: String,
+      enum: ["Point"],
+      default: "Point",
     },
-    longitude: {
-      type: Number,
-      min: -180,
-      max: 180
-    }
+    coordinates: {
+      type: [Number],
+      validate: {
+        validator: (value: number[]) => {
+          if (!value || (Array.isArray(value) && value.length === 0)) {
+            return true;
+          }
+          if (!Array.isArray(value) || value.length !== 2) {
+            return false;
+          }
+          const [longitude, latitude] = value;
+          if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+            return false;
+          }
+          if (longitude < -180 || longitude > 180) {
+            return false;
+          }
+          if (latitude < -90 || latitude > 90) {
+            return false;
+          }
+          return true;
+        },
+        message: "Invalid coordinates: expected [longitude, latitude] with longitude ∈ [-180,180] and latitude ∈ [-90,90]",
+      },
+    },
   },
 });
 
@@ -288,7 +317,7 @@ const PricingSchema = new Schema<IPricing>({
     min: { type: Number, min: 0 },
     max: { type: Number, min: 0 },
   },
-  minProjectValue: { type: Number, min: 0 },
+  minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
 });
 
 // Included Item Schema
@@ -314,6 +343,11 @@ const ExecutionDurationSchema = new Schema<IExecutionDuration>({
     min: { type: Number, min: 0 },
     max: { type: Number, min: 0 },
   },
+});
+
+const PreparationDurationSchema = new Schema<IPreparationDuration>({
+  value: { type: Number, required: true, min: 0 },
+  unit: { type: String, enum: ["hours", "days"], required: true },
 });
 
 // Buffer Schema
@@ -346,8 +380,7 @@ const SubprojectSchema = new Schema<ISubproject>({
   included: [IncludedItemSchema],
   materialsIncluded: { type: Boolean, default: false },
   materials: [MaterialSchema],
-  deliveryPreparation: { type: Number, required: true, min: 0 },
-  deliveryPreparationUnit: { type: String, enum: ["hours", "days"], default: "days" },
+  preparationDuration: { type: PreparationDurationSchema, required: true },
   executionDuration: { type: ExecutionDurationSchema, required: true },
   buffer: BufferSchema,
   intakeDuration: IntakeDurationSchema,
@@ -476,6 +509,8 @@ const ProjectSchema = new Schema<IProject>(
     intakeMeeting: IntakeMeetingSchema,
     renovationPlanning: RenovationPlanningSchema,
     resources: [{ type: String }],
+    minResources: { type: Number, min: 1 },
+    minOverlapPercentage: { type: Number, min: 0, max: 100, default: 90 },
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {
       type: String,
@@ -549,6 +584,7 @@ ProjectSchema.index({ professionalId: 1, autoSaveTimestamp: -1 });
 ProjectSchema.index({ title: 'text', description: 'text' });
 ProjectSchema.index({ category: 1, service: 1 });
 ProjectSchema.index({ status: 1 });
+ProjectSchema.index({ "distance.location": "2dsphere" });
 
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {

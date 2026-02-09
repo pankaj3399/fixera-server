@@ -1,54 +1,8 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import User from "../../models/user";
 import Project from "../../models/project";
-import { calculateFirstAvailableDate, getScheduleProposalsForProject } from "../Project/scheduling";
-import {
-  LocationInfo,
-  getDistanceBetweenLocations,
-  checkBorderCrossing,
-  hasValidCoordinates,
-  validateLocationByTextData,
-  isSameCountry,
-  isSameProvince,
-  isSameCity
-} from "../../utils/geolocation";
-import {
-  extractLocationFromUserLocation,
-  extractLocationFromBusinessInfo,
-  getProjectServiceLocation,
-  enhanceLocationInfo,
-  resolveCoordinates,
-  getApproximateCoordinates,
-  getCountryCode
-} from "../../utils/geocoding";
-type ProjectFacetCounts = {
-  categories: Record<string, number>;
-  services: Record<string, number>;
-  areasOfWork: Record<string, number>;
-  priceModels: Record<string, number>;
-  projectTypes: Record<string, number>;
-  includedItems: Record<string, number>;
-};
-const normalizeFacetValue = (value?: string | null) => {
-  if (!value) return "";
-  return value.trim();
-};
-const incrementFacetCount = (target: Record<string, number>, rawValue?: string | null) => {
-  const normalized = normalizeFacetValue(rawValue);
-  if (!normalized) return;
-  target[normalized] = (target[normalized] || 0) + 1;
-};
-const buildProjectFacets = (projects: any[]): ProjectFacetCounts => {
-  const facets: ProjectFacetCounts = {
-    categories: {},
-    services: {},
-    areasOfWork: {},
-    priceModels: {},
-    projectTypes: {},
-    includedItems: {},
-  };
-  projects.forEach((project: any) => {
-    const subprojects = Array.isArray(project.subprojects) ? project.subprojects : [];
+import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngine";
 
     // For projects without subprojects
     if (!subprojects.length) {
@@ -138,7 +92,12 @@ export const search = async (req: Request, res: Response) => {
       priceMax,
       category,
       availability,
-      sortBy = "relevant", // sort option
+      customerLat,
+      customerLon,
+      customerCountry,
+      customerState,
+      customerCity,
+      customerAddress,
       page = "1",
       limit = "20",
       // New filters
@@ -158,11 +117,9 @@ export const search = async (req: Request, res: Response) => {
       customerCountry,
       customerAddress,
     } = req.query;
-    console.log('🔍 Search request:', {
-      q, loc, type, priceMin, priceMax, category, availability, sortBy, page, limit,
-      services, geographicArea, priceModel, projectTypes, includedItems, startDateFrom, startDateTo,
-      customerLat, customerLon, customerCity, customerState, customerCountry, customerAddress
-    });
+
+    console.log("Search request:", { q, loc, type, priceMin, priceMax, category, availability, customerLat, customerLon, customerCountry, customerState, customerCity, customerAddress, page, limit });
+
     const pageNum = parseInt(page as string, 10);
     const limitNum = parseInt(limit as string, 10);
     const skip = (pageNum - 1) * limitNum;
@@ -217,7 +174,12 @@ export const search = async (req: Request, res: Response) => {
         priceMin as string | undefined,
         priceMax as string | undefined,
         category as string | undefined,
-        sortBy as string,
+        customerLat as string | undefined,
+        customerLon as string | undefined,
+        customerCountry as string | undefined,
+        customerState as string | undefined,
+        customerCity as string | undefined,
+        customerAddress as string | undefined,
         skip,
         limitNum,
         // New filters
@@ -285,7 +247,7 @@ async function searchProfessionals(
     }
     // Availability filter - check if professional has availability set
     if (availability === "true") {
-      filter.availability = { $exists: true, $ne: null };
+      filter.companyAvailability = { $exists: true, $ne: null };
     }
     // Determine sort order
     let sortOption: any = { createdAt: -1 }; // default: newest
@@ -314,7 +276,7 @@ async function searchProfessionals(
     const [professionals, total] = await Promise.all([
       User.find(filter)
         .select(
-          "name email businessInfo hourlyRate currency serviceCategories profileImage availability createdAt"
+          "name email businessInfo hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
         )
         .sort(sortOption)
         .skip(skip)
@@ -323,11 +285,21 @@ async function searchProfessionals(
       User.countDocuments(filter),
     ]);
     console.log('✅ Found', total, 'professionals, returning', professionals.length);
-    if (professionals.length > 0) {
-      console.log('📋 Sample professional names:', professionals.slice(0, 3).map((p: any) => p.name || p.businessInfo?.companyName));
-    }
-    // If location filter is present, prioritize by location but show all results
-    let results = professionals;
+
+    // If location filter is present, prioritize exact matches
+    const hasAnyAvailability = (availability?: Record<string, any>) =>
+      !!availability &&
+      Object.values(availability).some(
+        (day) => day?.available || day?.startTime || day?.endTime
+      );
+
+    let results = professionals.map((professional: any) => {
+      const { companyAvailability, ...rest } = professional;
+      return {
+        ...rest,
+        availability: hasAnyAvailability(companyAvailability),
+      };
+    });
     if (location && location.trim()) {
       const locationLower = location.toLowerCase();
       // Prioritize professionals where location matches
@@ -371,7 +343,12 @@ async function searchProjects(
   priceMin: string | undefined,
   priceMax: string | undefined,
   category: string | undefined,
-  sortBy: string,
+  customerLat: string | undefined,
+  customerLon: string | undefined,
+  customerCountry: string | undefined,
+  customerState: string | undefined,
+  customerCity: string | undefined,
+  customerAddress: string | undefined,
   skip: number,
   limit: number,
   // New filters
@@ -515,296 +492,408 @@ async function searchProjects(
         filter.$and.push({ $or: priceConditions });
       }
     }
-    // Determine sort order (only for database-level sorts, not availability or price)
-    let sortOption: any = { createdAt: -1 }; // default: newest
-    let useCustomSort = false;
-    switch (sortBy) {
-      case 'price_low':
-      case 'price_high':
-        // Will handle this after fetching projects (need to calculate min price from subprojects)
-        useCustomSort = true;
-        sortOption = { createdAt: -1 }; // Default sort for DB query
-        break;
-      case 'newest':
-        sortOption = { createdAt: -1 };
-        break;
-      case 'availability':
-        // Will handle this after calculating firstAvailableDate
-        useCustomSort = true;
-        sortOption = { createdAt: -1 }; // Default sort for DB query
-        break;
-      case 'popularity':
-        // TODO: Implement popularity sorting in future phase (reviews + bookings)
-        sortOption = { createdAt: -1 }; // Fallback to newest for now
-        break;
-      case 'relevant':
-      default:
-        sortOption = { createdAt: -1 }; // For projects, relevant = newest
-        break;
-    }
+
+    const normalizeValue = (value?: string | null) =>
+      value ? value.trim().toLowerCase() : "";
+
+    const parseCoordinate = (value?: string) => {
+      if (!value) return null;
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const toObjectIdString = (value?: unknown) => {
+      if (!value) return null;
+      const raw =
+        typeof value === "object" && (value as any)?._id != null
+          ? (value as any)._id
+          : value;
+      const id =
+        typeof raw === "string"
+          ? raw
+          : typeof raw?.toString === "function"
+            ? raw.toString()
+            : null;
+      return id && Types.ObjectId.isValid(id) ? id : null;
+    };
+
+    const getRawProfessionalId = (project: any) =>
+      project.professionalId?._id?.toString?.() ||
+      project.professionalId?.toString?.() ||
+      project.professionalId;
+
+    const escapeRegExp = (value: string) =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    const customerLatValue = parseCoordinate(customerLat);
+    const customerLonValue = parseCoordinate(customerLon);
+    const customerCountryValue = normalizeValue(customerCountry);
+    const customerStateValue = normalizeValue(customerState);
+    const customerCityValue = normalizeValue(customerCity);
+    const customerAddressValue = normalizeValue(customerAddress);
+    const locationValue = normalizeValue(location);
+    const hasGeoCoordinates = customerLatValue !== null && customerLonValue !== null;
+
+    const hasLocationFilter = Boolean(
+      locationValue ||
+      customerAddressValue ||
+      customerCityValue ||
+      customerStateValue ||
+      customerCountryValue ||
+      hasGeoCoordinates
+    );
+
+    const locationParts = [
+      locationValue,
+      customerAddressValue,
+      customerCityValue,
+      customerStateValue,
+      customerCountryValue,
+    ].filter(Boolean);
     // Execute query with pagination and populate professional info
-    console.log('🔍 Project search filter:', JSON.stringify(filter, null, 2));
-    console.log('🔍 Search query:', query);
-    console.log('🔍 Location/Geographic Area:', geographicArea || location);
-    console.log('🔍 Sort option:', sortOption);
-    console.log('🔍 Use custom sort:', useCustomSort);
-    console.log('🔍 New filters:', { services, priceModel, projectTypes, includedItems, startDateFrom, startDateTo });
-    const projects = await Project.find(filter)
-      .populate("professionalId", "name email businessInfo hourlyRate currency profileImage")
-      .sort(sortOption)
-      .lean();
-    console.log('✅ Found', projects.length, 'projects before location filter');
-    if (projects.length > 0) {
-      console.log('📋 Sample project titles:', projects.slice(0, 3).map((p: any) => p.title));
-      // Debug: Check for specific project with certifications
-      const targetProject = projects.find((p: any) => p._id.toString() === '690f11684845e1a9c87b4313');
-      if (targetProject) {
-        console.log('🎯 Found target project 690f11684845e1a9c87b4313');
-        console.log('🎯 Certifications:', (targetProject as any).certifications);
-        console.log('🎯 Full project data:', targetProject);
+    console.log('dY"? Project search filter:', JSON.stringify(filter, null, 2));
+
+    const baseQuery = Project.find(filter).sort({ createdAt: -1 });
+
+    let projects: any[] = [];
+    let total = 0;
+    let usedGeoSearch = false;
+    let filteredResults: any[] | null = null;
+
+    if (customerLatValue !== null && customerLonValue !== null) {
+      usedGeoSearch = true;
+      const nearLatitude = customerLatValue;
+      const nearLongitude = customerLonValue;
+      const maxDistanceMeters = 200 * 1000;
+      const geoPipeline: any[] = [
+        {
+          $geoNear: {
+            near: {
+              type: "Point",
+              coordinates: [nearLongitude, nearLatitude],
+            },
+            distanceField: "geoDistanceMeters",
+            spherical: true,
+            maxDistance: maxDistanceMeters,
+            query: filter,
+            key: "distance.location",
+          },
+        },
+      ];
+
+      if (customerCountryValue) {
+        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2)
+        // Fall back to regex on address for backwards compatibility
+        const countryCodeUpper = customerCountryValue.toUpperCase();
+        const countryRegex = new RegExp(escapeRegExp(customerCountryValue), "i");
+        // noBorders=true means "don't cross borders" (stay in same country)
+        // noBorders=false means project can serve customers across borders
+        geoPipeline.push({
+          $match: {
+            $or: [
+              // Projects that CAN cross borders (noBorders is false or not set)
+              { "distance.noBorders": { $ne: true } },
+              // Projects that CANNOT cross borders must match customer's country
+              {
+                $and: [
+                  { "distance.noBorders": true },
+                  {
+                    $or: [
+                      { "distance.countryCode": countryCodeUpper },
+                      // Fallback: match address if countryCode not set
+                      {
+                        $and: [
+                          { "distance.countryCode": { $exists: false } },
+                          { "distance.address": countryRegex },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      }
+
+      geoPipeline.push({
+        $match: {
+          $expr: {
+            $lte: [
+              "$geoDistanceMeters",
+              { $multiply: ["$distance.maxKmRange", 1000] },
+            ],
+          },
+        },
+      });
+
+      if (locationValue) {
+        geoPipeline.push({
+          $addFields: {
+            locationExactMatch: {
+              $eq: [
+                { $toLower: { $ifNull: ["$distance.address", ""] } },
+                locationValue,
+              ],
+            },
+          },
+        });
+        geoPipeline.push({
+          $sort: {
+            locationExactMatch: -1,
+            createdAt: -1,
+          },
+        });
       } else {
-        console.log('❌ Target project 690f11684845e1a9c87b4313 NOT found in results');
+        geoPipeline.push({ $sort: { createdAt: -1 } });
+      }
+
+      geoPipeline.push({
+        $project: {
+          geoDistanceMeters: 0,
+          locationExactMatch: 0,
+        },
+      });
+
+      geoPipeline.push({
+        $facet: {
+          results: [{ $skip: skip }, { $limit: limit }],
+          total: [{ $count: "count" }],
+        },
+      });
+
+      const [geoResult] = await Project.aggregate(geoPipeline);
+      projects = geoResult?.results ?? [];
+      total = geoResult?.total?.[0]?.count ?? 0;
+    } else if (hasLocationFilter) {
+      projects = await baseQuery.lean();
+      total = projects.length;
+      // Performance warning: location filtering loads all projects into memory
+      if (total > 500) {
+        console.warn(
+          `[Search Performance] Location filter returned ${total} projects for in-memory filtering. ` +
+          `Consider implementing geospatial indexes for better scalability.`
+        );
+      }
+    } else {
+      [projects, total] = await Promise.all([
+        baseQuery.skip(skip).limit(limit).lean(),
+        Project.countDocuments(filter),
+      ]);
+    }
+
+    console.log("Found", total, "projects, returning", projects.length);
+
+    if (hasLocationFilter && !usedGeoSearch) {
+      filteredResults = projects.filter((project: any) => {
+        const distance = project.distance || {};
+        const projectAddress = normalizeValue(distance.address);
+        const projectCountryCode = typeof distance.countryCode === "string" ? distance.countryCode : null;
+        const noBorders = Boolean(distance.noBorders);
+
+        // noBorders=true means "don't cross borders" (stay in same country)
+        // When noBorders is true, only show to customers in matching country
+        if (noBorders && customerCountryValue) {
+          const customerCountryUpper = customerCountryValue.toUpperCase();
+          // Prefer matching by countryCode, fallback to address matching
+          const countryMatches = projectCountryCode
+            ? projectCountryCode === customerCountryUpper
+            : projectAddress?.includes(customerCountryValue);
+          if (!countryMatches) {
+            return false;
+          }
+        }
+
+        if (!projectAddress) {
+          return false;
+        }
+
+        if (locationParts.length === 0) {
+          return false;
+        }
+
+        return locationParts.some((part) => projectAddress.includes(part));
+      });
+
+      if (locationValue) {
+        const exactMatches = filteredResults.filter((project: any) => {
+          const projectAddress = normalizeValue(project.distance?.address);
+          return projectAddress === locationValue;
+        });
+        const otherMatches = filteredResults.filter((project: any) => {
+          const projectAddress = normalizeValue(project.distance?.address);
+          return projectAddress !== locationValue;
+        });
+        filteredResults = [...exactMatches, ...otherMatches];
       }
     }
-    // Apply distance and border filtering if customer location is provided
-    let filteredProjects = projects;
-    if (customerLocation) {
-      console.log('📍 Applying distance and border filtering with customer location');
-      const projectsWithFiltering = await Promise.all(
-        filteredProjects.map(async (project: any) => {
-          try {
-            // Get professional's service location
-            const professionalLocation = await getProjectServiceLocation(
-              project,
-              project.professionalId
-            );
-            // Enhance location with country codes
-            const enhancedProfLocation = enhanceLocationInfo(professionalLocation);
-            const enhancedCustomerLocation = enhanceLocationInfo(customerLocation);
-            // Try to resolve coordinates if not available
-            if (!hasValidCoordinates(enhancedProfLocation)) {
-              const coords = await resolveCoordinates(enhancedProfLocation);
-              if (coords) {
-                enhancedProfLocation.coordinates = coords;
-              }
-            }
-            // Check distance filtering (only if both have coordinates)
-            let distanceOk = true;
-            let calculatedDistance: number | null = null;
-            const maxKmRange = project.distance?.maxKmRange || 50;
 
-            if (hasValidCoordinates(enhancedProfLocation) && hasValidCoordinates(enhancedCustomerLocation)) {
-              calculatedDistance = getDistanceBetweenLocations(
-                enhancedProfLocation,
-                enhancedCustomerLocation
-              );
+    const baseResults = filteredResults ?? projects;
+    const totalCount = filteredResults ? baseResults.length : total;
+    const finalResults = filteredResults ? baseResults.slice(skip, skip + limit) : baseResults;
 
-              if (calculatedDistance !== null && project.distance?.maxKmRange) {
-                // If distance is WAY too large (> 500km when max is < 100km), it suggests bad coordinates
-                // In this case, fall back to text-based location matching
-                const likelyBadCoordinates = calculatedDistance > 500 && maxKmRange < 100;
-
-                if (likelyBadCoordinates) {
-                  console.log(`⚠️ Project ${project.title}: Distance ${calculatedDistance}km seems unreasonable for max ${maxKmRange}km - using text fallback`);
-                  // Fall back to text-based validation (city/state/country matching)
-                  const textValidation = validateLocationByTextData(enhancedProfLocation, enhancedCustomerLocation, maxKmRange);
-                  distanceOk = textValidation.isValid;
-                  console.log(`📍 Text-based validation: ${distanceOk ? 'OK' : 'FILTERED'} - ${textValidation.reason || 'matched by location text'}`);
-                } else {
-                  distanceOk = calculatedDistance <= project.distance.maxKmRange;
-                  console.log(`📏 Project ${project.title}: ${calculatedDistance}km (max: ${project.distance.maxKmRange}km) - ${distanceOk ? 'OK' : 'FILTERED'}`);
-                }
-              }
-            } else {
-              // No valid coordinates - use text-based location matching as fallback
-              console.log(`⚠️ Project ${project.title}: Missing coordinates - using text-based fallback`);
-              const textValidation = validateLocationByTextData(enhancedProfLocation, enhancedCustomerLocation, maxKmRange);
-              distanceOk = textValidation.isValid;
-              console.log(`📍 Text-based validation: ${distanceOk ? 'OK' : 'FILTERED'} - ${textValidation.reason || 'matched by location text'}`);
-            }
-            // Check border filtering
-            let borderOk = true;
-            if (project.distance) {
-              borderOk = checkBorderCrossing(
-                enhancedProfLocation,
-                enhancedCustomerLocation,
-                project.distance.noBorders || false,
-                project.distance.borderLevel || 'country'
-              );
-              if (!borderOk) {
-                console.log(`🚫 Project ${project.title}: Border crossing not allowed`);
-              }
-            }
-            // Return project with filtering metadata
-            return {
-              project,
-              distanceOk,
-              borderOk,
-              calculatedDistance,
-              shouldInclude: distanceOk && borderOk
-            };
-          } catch (error) {
-            console.error('Error filtering project:', project._id, error);
-            // On error, include the project to avoid false negatives
-            return {
-              project,
-              distanceOk: true,
-              borderOk: true,
-              calculatedDistance: null,
-              shouldInclude: true
-            };
+    // Batch-load professionals for all published projects to avoid N+1 queries
+    const publishedProjects = finalResults.filter((p: any) => p?.status === "published");
+    const invalidProfessionalIds = new Set<string>();
+    const professionalIdSet = new Set(
+      publishedProjects
+        .map((p: any) => {
+          const raw = getRawProfessionalId(p);
+          const id = toObjectIdString(p.professionalId);
+          if (!id && raw) {
+            invalidProfessionalIds.add(String(raw));
           }
+          return id;
         })
-      );
-      // Filter out projects that don't meet criteria
-      const beforeFilterCount = projectsWithFiltering.length;
-      filteredProjects = projectsWithFiltering
-        .filter((item: any) => item.shouldInclude)
-        .map((item: any) => ({
-          ...item.project,
-          _calculatedDistance: item.calculatedDistance // Add for potential sorting
-        }));
-      const afterFilterCount = filteredProjects.length;
-      console.log(`✅ Distance/border filtering: ${beforeFilterCount} projects -> ${afterFilterCount} projects (filtered ${beforeFilterCount - afterFilterCount})`);
-    }
-    // Calculate first available date for each project in parallel
-    console.log('🗓️ Calculating first available dates for', filteredProjects.length, 'projects');
-    let projectsWithAvailability = await Promise.all(
-      filteredProjects.map(async (project: any) => {
+        .filter(Boolean)
+    );
+    const professionalIds = Array.from(professionalIdSet);
+
+    // Fetch all professionals in a single query
+    const professionalsData = professionalIds.length > 0
+      ? await User.find({ _id: { $in: professionalIds } })
+        .select(
+          "name email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
+        )
+        .lean()
+      : [];
+
+    // Create a lookup map for quick access
+    const professionalMap = new Map(
+      professionalsData.map((p: any) => [p._id.toString(), p])
+    );
+    const shouldLogAvailability = process.env.NODE_ENV !== "production";
+
+    const resultsWithAvailability = await Promise.all(
+      finalResults.map(async (project: any) => {
+        if (project?.status !== "published") {
+          return project;
+        }
+
         try {
-          const [calculatedPrepDate, scheduleSummary] = await Promise.all([
-            calculateFirstAvailableDate(project),
-            getScheduleProposalsForProject(project._id?.toString())
-          ]);
-          const resolvedFirstAvailableDate = scheduleSummary?.earliestProposal?.start || calculatedPrepDate;
+          // Get professional from pre-loaded map
+          const rawProfessionalId = getRawProfessionalId(project);
+          const profId = toObjectIdString(project.professionalId);
+          const professional = profId ? professionalMap.get(profId) : null;
+
+          if (!professional) {
+            if (shouldLogAvailability) {
+              console.warn("[SEARCH] Missing professional for availability", {
+                projectId: project?._id?.toString?.() || project?._id,
+                professionalId: rawProfessionalId,
+              });
+            }
+            return project;
+          }
+
+          const professionalSummary = {
+            _id: professional._id,
+            name: professional.name,
+            email: professional.email,
+            businessInfo: professional.businessInfo,
+            hourlyRate: professional.hourlyRate,
+            currency: professional.currency,
+            profileImage: professional.profileImage,
+          };
+
+          // Get main project availability - use first subproject
+          const hasMainDuration = project.executionDuration?.value;
+          const defaultSubprojectIndex = (!hasMainDuration && project.subprojects?.length > 0) ? 0 : undefined;
+          const proposals = await buildProjectScheduleProposalsWithData(
+            project,
+            professional,
+            defaultSubprojectIndex
+          );
+          if (!proposals && shouldLogAvailability) {
+            console.warn("[SEARCH] Missing main proposals", {
+              projectId: project?._id?.toString?.() || project?._id,
+              executionDuration: project?.executionDuration,
+              timeMode: project?.timeMode,
+              subprojectIndex: defaultSubprojectIndex ?? null,
+            });
+          }
+
+          // Get availability for each subproject (reuse pre-loaded professional)
+          const subprojectsWithAvailability = await Promise.all(
+            (project.subprojects || []).map(async (subproject: any, index: number) => {
+              try {
+                const subprojectProposals = await buildProjectScheduleProposalsWithData(
+                  project,
+                  professional,
+                  index
+                );
+                if (!subprojectProposals && shouldLogAvailability) {
+                  console.warn("[SEARCH] Missing subproject proposals", {
+                    projectId: project?._id?.toString?.() || project?._id,
+                    subprojectIndex: index,
+                    subprojectName: subproject?.name,
+                    executionDuration: subproject?.executionDuration,
+                  });
+                }
+                return {
+                  ...subproject,
+                  firstAvailableDate: subprojectProposals?.earliestBookableDate || null,
+                  firstAvailableWindow: subprojectProposals?.earliestProposal
+                    ? {
+                      start: subprojectProposals.earliestProposal.start,
+                      end: subprojectProposals.earliestProposal.executionEnd || subprojectProposals.earliestProposal.end,
+                    }
+                    : null,
+                  shortestThroughputWindow: subprojectProposals?.shortestThroughputProposal
+                    ? {
+                      start: subprojectProposals.shortestThroughputProposal.start,
+                      end: subprojectProposals.shortestThroughputProposal.executionEnd || subprojectProposals.shortestThroughputProposal.end,
+                    }
+                    : null,
+                };
+              } catch {
+                return subproject;
+              }
+            })
+          );
+
           return {
             ...project,
-            firstAvailableDate: resolvedFirstAvailableDate,
-            firstAvailableWindow: scheduleSummary?.earliestProposal || null,
-            shortestThroughputWindow: scheduleSummary?.shortestThroughputProposal || null,
+            professionalId: professionalSummary,
+            subprojects: subprojectsWithAvailability,
+            firstAvailableDate: proposals?.earliestBookableDate || null,
+            firstAvailableWindow: proposals?.earliestProposal
+              ? {
+                start: proposals.earliestProposal.start,
+                end: proposals.earliestProposal.executionEnd || proposals.earliestProposal.end,
+              }
+              : null,
+            shortestThroughputWindow: proposals?.shortestThroughputProposal
+              ? {
+                start: proposals.shortestThroughputProposal.start,
+                end: proposals.shortestThroughputProposal.executionEnd || proposals.shortestThroughputProposal.end,
+              }
+              : null,
           };
         } catch (error) {
-          console.error('Error calculating first available date for project:', project._id, error);
-          return {
-            ...project,
-            firstAvailableDate: null,
-            firstAvailableWindow: null,
-            shortestThroughputWindow: null,
-          };
+          console.error("Failed to build schedule proposals:", error);
+          return project;
         }
       })
     );
-    // Apply start date range filter
-    if (startDateFrom || startDateTo) {
-      console.log('🗓️ Applying start date range filter:', { startDateFrom, startDateTo });
-      projectsWithAvailability = projectsWithAvailability.filter((project: any) => {
-        if (!project.firstAvailableDate) return false;
-        const projectDate = new Date(project.firstAvailableDate);
-        if (startDateFrom && startDateTo) {
-          const fromDate = new Date(startDateFrom);
-          const toDate = new Date(startDateTo);
-          // Include projects where firstAvailableDate falls within range or is before the desired start date
-          return projectDate <= toDate;
-        } else if (startDateFrom) {
-          const fromDate = new Date(startDateFrom);
-          // Include projects where firstAvailableDate is on or before the desired start date
-          return projectDate <= fromDate;
-        } else if (startDateTo) {
-          const toDate = new Date(startDateTo);
-          // Include projects where firstAvailableDate is on or before the end date
-          return projectDate <= toDate;
-        }
-        return true;
+
+    if (shouldLogAvailability && invalidProfessionalIds.size > 0) {
+      console.warn("[SEARCH] Invalid professionalId values detected", {
+        count: invalidProfessionalIds.size,
+        ids: Array.from(invalidProfessionalIds).slice(0, 5),
       });
-      console.log('✅ After date filter:', projectsWithAvailability.length, 'projects remaining');
-    }
-    const facets = buildProjectFacets(projectsWithAvailability);
-    // Apply custom sorting if needed
-    let sortedProjects = projectsWithAvailability;
-    if (useCustomSort) {
-      sortedProjects = [...projectsWithAvailability];
-      if (sortBy === 'availability') {
-        console.log('dY", Applying availability sort...');
-        sortedProjects.sort((a: any, b: any) => {
-          const dateA = a.firstAvailableDate ? new Date(a.firstAvailableDate).getTime() : Infinity;
-          const dateB = b.firstAvailableDate ? new Date(b.firstAvailableDate).getTime() : Infinity;
-          return dateA - dateB;
-        });
-      } else if (sortBy === 'price_low' || sortBy === 'price_high') {
-        console.log('dY", Applying price sort...');
-        sortedProjects.sort((a: any, b: any) => {
-          const getPriceForSort = (project: any) => {
-            if (!project.subprojects || project.subprojects.length === 0) return Infinity;
-            const prices = project.subprojects
-              .map((sub: any) => {
-                if (sub.pricing?.type === 'fixed') return sub.pricing.amount || null;
-                if (sub.pricing?.type === 'unit' && sub.pricing.priceRange) return sub.pricing.priceRange.min || null;
-                return null;
-              })
-              .filter((price: number) => price !== null);
-            if (prices.length === 0) return Infinity;
-            return Math.min(...prices);
-          };
-          const priceA = getPriceForSort(a);
-          const priceB = getPriceForSort(b);
-          // Projects without prices go to the end
-          if (priceA === Infinity && priceB === Infinity) return 0;
-          if (priceA === Infinity) return 1;
-          if (priceB === Infinity) return -1;
-          // Sort ascending or descending based on sortBy
-          if (sortBy === 'price_low') {
-            return priceA - priceB;
-          } else {
-            return priceB - priceA;
-          }
-        });
-      }
-    }
-    // If location or geographicArea filter is present, prioritize by professional's location but show all results
-    let results = sortedProjects;
-    const locationFilter = geographicArea || location;
-    if (locationFilter && locationFilter.trim()) {
-      const locationLower = locationFilter.toLowerCase();
-      // Prioritize projects where professional's location matches
-      const matchingLocation = sortedProjects.filter((p: any) => {
-        const prof = p.professionalId;
-        if (!prof || !prof.businessInfo) return false;
-        const city = prof.businessInfo.city?.toLowerCase() || "";
-        const country = prof.businessInfo.country?.toLowerCase() || "";
-        const postalCode = prof.businessInfo.postalCode?.toLowerCase() || "";
-        const region = prof.businessInfo.region?.toLowerCase() || "";
-        return city.includes(locationLower) ||
-               country.includes(locationLower) ||
-               postalCode.includes(locationLower) ||
-               region.includes(locationLower);
-      });
-      const otherProjects = sortedProjects.filter((p: any) => {
-        const prof = p.professionalId;
-        if (!prof || !prof.businessInfo) return true; // Include if no location info
-        const city = prof.businessInfo.city?.toLowerCase() || "";
-        const country = prof.businessInfo.country?.toLowerCase() || "";
-        const postalCode = prof.businessInfo.postalCode?.toLowerCase() || "";
-        const region = prof.businessInfo.region?.toLowerCase() || "";
-        return !city.includes(locationLower) &&
-               !country.includes(locationLower) &&
-               !postalCode.includes(locationLower) &&
-               !region.includes(locationLower);
-      });
-      // Show location matches first, then all others
-      results = [...matchingLocation, ...otherProjects];
-      console.log('📍 Location prioritization:', matchingLocation.length, 'matching location,', otherProjects.length, 'other locations');
     }
     const totalResults = results.length;
     const safeStartIndex = Math.min(skip, Math.max(totalResults - pageSize, 0));
     const paginatedResults = results.slice(safeStartIndex, safeStartIndex + pageSize);
     const currentPage = Math.floor(safeStartIndex / pageSize) + 1;
     res.json({
-      results: paginatedResults,
+      results: resultsWithAvailability,
       pagination: {
-        total: totalResults,
-        page: currentPage,
-        limit: pageSize,
-        totalPages: Math.ceil(totalResults / pageSize),
+        total: totalCount,
+        page: Math.ceil(skip / limit) + 1,
+        limit,
+        totalPages: Math.ceil(totalCount / limit),
       },
       facets,
     });

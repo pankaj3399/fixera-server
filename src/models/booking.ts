@@ -109,13 +109,27 @@ export interface IBooking extends Document {
 
   // Scheduling
   scheduledStartDate?: Date;
-  scheduledEndDate?: Date;
   scheduledExecutionEndDate?: Date;
+  scheduledBufferStartDate?: Date;
+  scheduledBufferEndDate?: Date;
+  scheduledBufferUnit?: "hours" | "days";
+  scheduledStartTime?: string;
+  scheduledEndTime?: string;
   actualStartDate?: Date;
   actualEndDate?: Date;
 
   // Team members (for project bookings)
   assignedTeamMembers?: Types.ObjectId[]; // References to User (employees)
+
+  customerBlocks?: {
+    dates?: { date: Date; reason?: string }[];
+    windows?: {
+      date: Date;
+      startTime: string;
+      endTime: string;
+      reason?: string;
+    }[];
+  };
 
   // Communication
   messages?: {
@@ -169,6 +183,8 @@ export interface IBooking extends Document {
   createdAt: Date;
   updatedAt: Date;
 }
+
+const TIME_24H_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const BookingSchema = new Schema({
   // Core references
@@ -412,8 +428,20 @@ const BookingSchema = new Schema({
 
   // Scheduling
   scheduledStartDate: { type: Date },
-  scheduledEndDate: { type: Date },
   scheduledExecutionEndDate: { type: Date },
+  scheduledBufferStartDate: { type: Date },
+  scheduledBufferEndDate: { type: Date },
+  scheduledBufferUnit: { type: String, enum: ["hours", "days"] },
+  scheduledStartTime: {
+    type: String,
+    trim: true,
+    match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
+  },
+  scheduledEndTime: {
+    type: String,
+    trim: true,
+    match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
+  },
   actualStartDate: { type: Date },
   actualEndDate: { type: Date },
 
@@ -528,6 +556,29 @@ const BookingSchema = new Schema({
     answer: { type: String, required: true, maxlength: 1000 }
   }],
 
+  customerBlocks: {
+    dates: [{
+      date: { type: Date, required: true },
+      reason: { type: String, maxlength: 200 }
+    }],
+    windows: [{
+      date: { type: Date, required: true },
+      startTime: {
+        type: String,
+        required: true,
+        trim: true,
+        match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
+      },
+      endTime: {
+        type: String,
+        required: true,
+        trim: true,
+        match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
+      },
+      reason: { type: String, maxlength: 200 }
+    }]
+  },
+
   // Metadata
   bookingNumber: {
     type: String,
@@ -544,16 +595,79 @@ const BookingSchema = new Schema({
 
 // Indexes for efficient queries
 BookingSchema.index({ customer: 1, status: 1 });
-BookingSchema.index({ professional: 1, status: 1 });
 BookingSchema.index({ project: 1, status: 1 });
+BookingSchema.index({ project: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ bookingType: 1, status: 1 });
 BookingSchema.index({ 'location.coordinates': '2dsphere' }); // Geospatial queries
 BookingSchema.index({ createdAt: -1 }); // Sort by creation date
 BookingSchema.index({ scheduledStartDate: 1 }); // Upcoming bookings
+BookingSchema.index({ scheduledBufferEndDate: 1 });
+BookingSchema.index({ assignedTeamMembers: 1 });
+// Compound index for schedule engine blocked data queries
+BookingSchema.index({ assignedTeamMembers: 1, status: 1, scheduledStartDate: 1 });
+BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 
-// Pre-save middleware to generate booking number
+// Helper to parse HH:mm to minutes for comparison
+const parseTimeToMinutes = (time: string): number => {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+// Pre-save middleware to generate booking number and validate scheduling fields
 BookingSchema.pre('save', async function(next) {
+  // Cross-field validation for scheduling times
+  if (this.scheduledStartTime && this.scheduledEndTime) {
+    const startMinutes = parseTimeToMinutes(this.scheduledStartTime);
+    const endMinutes = parseTimeToMinutes(this.scheduledEndTime);
+    if (startMinutes >= endMinutes) {
+      return next(new Error('scheduledStartTime must be before scheduledEndTime'));
+    }
+  }
+
+  // Cross-field validation for buffer dates
+  // Allow equal dates (represents 0 buffer duration when no buffer is configured)
+  if (this.scheduledBufferStartDate && this.scheduledBufferEndDate) {
+    if (this.scheduledBufferStartDate > this.scheduledBufferEndDate) {
+      return next(new Error('scheduledBufferStartDate must be at or before scheduledBufferEndDate'));
+    }
+  }
+
+  // Buffer alignment validation with execution dates
+  // Buffer should start at or after execution end
+  if (this.scheduledBufferStartDate && this.scheduledExecutionEndDate) {
+    if (this.scheduledBufferStartDate < this.scheduledExecutionEndDate) {
+      return next(new Error('scheduledBufferStartDate must be at or after scheduledExecutionEndDate'));
+    }
+  }
+
+  // Execution end should be at or before buffer end (if both exist)
+  if (this.scheduledExecutionEndDate && this.scheduledBufferEndDate) {
+    if (this.scheduledExecutionEndDate > this.scheduledBufferEndDate) {
+      return next(new Error('scheduledExecutionEndDate must be at or before scheduledBufferEndDate'));
+    }
+  }
+
+  // Scheduled start date should be before execution end date
+  if (this.scheduledStartDate && this.scheduledExecutionEndDate) {
+    if (this.scheduledStartDate >= this.scheduledExecutionEndDate) {
+      return next(new Error('scheduledStartDate must be before scheduledExecutionEndDate'));
+    }
+  }
+
+  // Validate customerBlocks time windows
+  if (this.customerBlocks?.windows) {
+    for (const window of this.customerBlocks.windows) {
+      if (window.startTime && window.endTime) {
+        const startMinutes = parseTimeToMinutes(window.startTime);
+        const endMinutes = parseTimeToMinutes(window.endTime);
+        if (startMinutes >= endMinutes) {
+          return next(new Error('customerBlocks window startTime must be before endTime'));
+        }
+      }
+    }
+  }
+
   if (this.isNew && !this.bookingNumber) {
     const year = new Date().getFullYear();
     const count = await model('Booking').countDocuments();

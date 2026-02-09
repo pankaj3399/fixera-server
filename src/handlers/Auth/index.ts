@@ -8,6 +8,7 @@ import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRange
 import { generateOTP, sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail } from "../../utils/emailService";
 import twilio from 'twilio';
 import mongoose from "mongoose";
+import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 
 // Helper function to set secure cookie
 const setTokenCookie = (res: Response, token: string) => {
@@ -215,6 +216,11 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     setTokenCookie(res, token);
 
     // Prepare user response (remove password)
+    let bookingBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+    if (user.role === "professional" || user.role === "employee") {
+      bookingBlockedRanges = await buildBookingBlockedRanges(user._id as mongoose.Types.ObjectId);
+    }
+
     const userResponse = {
       _id: user._id,
       name: user.name,
@@ -237,9 +243,9 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       hourlyRate: user.hourlyRate,
       currency: user.currency,
       serviceCategories: user.serviceCategories,
-      availability: user.availability,
       blockedDates: user.blockedDates,
-      blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
+      blockedRanges: user.blockedRanges,
+      bookingBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,
@@ -420,6 +426,12 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       return res.status(200).json({ success: true, authenticated: false, user: null });
     }
 
+    // Build booking blocked ranges for professionals/employees
+    let bookingBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+    if (user.role === "professional" || user.role === "employee") {
+      bookingBlockedRanges = await buildBookingBlockedRanges(user._id as mongoose.Types.ObjectId);
+    }
+
     const userResponse = {
       _id: user._id,
       name: user.name,
@@ -442,12 +454,12 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       hourlyRate: user.hourlyRate,
       currency: user.currency,
       serviceCategories: user.serviceCategories,
-      availability: user.availability,
       blockedDates: user.blockedDates,
       blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
       companyAvailability: user.companyAvailability,
       companyBlockedDates: user.companyBlockedDates,
       companyBlockedRanges: user.companyBlockedRanges,
+      bookingBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,

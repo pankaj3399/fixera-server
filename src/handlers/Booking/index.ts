@@ -3,19 +3,10 @@ import Booking, { IBooking, BookingStatus } from "../../models/booking";
 import User, { IUser } from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
-import { addWorkingDays, getEarliestBookableDate } from "../Project/scheduling";
 import {
-  getDistanceBetweenLocations,
-  checkBorderCrossing,
-  hasValidCoordinates,
-  validateLocationByTextData
-} from "../../utils/geolocation";
-import {
-  extractLocationFromUserLocation,
-  getProjectServiceLocation,
-  enhanceLocationInfo,
-  resolveCoordinates
-} from "../../utils/geocoding";
+  buildProjectScheduleWindow,
+  validateProjectScheduleSelection,
+} from "../../utils/scheduleEngine";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -28,10 +19,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       rfqData, // Service type, description, answers, budget, etc.
       preferredStartDate,
       preferredStartTime,
-      urgency,
-      selectedExtraOptions,
       selectedSubprojectIndex,
-      estimatedUsage
+      urgency,
+      customerBlocks
     } = req.body;
     const resolvedPreferredStartDate = preferredStartDate || rfqData?.preferredStartDate;
     const resolvedPreferredStartTime = preferredStartTime || rfqData?.preferredStartTime;
@@ -268,336 +258,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    // Validate professional or project exists
-    if (bookingType === 'professional') {
-      const professional = await User.findById(professionalId);
-      if (!professional || professional.role !== 'professional') {
-        return res.status(404).json({
-          success: false,
-          msg: "Professional not found"
-        });
-      }
-
-      if (professional.professionalStatus !== 'approved') {
-        return res.status(400).json({
-          success: false,
-          msg: "Professional is not approved to accept bookings"
-        });
-      }
-      } else {
-        const project = await Project.findById(projectId);
-        if (!project) {
-          return res.status(404).json({
-            success: false,
-            msg: "Project not found"
-          });
-        }
-
-        if (project.status !== 'published') {
-          return res.status(400).json({
-            success: false,
-            msg: "Project is not available for booking"
-          });
-        }
-
-        // Validate distance: check if customer is within project's service range
-        if (project.distance && project.distance.maxKmRange) {
-          try {
-            // Get customer location
-            const customerLocation = extractLocationFromUserLocation(customer.location);
-            const enhancedCustomerLocation = enhanceLocationInfo(customerLocation);
-
-            // Get project service location
-            const professional = await User.findById(project.professionalId);
-            let projectLocation = await getProjectServiceLocation(project, professional);
-            let enhancedProjectLocation = enhanceLocationInfo(projectLocation);
-
-            // Try to resolve coordinates if not available
-            if (!hasValidCoordinates(enhancedProjectLocation)) {
-              const coords = await resolveCoordinates(enhancedProjectLocation);
-              if (coords) {
-                enhancedProjectLocation.coordinates = coords;
-              }
-            }
-
-            // Check if both locations have valid coordinates
-            if (hasValidCoordinates(enhancedProjectLocation) && hasValidCoordinates(enhancedCustomerLocation)) {
-              // Calculate distance
-              const distance = getDistanceBetweenLocations(
-                enhancedProjectLocation,
-                enhancedCustomerLocation
-              );
-
-              if (distance !== null) {
-                // Check distance against maximum range
-                if (distance > project.distance.maxKmRange) {
-                  return res.status(403).json({
-                    success: false,
-                    msg: `This service is only available within ${project.distance.maxKmRange}km. You are approximately ${Math.round(distance)}km away from the service area.`
-                  });
-                }
-
-                // Check border crossing restrictions
-                const borderOk = checkBorderCrossing(
-                  enhancedProjectLocation,
-                  enhancedCustomerLocation,
-                  project.distance.noBorders || false,
-                  project.distance.borderLevel || 'country'
-                );
-
-                if (!borderOk) {
-                  const borderLevel = project.distance.borderLevel || 'country';
-                  return res.status(403).json({
-                    success: false,
-                    msg: `This service does not operate across ${borderLevel} borders. Your location is outside the allowed service area.`
-                  });
-                }
-
-                console.log(`✅ Distance validation passed: ${Math.round(distance)}km (max: ${project.distance.maxKmRange}km)`);
-              } else {
-                console.warn('⚠️ Could not calculate distance between locations');
-              }
-            } else {
-              console.warn('⚠️ Missing coordinates for distance validation:', {
-                projectHasCoords: hasValidCoordinates(enhancedProjectLocation),
-                customerHasCoords: hasValidCoordinates(enhancedCustomerLocation)
-              });
-
-              // Fallback to text-based location validation (city, state, country)
-              console.log('ℹ️ Using text-based location validation as fallback');
-              console.log('Project location:', {
-                city: enhancedProjectLocation.city,
-                state: enhancedProjectLocation.state || enhancedProjectLocation.province,
-                country: enhancedProjectLocation.country
-              });
-              console.log('Customer location:', {
-                city: enhancedCustomerLocation.city,
-                state: enhancedCustomerLocation.state || enhancedCustomerLocation.province,
-                country: enhancedCustomerLocation.country
-              });
-
-              const textValidation = validateLocationByTextData(
-                enhancedProjectLocation,
-                enhancedCustomerLocation,
-                project.distance.maxKmRange
-              );
-
-              if (!textValidation.isValid) {
-                console.log('❌ Text-based location validation failed:', textValidation.reason);
-                return res.status(403).json({
-                  success: false,
-                  msg: textValidation.reason || "This service is not available in your area."
-                });
-              }
-
-              console.log('✅ Text-based location validation passed');
-            }
-          } catch (error) {
-            console.error('Error validating distance:', error);
-            // Continue with booking - don't block on validation errors for backward compatibility
-            // but log the error for investigation
-          }
-        }
-
-        // Validate that preferred start date is not earlier than the earliest bookable date
-        // This accounts for preparation time, blocked dates, and existing bookings
-        const preferredStart = resolvedPreferredStartDate;
-        if (preferredStart) {
-          try {
-            const options = typeof selectedSubprojectIndex === 'number'
-              ? { subprojectIndex: selectedSubprojectIndex }
-              : undefined;
-
-            const earliestBookable = await getEarliestBookableDate(project, options);
-            const preferred = new Date(preferredStart);
-
-            // Compare dates only (not timestamps) by normalizing to start of day
-            const earliestBookableDate = new Date(earliestBookable.getFullYear(), earliestBookable.getMonth(), earliestBookable.getDate());
-            const preferredDate = new Date(preferred.getFullYear(), preferred.getMonth(), preferred.getDate());
-
-            console.log(`[BOOKING VALIDATION] Earliest bookable date: ${earliestBookableDate.toISOString().split('T')[0]}`);
-            console.log(`[BOOKING VALIDATION] User requested: ${preferredDate.toISOString().split('T')[0]}`);
-
-            if (preferredDate < earliestBookableDate) {
-              return res.status(400).json({
-                success: false,
-                msg: `Selected start date is earlier than available. Earliest available date is ${earliestBookableDate.toISOString().split('T')[0]}.`,
-              });
-            }
-          } catch (validationError) {
-            console.error('[BOOKING VALIDATION] Error checking earliest bookable date:', validationError);
-            // Continue with booking - don't block on validation errors
-          }
-        }
-
-        // Validate selected extra options if provided
-        if (selectedExtraOptions && Array.isArray(selectedExtraOptions)) {
-          if (selectedExtraOptions.length > 0) {
-            // Verify all selected option indices are valid
-            const maxIndex = project.extraOptions?.length || 0;
-            const invalidOptions = selectedExtraOptions.filter(
-              (idx: number) => typeof idx !== 'number' || idx < 0 || idx >= maxIndex
-            );
-
-            if (invalidOptions.length > 0) {
-              return res.status(400).json({
-                success: false,
-                msg: "Invalid extra option selection. Some selected options do not exist.",
-              });
-            }
-          }
-        }
-
-        projectDoc = project;
-        projectResourceIds = Array.isArray((project as any).resources)
-          ? (project as any).resources.map((r: any) => r.toString())
-          : [];
-        if (!projectResourceIds.length && (project as any).professionalId) {
-          projectResourceIds.push((project as any).professionalId.toString());
-        }
-        if (projectResourceIds.length) {
-          projectTeamMembers = await User.find({ _id: { $in: projectResourceIds } });
-        }
-      }
-
-    let scheduledStartDateTime: Date | null = null;
-    if (resolvedPreferredStartDate) {
-      scheduledStartDateTime = new Date(resolvedPreferredStartDate);
-      if (resolvedPreferredStartTime) {
-        const [hours, minutes] = resolvedPreferredStartTime.split(':').map(Number);
-        if (!Number.isNaN(hours) && !Number.isNaN(minutes)) {
-          scheduledStartDateTime.setHours(hours, minutes, 0, 0);
-        }
-      }
-    }
-
-    let schedulePlan: Awaited<ReturnType<typeof computeSchedulePlan>> | null = null;
-    if (bookingType === 'project' && projectDoc && scheduledStartDateTime) {
-      schedulePlan = await computeSchedulePlan(
-        projectDoc,
-        typeof selectedSubprojectIndex === 'number' ? selectedSubprojectIndex : null,
-        new Date(scheduledStartDateTime),
-        projectTeamMembers
-      );
-    }
-
-    // For project bookings, check if date/time is available before creating booking
-    if (bookingType === 'project' && projectId && resolvedPreferredStartDate && projectDoc) {
-      let requestedInterval: { start: Date; end: Date } | null = null;
-
-      if (schedulePlan) {
-        requestedInterval = {
-          start: schedulePlan.scheduleStart,
-          end: schedulePlan.scheduleEnd
-        };
-      } else {
-        const fallbackStart = new Date(resolvedPreferredStartDate);
-        if (resolvedPreferredStartTime) {
-          const [hours, minutes] = resolvedPreferredStartTime.split(':').map(Number);
-          if (!Number.isNaN(hours) && !Number.isNaN(minutes)) {
-            fallbackStart.setHours(hours, minutes, 0, 0);
-          }
-        }
-
-        let executionHours = 0;
-        if (typeof selectedSubprojectIndex === 'number' && projectDoc.subprojects?.[selectedSubprojectIndex]) {
-          const subproject = projectDoc.subprojects[selectedSubprojectIndex];
-          executionHours =
-            subproject.executionDuration?.unit === 'hours'
-              ? subproject.executionDuration.value || 0
-              : (subproject.executionDuration?.value || 0) * 24;
-        } else if (projectDoc.executionDuration) {
-          executionHours =
-            projectDoc.executionDuration.unit === 'hours'
-              ? projectDoc.executionDuration.value || 0
-              : (projectDoc.executionDuration.value || 0) * 24;
-        }
-
-        if (projectDoc.timeMode === 'hours' && executionHours > 0) {
-          const fallbackEnd = new Date(fallbackStart);
-          fallbackEnd.setHours(fallbackEnd.getHours() + executionHours);
-          requestedInterval = { start: fallbackStart, end: fallbackEnd };
-        } else if (projectDoc.timeMode === 'days' && executionHours > 0) {
-          const executionDays = Math.ceil(executionHours / 24);
-          if (executionDays > 0) {
-            let fallbackEnd: Date;
-            if (projectTeamMembers.length > 0) {
-              fallbackEnd = await addWorkingDays(fallbackStart, executionDays, projectTeamMembers);
-            } else {
-              fallbackEnd = new Date(fallbackStart);
-              fallbackEnd.setDate(fallbackEnd.getDate() + executionDays);
-            }
-            requestedInterval = { start: fallbackStart, end: fallbackEnd };
-          }
-        }
-      }
-
-      if (requestedInterval) {
-        console.log('[BOOKING VALIDATION] Checking for conflicts:', {
-          requestedStart: requestedInterval.start.toISOString(),
-          requestedEnd: requestedInterval.end.toISOString()
-        });
-
-        const existingBookingsQuery: any = {
-          project: projectId,
-          status: { $in: ['rfq', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'] },
-          $or: []
-        };
-
-        const dayStart = new Date(requestedInterval.start);
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(dayStart);
-        dayEnd.setDate(dayEnd.getDate() + 1);
-
-        existingBookingsQuery.$or.push({ scheduledStartDate: { $gte: dayStart, $lt: dayEnd } });
-        existingBookingsQuery.$or.push({ 'rfqData.preferredStartDate': { $gte: dayStart, $lt: dayEnd } });
-
-        const existingBookings = await Booking.find(existingBookingsQuery).select(
-          'rfqData selectedSubprojectIndex scheduledStartDate scheduledEndDate'
-        );
-
-        console.log(`[BOOKING VALIDATION] Found ${existingBookings.length} existing bookings on this date`);
-
-        for (const booking of existingBookings) {
-          const existingInterval = await getBookingInterval(booking, projectDoc, projectTeamMembers);
-          if (!existingInterval) continue;
-
-          console.log('[BOOKING VALIDATION] Checking overlap with existing booking:', {
-            existingStart: existingInterval.start.toISOString(),
-            existingEnd: existingInterval.end.toISOString()
-          });
-
-          if (requestedInterval.start < existingInterval.end && requestedInterval.end > existingInterval.start) {
-            console.log('[BOOKING VALIDATION] CONFLICT DETECTED! Time slot already booked');
-            return res.status(400).json({
-              success: false,
-              msg: 'This time slot is already booked. Please choose a different time or date.'
-            });
-          }
-        }
-
-        console.log('[BOOKING VALIDATION] No conflicts found, time slot is available');
-      }
-    }
-
-    // Prepare selected extra options with full details for storage
-    let extraOptionsWithDetails: any[] = [];
-    if (bookingType === 'project' && selectedExtraOptions && Array.isArray(selectedExtraOptions) && selectedExtraOptions.length > 0) {
-      const project = await Project.findById(projectId);
-      if (project && project.extraOptions) {
-        extraOptionsWithDetails = selectedExtraOptions.map((idx: number) => {
-          const option = project.extraOptions[idx];
-          return {
-            index: idx,
-            name: option.name,
-            description: option.description,
-            price: option.price
-          };
-        });
-      }
-    }
-
-    // Create booking
+    // Create booking payload (base fields)
     const bookingData: any = {
       customer: userId,
       bookingType,
@@ -622,27 +283,160 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     };
 
-    if (bookingType === 'professional') {
-      bookingData.professional = professionalId;
-    } else {
-      bookingData.project = projectId;
-      if (scheduledStartDateTime) {
-        bookingData.scheduledStartDate = new Date(scheduledStartDateTime);
-      }
-      if (typeof selectedSubprojectIndex === 'number') {
-        bookingData.selectedSubprojectIndex = selectedSubprojectIndex;
-      }
-      if (estimatedUsage) {
-        bookingData.estimatedUsage = estimatedUsage;
-      }
-      if (extraOptionsWithDetails.length > 0) {
-        bookingData.selectedExtraOptions = extraOptionsWithDetails;
-      }
+    if (customerBlocks) {
+      bookingData.customerBlocks = customerBlocks;
     }
 
-    if (schedulePlan && bookingType === 'project') {
-      bookingData.scheduledEndDate = schedulePlan.bufferEnd;
-      bookingData.scheduledExecutionEndDate = schedulePlan.scheduleEnd;
+    // Validate professional or project exists
+    if (bookingType === 'professional') {
+      const professional = await User.findById(professionalId);
+      if (!professional || professional.role !== 'professional') {
+        return res.status(404).json({
+          success: false,
+          msg: "Professional not found"
+        });
+      }
+
+      if (professional.professionalStatus !== 'approved') {
+        return res.status(400).json({
+          success: false,
+          msg: "Professional is not approved to accept bookings"
+        });
+      }
+
+      bookingData.professional = professionalId;
+    } else {
+      const project = await Project.findById(projectId);
+      if (!project) {
+        return res.status(404).json({
+          success: false,
+          msg: "Project not found"
+        });
+      }
+
+      if (project.status !== 'published') {
+        return res.status(400).json({
+          success: false,
+          msg: "Project is not available for booking"
+        });
+      }
+
+      bookingData.project = projectId;
+      bookingData.professional = project.professionalId;
+
+      let fallbackTeamMembers: mongoose.Types.ObjectId[] | null = null;
+      // Validate and normalize resource IDs, filtering out invalid entries and duplicates
+      if (project.resources && Array.isArray(project.resources) && project.resources.length > 0) {
+        const seenIds = new Set<string>();
+        const validTeamMembers: mongoose.Types.ObjectId[] = [];
+
+        for (const id of project.resources) {
+          // Skip null/undefined values
+          if (id == null) continue;
+
+          // Convert to string for validation and deduplication
+          const idStr = typeof id === 'string' ? id : String(id);
+
+          // Validate the ID format
+          if (!mongoose.isValidObjectId(idStr)) continue;
+
+          // Skip duplicates
+          if (seenIds.has(idStr)) continue;
+
+          seenIds.add(idStr);
+          validTeamMembers.push(new mongoose.Types.ObjectId(idStr));
+        }
+
+        if (validTeamMembers.length > 0) {
+          fallbackTeamMembers = validTeamMembers;
+        }
+      }
+
+      const rawStartDate =
+        preferredStartDate || rfqData?.preferredStartDate || undefined;
+      const rawStartTime =
+        preferredStartTime || rfqData?.preferredStartTime || undefined;
+      const normalizedStartDate =
+        typeof rawStartDate === "string"
+          ? /^\d{4}-\d{2}-\d{2}$/.test(rawStartDate)
+            ? rawStartDate
+            : (() => {
+                const parsed = new Date(rawStartDate);
+                if (Number.isNaN(parsed.getTime())) return rawStartDate;
+                return parsed.toISOString().slice(0, 10);
+              })()
+          : undefined;
+
+      const parsedSubprojectIndex =
+        typeof selectedSubprojectIndex === "number"
+          ? selectedSubprojectIndex
+          : typeof selectedSubprojectIndex === "string"
+          ? Number.parseInt(selectedSubprojectIndex, 10)
+          : undefined;
+      const subprojectIndex =
+        typeof parsedSubprojectIndex === "number" &&
+        !Number.isNaN(parsedSubprojectIndex)
+          ? parsedSubprojectIndex
+          : undefined;
+
+      const validation = await validateProjectScheduleSelection({
+        projectId,
+        subprojectIndex,
+        startDate: normalizedStartDate,
+        startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+        customerBlocks,
+      });
+
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          msg: validation.reason || "Selected schedule is not available",
+        });
+      }
+
+      if (normalizedStartDate) {
+        const window = await buildProjectScheduleWindow({
+          projectId,
+          subprojectIndex,
+          startDate: normalizedStartDate,
+          startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+          customerBlocks,
+        });
+
+        if (!window) {
+          return res.status(400).json({
+            success: false,
+            msg: "Unable to schedule the selected window",
+          });
+        }
+
+        bookingData.scheduledStartDate = window.scheduledStartDate;
+        if (window.scheduledExecutionEndDate) {
+          bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
+        }
+        if (window.scheduledBufferStartDate) {
+          bookingData.scheduledBufferStartDate = window.scheduledBufferStartDate;
+        }
+        if (window.scheduledBufferEndDate) {
+          bookingData.scheduledBufferEndDate = window.scheduledBufferEndDate;
+        }
+        if (window.scheduledBufferUnit) {
+          bookingData.scheduledBufferUnit = window.scheduledBufferUnit;
+        }
+        if (window.scheduledStartTime) {
+          bookingData.scheduledStartTime = window.scheduledStartTime;
+        }
+        if (window.scheduledEndTime) {
+          bookingData.scheduledEndTime = window.scheduledEndTime;
+        }
+        if (window.assignedTeamMembers && window.assignedTeamMembers.length > 0) {
+          bookingData.assignedTeamMembers = window.assignedTeamMembers;
+        }
+      }
+
+      if (!bookingData.assignedTeamMembers && fallbackTeamMembers) {
+        bookingData.assignedTeamMembers = fallbackTeamMembers;
+      }
     }
 
     const booking = await Booking.create(bookingData);
@@ -726,7 +520,14 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     if (user.role === 'customer') {
       query.customer = userId;
     } else if (user.role === 'professional') {
-      query.professional = userId;
+      const projectIds = await Project.find({
+        professionalId: userId,
+      }).select("_id");
+      const projectIdList = projectIds.map((project) => project._id);
+      query.$or = [
+        { professional: userId },
+        { project: { $in: projectIdList } },
+      ];
     } else {
       return res.status(403).json({
         success: false,
@@ -773,6 +574,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
 export const getBookingById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
+    const userIdString = userId ? userId.toString() : '';
     const { bookingId } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(bookingId)) {
@@ -784,7 +586,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email businessInfo hourlyRate availability')
+      .populate('professional', 'name email businessInfo hourlyRate')
       .populate('project', 'title description pricing category service team postBookingQuestions')
       .populate('assignedTeamMembers', 'name email');
 
@@ -796,9 +598,8 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     }
 
     // Check authorization - only customer or professional can view
-    const userIdStr = userId?.toString();
-    const isCustomer = booking.customer._id.toString() === userIdStr;
-    const isProfessional = booking.professional?._id.toString() === userIdStr;
+    const isCustomer = booking.customer._id.toString() === userIdString;
+    const isProfessional = booking.professional?._id.toString() === userIdString;
 
     if (!isCustomer && !isProfessional) {
       return res.status(403).json({
@@ -814,6 +615,117 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
   } catch (error: any) {
     console.error('Get booking error:', error);
+    next(error);
+  }
+};
+
+export const submitPostBookingAnswers = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const userId = req.user?._id;
+    const userIdString = userId ? userId.toString() : '';
+    const { bookingId } = req.params;
+    const { answers } = req.body as {
+      answers?: Array<{ questionId?: string; question?: string; answer?: string }>;
+    };
+
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid booking ID",
+      });
+    }
+
+    if (!Array.isArray(answers)) {
+      return res.status(400).json({
+        success: false,
+        msg: "Answers are required",
+      });
+    }
+
+    const booking = await Booking.findById(bookingId).populate(
+      "project",
+      "postBookingQuestions"
+    );
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        msg: "Booking not found",
+      });
+    }
+
+    if (booking.customer.toString() !== userIdString) {
+      return res.status(403).json({
+        success: false,
+        msg: "You do not have permission to submit answers for this booking",
+      });
+    }
+
+    if ((booking.postBookingData?.length || 0) > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "Post-booking answers already submitted",
+      });
+    }
+
+    const project = booking.project as any;
+    const postBookingQuestions = project?.postBookingQuestions || [];
+    if (postBookingQuestions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "No post-booking questions available for this booking",
+      });
+    }
+
+    const normalizedAnswers = answers.map((answer) => ({
+      questionId: answer.questionId || "",
+      question: answer.question || "",
+      answer: (answer.answer || "").trim(),
+    }));
+
+    const hasMissingRequired = postBookingQuestions.some((question: any) => {
+      if (!question?.isRequired) {
+        return false;
+      }
+
+      const questionId = question._id?.toString() || question.id;
+      const matched = normalizedAnswers.find((answer) => {
+        if (questionId && answer.questionId === questionId) {
+          return true;
+        }
+        if (question?.question && answer.question === question.question) {
+          return true;
+        }
+        return false;
+      });
+
+      return !matched || !matched.answer;
+    });
+
+    if (hasMissingRequired) {
+      return res.status(400).json({
+        success: false,
+        msg: "Please answer all required questions",
+      });
+    }
+
+    booking.postBookingData = normalizedAnswers.filter(
+      (answer) => answer.answer
+    ) as any;
+
+    await booking.save();
+
+    return res.status(200).json({
+      success: true,
+      msg: "Post-booking answers submitted successfully",
+      postBookingData: booking.postBookingData,
+    });
+  } catch (error: any) {
+    console.error("Submit post-booking answers error:", error);
     next(error);
   }
 };

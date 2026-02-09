@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import Meeting from '../../models/meeting';
 import User from '../../models/user';
 import Project from '../../models/project';
-import { normalizeBlockedRangesForShortBookings } from "../../utils/blockedRanges";
+import { buildBookingBlockedRanges } from '../../utils/bookingBlocks';
 
 /**
  * Get employees' availability for a specific date range
@@ -58,8 +58,8 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
             status: { $in: ['scheduled', 'rescheduled'] }
         }).select('scheduledDate startTime endTime attendees duration');
 
-        // Build availability data for each employee
-        const availabilityData = employees.map(member => {
+        // Build availability data for each employee (including booking-blocked ranges)
+        const availabilityData = await Promise.all(employees.map(async (member) => {
             const memberMeetings = existingMeetings.filter(meeting =>
                 meeting.attendees.some(attendee => attendee.userId === String(member._id))
             );
@@ -79,6 +79,15 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
                 return rangeStart <= end && rangeEnd >= start;
             }) || [];
 
+            // Get booking-blocked ranges (when employee is assigned to active bookings)
+            const memberId = String(member._id);
+            const allBookingBlockedRanges = await buildBookingBlockedRanges(memberId);
+            const bookingBlockedRangesInRange = allBookingBlockedRanges.filter(range => {
+                const rangeStart = new Date(range.startDate);
+                const rangeEnd = new Date(range.endDate);
+                return rangeStart <= end && rangeEnd >= start;
+            });
+
             return {
                 userId: member._id,
                 name: member.name,
@@ -86,6 +95,7 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
                 availability: member.availability || {},
                 blockedDates: blockedDatesInRange,
                 blockedRanges: blockedRangesInRange,
+                bookingBlockedRanges: bookingBlockedRangesInRange,
                 existingMeetings: memberMeetings.map(meeting => ({
                     meetingId: meeting._id,
                     date: meeting.scheduledDate,
@@ -95,10 +105,10 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
                 })),
                 availabilityPreference: member.employee?.availabilityPreference || 'personal'
             };
-        });
+        }));
 
         // Get the professional's company availability (for employees using same_as_company)
-        const professional = await User.findById(professionalId).select('availability blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
+        const professional = await User.findById(professionalId).select('blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
 
         res.status(200).json({
             success: true,

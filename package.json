@@ -15,16 +15,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Absterrg0/fixera-server.git"
+    "url": "git+https://github.com/pankaj3399/fixera-server.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/Absterrg0/fixera-server/issues"
-  },
-  "homepage": "https://github.com/Absterrg0/fixera-server#readme",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.879.0",
     "@aws-sdk/s3-request-presigner": "^3.879.0",
@@ -33,8 +29,10 @@
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
+    "luxon": "^3.5.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.17.1",
     "multer": "^2.0.2",
@@ -46,6 +44,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/luxon": "^3.4.2",
     "@types/multer": "^2.0.0",
     "nodemon": "^3.1.10",
     "tsx": "^4.20.4",
