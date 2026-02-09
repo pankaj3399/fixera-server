@@ -541,14 +541,7 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
       });
     }
 
-    // Allow optional leading '+', then 10–15 digits
-    const digitCount = phone.replace(/\D/g, '').length;
-    if (digitCount < 10 || digitCount > 15) {
-       return res.status(400).json({
-        success: false,
-        msg: "Invalid phone number format"
-      });
-    }
+
 
     await connecToDatabase();
     const user = await User.findById(decoded.id);
