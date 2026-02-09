@@ -559,13 +559,32 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
       });
     }
 
+    await connecToDatabase();
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        msg: "User not found"
+      });
+    }
+
+    // Determine default region for phone parsing
+    const defaultRegion = user.businessInfo?.country || user.location?.country;
+
+    // If no default region, require E.164 format (starts with '+')
+    if (!defaultRegion && !phone.startsWith('+')) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid phone number format"
+      });
+    }
+
     // Normalize and validate phone using google-libphonenumber
-    
     let normalizedPhone: string;
     try {
-      // Parse number with default region 'US' (or change to appropriate default) if not in international format
-      // If the input starts with +, it will form an international number
-      const number = phoneUtil.parseAndKeepRawInput(String(phone), 'US');
+      // Parse number with default region if available
+      const number = phoneUtil.parseAndKeepRawInput(String(phone), defaultRegion);
       
       if (!phoneUtil.isValidNumber(number)) {
         return res.status(400).json({
@@ -581,8 +600,6 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
         msg: "Invalid phone number format"
       });
     }
-
-    await connecToDatabase();
     
     // Check if phone is already in use by another user
     const existingUser = await User.findOne({ phone: normalizedPhone });
@@ -590,15 +607,6 @@ export const updatePhoneNumber = async (req: Request, res: Response, next: NextF
        return res.status(400).json({
         success: false,
         msg: "Phone number is already in use by another account"
-      });
-    }
-
-    const user = await User.findById(decoded.id);
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        msg: "User not found"
       });
     }
 
