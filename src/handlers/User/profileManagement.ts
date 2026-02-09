@@ -4,6 +4,18 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
+import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
+
+const phoneUtil = PhoneNumberUtil.getInstance();
+const maskEmail = (email: string): string => {
+  if (!email) return 'Unknown';
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return email;
+  const maskedLocal = local.length > 2 
+    ? local.substring(0, 2) + '*'.repeat(local.length - 2) 
+    : local + '*';
+  return `${maskedLocal}@${domain}`;
+};
 
 export const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -518,22 +530,13 @@ export const submitForVerification = async (req: Request, res: Response, next: N
 // Update phone number
 export const updatePhone = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { phone } = req.body;
+    const rawPhone = req.body.phone;
+    const phone = typeof rawPhone === 'string' ? rawPhone.trim() : String(rawPhone || '').trim();
 
-    if (!phone || typeof phone !== 'string') {
+    if (!phone) {
       return res.status(400).json({
         success: false,
         msg: "Phone number is required"
-      });
-    }
-
-    const trimmedPhone = phone.trim();
-
-    // Basic phone format validation (international format)
-    if (!/^\+?[1-9]\d{6,14}$/.test(trimmedPhone)) {
-      return res.status(400).json({
-        success: false,
-        msg: "Invalid phone number format. Use international format (e.g., +32123456789)"
       });
     }
 
@@ -562,8 +565,39 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
       });
     }
 
+    // Determine default region for phone parsing
+    const defaultRegion = user.businessInfo?.country || user.location?.country;
+
+    // If no default region, require E.164 format (starts with '+')
+    if (!defaultRegion && !phone.startsWith('+')) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid phone number format"
+      });
+    }
+
+    // Normalize and validate phone using google-libphonenumber
+    let normalizedPhone: string;
+    try {
+      const number = phoneUtil.parseAndKeepRawInput(String(phone), defaultRegion);
+
+      if (!phoneUtil.isValidNumber(number)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Invalid phone number format"
+        });
+      }
+
+      normalizedPhone = phoneUtil.format(number, PhoneNumberFormat.E164);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid phone number format"
+      });
+    }
+
     // Check if same as current
-    if (user.phone === trimmedPhone) {
+    if (user.phone === normalizedPhone) {
       return res.status(400).json({
         success: false,
         msg: "New phone number is the same as the current one"
@@ -571,7 +605,7 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
     }
 
     // Check uniqueness
-    const existingUser = await User.findOne({ phone: trimmedPhone, _id: { $ne: user._id } });
+    const existingUser = await User.findOne({ phone: normalizedPhone, _id: { $ne: user._id } });
     if (existingUser) {
       return res.status(409).json({
         success: false,
@@ -579,9 +613,21 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
       });
     }
 
-    user.phone = trimmedPhone;
+    user.phone = normalizedPhone;
     user.isPhoneVerified = false;
-    await user.save();
+
+    try {
+      await user.save();
+    } catch (error: any) {
+      // Handle concurrent duplicate key error
+      if (error.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          msg: "This phone number is already in use"
+        });
+      }
+      throw error;
+    }
 
     console.log(`📱 Phone: Updated phone for userId=${user._id.toString()}`);
 
@@ -596,22 +642,6 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
 
   } catch (error: any) {
     console.error('Update phone error:', error);
-
-    const isDuplicateKeyError = !!error && (
-      (error.name === 'MongoServerError' && error.code === 11000) ||
-      error.code === 11000 ||
-      error.codeName === 'DuplicateKey'
-    );
-    const isPhoneDuplicate = !!(error?.keyPattern?.phone || error?.keyValue?.phone) ||
-      (typeof error?.message === 'string' && error.message.includes('phone'));
-
-    if (isDuplicateKeyError && isPhoneDuplicate) {
-      return res.status(409).json({
-        success: false,
-        msg: "This phone number is already in use"
-      });
-    }
-
     return res.status(500).json({
       success: false,
       msg: "Failed to update phone number"

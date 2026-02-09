@@ -364,7 +364,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const userIdString = userId ? userId.toString() : '';
     const { bookingId } = req.params;
 
-    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+    if (!mongoose.Types.ObjectId.isValid(bookingId as string)) {
       return res.status(400).json({
         success: false,
         msg: "Invalid booking ID"
@@ -419,7 +419,7 @@ export const submitPostBookingAnswers = async (
       answers?: Array<{ questionId?: string; question?: string; answer?: string }>;
     };
 
-    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+    if (!mongoose.Types.ObjectId.isValid(bookingId as string)) {
       return res.status(400).json({
         success: false,
         msg: "Invalid booking ID",
@@ -520,7 +520,7 @@ export const submitPostBookingAnswers = async (
 // Submit quote (Professional only)
 export const submitQuote = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?._id;
+    const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
     const {
       amount,
@@ -574,7 +574,7 @@ export const submitQuote = async (req: Request, res: Response, next: NextFunctio
       termsAndConditions,
       estimatedDuration,
       submittedAt: new Date(),
-      submittedBy: new mongoose.Types.ObjectId(userId as string)
+      submittedBy: new mongoose.Types.ObjectId(userId)
     };
 
     await (booking as any).updateStatus('quoted', userId, 'Quote submitted by professional');
@@ -599,7 +599,7 @@ export const submitQuote = async (req: Request, res: Response, next: NextFunctio
 // Accept/Reject quote (Customer only)
 export const respondToQuote = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?._id;
+    const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
     const { action } = req.body; // 'accept' or 'reject'
 
@@ -659,7 +659,7 @@ export const respondToQuote = async (req: Request, res: Response, next: NextFunc
 // Update booking status
 export const updateBookingStatus = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?._id;
+    const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
     const { status, note } = req.body;
 
@@ -711,7 +711,7 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
 // Cancel booking
 export const cancelBooking = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user?._id;
+    const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
     const { reason } = req.body;
 
@@ -750,7 +750,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     booking.cancellation = {
-      cancelledBy: new mongoose.Types.ObjectId(userId as string),
+      cancelledBy: new mongoose.Types.ObjectId(userId),
       reason,
       cancelledAt: new Date()
     };

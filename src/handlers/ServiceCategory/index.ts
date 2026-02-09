@@ -18,7 +18,7 @@ export const getActiveServiceCategories = async (
       isActive: true,
       activeCountries: country,
     })
-      .select("category service areaOfWork pricingModel certificationRequired")
+      .select("category service areaOfWork pricingModel certificationRequired icon")
       .sort({ category: 1, service: 1 });
 
     // Group by category
@@ -52,6 +52,7 @@ export const getActiveServiceCategories = async (
           countries: [country],
           pricingModel: config.pricingModel,
           certificationRequired: config.certificationRequired,
+          icon: config.icon,
         });
       }
     });
