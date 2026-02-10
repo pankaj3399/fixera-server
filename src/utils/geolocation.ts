@@ -89,8 +89,12 @@ export function isSameCountry(
 ): boolean {
   // Try to compare using country codes first (more reliable)
   if (location1.countryCode && location2.countryCode) {
-    return normalizeCountryCode(location1.countryCode) ===
-           normalizeCountryCode(location2.countryCode);
+    const code1 = normalizeCountryCode(location1.countryCode);
+    const code2 = normalizeCountryCode(location2.countryCode);
+    if (code1 && code2) {
+      return code1 === code2;
+    }
+    // Fall through to country name comparison if codes are invalid
   }
 
   // Fall back to country names
@@ -131,28 +135,63 @@ export function isSameProvince(
 }
 
 /**
- * Normalize country code to uppercase 2-letter ISO format
+ * ISO 3166-1 alpha-2 country codes
  */
-function normalizeCountryCode(code: string): string {
-  return code.trim().toUpperCase().slice(0, 2);
+const ISO_ALPHA2_CODES = new Set([
+  'AD','AE','AF','AG','AI','AL','AM','AO','AQ','AR','AS','AT','AU','AW','AX','AZ',
+  'BA','BB','BD','BE','BF','BG','BH','BI','BJ','BL','BM','BN','BO','BQ','BR','BS',
+  'BT','BV','BW','BY','BZ','CA','CC','CD','CF','CG','CH','CI','CK','CL','CM','CN',
+  'CO','CR','CU','CV','CW','CX','CY','CZ','DE','DJ','DK','DM','DO','DZ','EC','EE',
+  'EG','EH','ER','ES','ET','FI','FJ','FK','FM','FO','FR','GA','GB','GD','GE','GF',
+  'GG','GH','GI','GL','GM','GN','GP','GQ','GR','GS','GT','GU','GW','GY','HK','HM',
+  'HN','HR','HT','HU','ID','IE','IL','IM','IN','IO','IQ','IR','IS','IT','JE','JM',
+  'JO','JP','KE','KG','KH','KI','KM','KN','KP','KR','KW','KY','KZ','LA','LB','LC',
+  'LI','LK','LR','LS','LT','LU','LV','LY','MA','MC','MD','ME','MF','MG','MH','MK',
+  'ML','MM','MN','MO','MP','MQ','MR','MS','MT','MU','MV','MW','MX','MY','MZ','NA',
+  'NC','NE','NF','NG','NI','NL','NO','NP','NR','NU','NZ','OM','PA','PE','PF','PG',
+  'PH','PK','PL','PM','PN','PR','PS','PT','PW','PY','QA','RE','RO','RS','RU','RW',
+  'SA','SB','SC','SD','SE','SG','SH','SI','SJ','SK','SL','SM','SN','SO','SR','SS',
+  'ST','SV','SX','SY','SZ','TC','TD','TF','TG','TH','TJ','TK','TL','TM','TN','TO',
+  'TR','TT','TV','TW','TZ','UA','UG','UM','US','UY','UZ','VA','VC','VE','VG','VI',
+  'VN','VU','WF','WS','YE','YT','ZA','ZM','ZW',
+]);
+
+/**
+ * Normalize country code to uppercase 2-letter ISO format.
+ * Returns undefined if the input is not a valid ISO 3166-1 alpha-2 code.
+ */
+function normalizeCountryCode(code: string): string | undefined {
+  const normalized = code.trim().toUpperCase();
+  if (normalized.length !== 2 || !ISO_ALPHA2_CODES.has(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
+
+/**
+ * Fold accented/unicode characters to their base letters via NFD decomposition,
+ * then strip non-letter/number/space characters using Unicode-aware patterns.
+ */
+function normalizeUnicodeName(name: string): string {
+  return name.trim().toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')         // Remove combining marks (accents)
+    .replace(/[^\p{L}\p{N}\s]/gu, '') // Keep only letters, numbers, whitespace
+    .replace(/\s+/g, ' ');
 }
 
 /**
  * Normalize country name for comparison
  */
 function normalizeCountryName(name: string): string {
-  return name.trim().toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/[^\w\s]/g, ''); // Remove special characters
+  return normalizeUnicodeName(name);
 }
 
 /**
  * Normalize region/state/province name for comparison
  */
 function normalizeRegionName(name: string): string {
-  return name.trim().toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/[^\w\s]/g, ''); // Remove special characters
+  return normalizeUnicodeName(name);
 }
 
 /**
@@ -278,9 +317,7 @@ export function isSameCity(
  * Normalize city name for comparison
  */
 function normalizeCityName(name: string): string {
-  return name.trim().toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/[^\w\s]/g, ''); // Remove special characters
+  return normalizeUnicodeName(name);
 }
 
 /**
@@ -390,7 +427,7 @@ export function parseAddressComponents(address: string): Partial<LocationInfo> {
     return result;
   }
 
-  const countryPart = partCount > 0 ? parts[partCount - 1] : undefined;
+  const countryPart = partCount > 1 ? parts[partCount - 1] : undefined;
   let statePart: string | undefined;
   let cityPart: string | undefined;
 

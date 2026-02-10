@@ -13,10 +13,36 @@ const connectDB = async () => {
     return;
   }
 
-  // If connection is in progress, wait for it
+  // If connection is in progress, wait for it (with error + timeout)
   if (mongoose.connection.readyState === 2) {
-    await new Promise<void>((resolve) => {
-      mongoose.connection.once('connected', () => resolve());
+    const CONNECTION_TIMEOUT_MS = 30_000;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        mongoose.connection.removeListener('connected', onConnected);
+        mongoose.connection.removeListener('error', onError);
+        clearTimeout(timer);
+      };
+      const onConnected = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`MongoDB connection timed out after ${CONNECTION_TIMEOUT_MS}ms`));
+      }, CONNECTION_TIMEOUT_MS);
+      mongoose.connection.once('connected', onConnected);
+      mongoose.connection.once('error', onError);
     });
     isConnected = true;
     return;

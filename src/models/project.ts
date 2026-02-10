@@ -497,7 +497,7 @@ const ProjectSchema = new Schema<IProject>(
         validator: function (v: IServiceSelection[]) {
           // Services array is optional - single service stored in category/service fields
           if (!v || v.length === 0) return true;
-          return v.length >= 1 && v.length <= 1; // Now only allows 1 service
+          return v.length === 1; // Now only allows 1 service
         },
         message: "Services must contain exactly 1 item",
       },
@@ -584,7 +584,9 @@ ProjectSchema.index({ "distance.location": "2dsphere" });
 
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {
-  this.autoSaveTimestamp = new Date();
+  if ((this as any)._isAutoSave) {
+    this.autoSaveTimestamp = new Date();
+  }
   next();
 });
 

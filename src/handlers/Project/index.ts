@@ -288,6 +288,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         status: "draft",
         autoSaveTimestamp: new Date(),
       });
+      (project as any)._isAutoSave = true;
       await project.save();
       console.log("✅ New project created with ID:", project._id);
     }

@@ -183,23 +183,51 @@ export async function reverseGeocode(
 }
 
 /**
- * Cache for geocoded addresses (in-memory cache)
+ * Cache for geocoded addresses (in-memory LRU cache with TTL)
  * In production, this should use Redis or similar
  */
-const geocodeCache = new Map<string, Coordinates>();
+const GEOCODE_CACHE_MAX_SIZE = 500;
+const GEOCODE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+interface CacheEntry {
+  coordinates: Coordinates;
+  createdAt: number;
+}
+
+const geocodeCache = new Map<string, CacheEntry>();
 
 /**
- * Get cached coordinates for an address
+ * Get cached coordinates for an address (respects TTL, refreshes LRU order)
  */
 export function getCachedCoordinates(address: string): Coordinates | null {
-  return geocodeCache.get(address.toLowerCase().trim()) || null;
+  const key = address.toLowerCase().trim();
+  const entry = geocodeCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > GEOCODE_CACHE_TTL_MS) {
+    geocodeCache.delete(key);
+    return null;
+  }
+  // Refresh LRU order: delete and re-insert so it becomes most-recent
+  geocodeCache.delete(key);
+  geocodeCache.set(key, entry);
+  return entry.coordinates;
 }
 
 /**
- * Cache coordinates for an address
+ * Cache coordinates for an address (evicts oldest entry when over limit)
  */
 export function cacheCoordinates(address: string, coordinates: Coordinates): void {
-  geocodeCache.set(address.toLowerCase().trim(), coordinates);
+  const key = address.toLowerCase().trim();
+  // If key already exists, delete first to refresh insertion order
+  if (geocodeCache.has(key)) {
+    geocodeCache.delete(key);
+  }
+  // Evict oldest entry (first key in Map iteration order) if at capacity
+  if (geocodeCache.size >= GEOCODE_CACHE_MAX_SIZE) {
+    const oldest = geocodeCache.keys().next().value;
+    if (oldest !== undefined) geocodeCache.delete(oldest);
+  }
+  geocodeCache.set(key, { coordinates, createdAt: Date.now() });
 }
 
 /**
