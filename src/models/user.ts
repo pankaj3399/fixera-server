@@ -17,6 +17,7 @@ export interface IUser extends Document {
     verificationCodeExpires?: Date;
     resetPasswordToken?: string;
     resetPasswordExpires?: Date;
+    resetPasswordAttempts?: number;
     vatNumber?: string;
     isVatVerified?: boolean;
     idProofUrl?: string;
@@ -166,6 +167,11 @@ const UserSchema = new Schema({
     },
     resetPasswordExpires: {
         type: Date,
+        select: false
+    },
+    resetPasswordAttempts: {
+        type: Number,
+        default: 0,
         select: false
     },
     vatNumber: {

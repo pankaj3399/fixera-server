@@ -339,18 +339,11 @@ export const getProject = async (req: Request, res: Response) => {
     const { id } = req.params;
     const professionalId = req.user?.id;
 
-    console.log('🔍 getProject called:', {
-      projectId: id,
-      userId: professionalId,
-      userIdType: typeof professionalId
-    });
-
     if (!professionalId) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     const ownershipFilter = buildProfessionalOwnershipFilter(professionalId.toString());
-    console.log('🔐 Ownership filter:', JSON.stringify(ownershipFilter, null, 2));
 
     const projectId = mongoose.Types.ObjectId.isValid(id)
       ? new mongoose.Types.ObjectId(id)
@@ -361,26 +354,16 @@ export const getProject = async (req: Request, res: Response) => {
         ownershipFilter
       ]
     };
-    console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
     const project = await Project.findOne(query);
 
-    console.log('📦 Project found:', !!project);
-
     if (!project) {
-      // Debug: Try to find the project without ownership check
-      const anyProject = await Project.findById(id);
-      console.log('🔍 Debug - Project exists:', !!anyProject);
-      if (anyProject) {
-        console.log('🔍 Debug - Project professionalId:', anyProject.professionalId);
-        console.log('🔍 Debug - User ID:', professionalId);
-      }
       return res.status(404).json({ error: "Project not found" });
     }
 
     res.json(project);
   } catch (error) {
-    console.error('❌ Error fetching project:', error);
+    console.error('Error in getProject handler');
     res.status(500).json({ error: "Failed to fetch project" });
   }
 };
@@ -1386,10 +1369,15 @@ export const duplicateProject = async (req: Request, res: Response) => {
       updatedAt: undefined,
     });
 
-    await duplicated.save({ validateBeforeSave: false });
+    try {
+      await duplicated.save();
+    } catch (validationError: any) {
+      console.error("Duplicate project validation failed:", validationError.message);
+      return res.status(400).json({ error: "Duplicated project contains invalid data", details: validationError.message });
+    }
     res.json(duplicated);
   } catch (error) {
-    console.error("Duplicate project failed:", error);
+    console.error("Duplicate project failed:", (error as Error).message);
     res.status(500).json({ error: "Failed to duplicate project" });
   }
 };
@@ -1506,7 +1494,8 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
     }
 
     if (search) {
-      const regex = new RegExp(search, "i");
+      const sanitized = search.slice(0, 200).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(sanitized, "i");
       filterConditions.push({
         $or: [{ title: regex }, { description: regex }, { keywords: regex }],
       });

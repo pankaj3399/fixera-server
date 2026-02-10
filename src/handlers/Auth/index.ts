@@ -458,7 +458,7 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       blockedRanges: normalizeBlockedRangesForShortBookings(user.blockedRanges),
       companyAvailability: user.companyAvailability,
       companyBlockedDates: user.companyBlockedDates,
-      companyBlockedRanges: user.companyBlockedRanges,
+      companyBlockedRanges: normalizeBlockedRangesForShortBookings(user.companyBlockedRanges),
       bookingBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
       // Customer-specific fields
@@ -507,20 +507,22 @@ export const ForgotPassword = async (req: Request, res: Response, next: NextFunc
     const resetToken = crypto.randomBytes(32).toString('hex');
     const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
 
-    // Save hashed token and expiry to user
-    user.resetPasswordToken = hashedToken;
-    user.resetPasswordExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-    await user.save();
+    // Save hashed token and expiry via surgical update to bypass pre-save hook
+    await User.findOneAndUpdate(
+      { _id: user._id },
+      { $set: { resetPasswordToken: hashedToken, resetPasswordExpires: new Date(Date.now() + 60 * 60 * 1000), resetPasswordAttempts: 0 } }
+    );
 
     // Send password reset email
     try {
       await sendPasswordResetEmail(user.email, user.name, resetToken);
     } catch (error) {
       console.error('Error sending password reset email:', error);
-      // Reset the token fields if email fails
-      user.resetPasswordToken = undefined;
-      user.resetPasswordExpires = undefined;
-      await user.save();
+      // Reset the token fields if email fails (surgical update to bypass pre-save hook)
+      await User.findOneAndUpdate(
+        { _id: user._id },
+        { $unset: { resetPasswordToken: 1, resetPasswordExpires: 1, resetPasswordAttempts: 1 } }
+      );
 
       return res.status(500).json({
         success: false,
@@ -539,6 +541,12 @@ export const ForgotPassword = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+// IP-based rate limiter for password reset attempts
+const resetAttemptsByIp = new Map<string, { count: number; resetTime: number }>();
+const RESET_MAX_ATTEMPTS_PER_IP = 5;
+const RESET_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const RESET_MAX_ATTEMPTS_PER_USER = 5;
+
 // Reset password endpoint
 export const ResetPassword = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -549,6 +557,17 @@ export const ResetPassword = async (req: Request, res: Response, next: NextFunct
       return res.status(400).json({
         success: false,
         msg: "Please provide token and new password"
+      });
+    }
+
+    // IP-based rate limiting
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const ipEntry = resetAttemptsByIp.get(ip);
+    if (ipEntry && now < ipEntry.resetTime && ipEntry.count >= RESET_MAX_ATTEMPTS_PER_IP) {
+      return res.status(429).json({
+        success: false,
+        msg: "Too many password reset attempts. Please try again later."
       });
     }
 
@@ -563,13 +582,44 @@ export const ResetPassword = async (req: Request, res: Response, next: NextFunct
     // Hash the token from URL to compare with DB
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
-    // Find user with valid reset token
+    // Find user by token (regardless of expiry) to enable per-user attempt tracking
     const user = await User.findOne({
-      resetPasswordToken: hashedToken,
-      resetPasswordExpires: { $gt: Date.now() }
-    }).select('+resetPasswordToken +resetPasswordExpires');
+      resetPasswordToken: hashedToken
+    }).select('+resetPasswordToken +resetPasswordExpires +resetPasswordAttempts');
 
     if (!user) {
+      // Increment IP-based counter on miss
+      if (!ipEntry || now >= ipEntry.resetTime) {
+        resetAttemptsByIp.set(ip, { count: 1, resetTime: now + RESET_WINDOW_MS });
+      } else {
+        ipEntry.count++;
+      }
+      return res.status(400).json({
+        success: false,
+        msg: "Invalid or expired password reset token"
+      });
+    }
+
+    // Per-user attempt tracking: check if attempts exceeded
+    if ((user.resetPasswordAttempts ?? 0) >= RESET_MAX_ATTEMPTS_PER_USER) {
+      // Invalidate the token entirely
+      await User.findOneAndUpdate(
+        { _id: user._id },
+        { $unset: { resetPasswordToken: 1, resetPasswordExpires: 1, resetPasswordAttempts: 1 } }
+      );
+      return res.status(429).json({
+        success: false,
+        msg: "Too many failed attempts. Please request a new password reset."
+      });
+    }
+
+    // Check if token is expired
+    if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+      // Increment per-user attempts on expired token
+      await User.findOneAndUpdate(
+        { _id: user._id },
+        { $inc: { resetPasswordAttempts: 1 } }
+      );
       return res.status(400).json({
         success: false,
         msg: "Invalid or expired password reset token"
@@ -580,11 +630,17 @@ export const ResetPassword = async (req: Request, res: Response, next: NextFunct
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
-    // Update password and clear reset token fields
-    user.password = hashedPassword;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
-    await user.save();
+    // Update password and clear reset token fields via surgical update to bypass pre-save hook
+    await User.findOneAndUpdate(
+      { _id: user._id },
+      {
+        $set: { password: hashedPassword },
+        $unset: { resetPasswordToken: 1, resetPasswordExpires: 1, resetPasswordAttempts: 1 }
+      }
+    );
+
+    // Clear IP rate limit on success
+    resetAttemptsByIp.delete(ip);
 
     return res.status(200).json({
       success: true,
