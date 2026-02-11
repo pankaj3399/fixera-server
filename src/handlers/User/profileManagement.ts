@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
 import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
+import { getCountryCode } from '../../utils/geocoding';
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 const maskEmail = (email: string): string => {
@@ -566,26 +567,35 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
       });
     }
 
-    // Determine default region for phone parsing
-    const defaultRegion = user.businessInfo?.country || user.location?.country;
-
-    // If no default region, require E.164 format (starts with '+')
-    if (!defaultRegion && !phone.startsWith('+')) {
-      return res.status(400).json({
-        success: false,
-        msg: "Invalid phone number format"
-      });
-    }
+    // Determine default region for phone parsing (needs 2-letter ISO code)
+    const rawCountry = user.businessInfo?.country || user.location?.country;
+    const defaultRegion = rawCountry
+      ? (rawCountry.length === 2 ? rawCountry.toUpperCase() : getCountryCode(rawCountry))
+      : undefined;
 
     // Normalize and validate phone using google-libphonenumber
     let normalizedPhone: string;
     try {
-      const number = phoneUtil.parseAndKeepRawInput(String(phone), defaultRegion);
+      let number;
+      if (phone.startsWith('+')) {
+        // International format — parse directly, no region needed
+        number = phoneUtil.parseAndKeepRawInput(phone, '');
+      } else if (defaultRegion) {
+        // Local format with known region
+        number = phoneUtil.parseAndKeepRawInput(phone, defaultRegion);
+      } else {
+        // Fallback: `defaultRegion` is undefined and `phone` doesn't start with '+'.
+        // Auto-prefix '+' so phoneUtil.parseAndKeepRawInput can attempt E.164 parsing.
+        // This means digit-only input like "12125551234" becomes "+12125551234" and may
+        // resolve to a valid PhoneNumberFormat.E164 number — convenient for users who
+        // omit the '+', but could also silently accept unintended country-code combos.
+        number = phoneUtil.parseAndKeepRawInput('+' + phone, '');
+      }
 
       if (!phoneUtil.isValidNumber(number)) {
         return res.status(400).json({
           success: false,
-          msg: "Invalid phone number format"
+          msg: "Invalid phone number. Please include your country code (e.g. +1 for US, +31 for NL)."
         });
       }
 
@@ -593,7 +603,7 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
     } catch (error) {
       return res.status(400).json({
         success: false,
-        msg: "Invalid phone number format"
+        msg: "Invalid phone number. Please include your country code (e.g. +1 for US, +31 for NL)."
       });
     }
 
@@ -630,7 +640,7 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
       throw error;
     }
 
-    console.log(`📱 Phone: Updated phone for userId=${user._id.toString()}`);
+    console.log(`📱 Phone: Updated phone for userId=${String(user._id)}`);
 
     return res.status(200).json({
       success: true,
@@ -717,7 +727,7 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
 
     await user.save();
 
-    console.log(`🏠 Customer Profile: Updated for ${user._id.toString()}`);
+    console.log(`🏠 Customer Profile: Updated for ${String(user._id)}`);
 
     return res.status(200).json({
       success: true,
@@ -831,7 +841,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     await user.save();
 
     const changedFields = changes.map((change) => change.field);
-    console.log(`🔄 ID Info: Updated for userId=${user._id.toString()}. Fields: ${changedFields.join(', ')}`);
+    console.log(`🔄 ID Info: Updated for userId=${String(user._id)}. Fields: ${changedFields.join(', ')}`);
 
     return res.status(200).json({
       success: true,
