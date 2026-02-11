@@ -57,8 +57,24 @@ export const getActiveServiceCategories = async (
       }
     });
 
-    // Convert map to array
-    const categories = Array.from(categoriesMap.values());
+    // Convert map to array and sort by preferred display order
+    const categoryOrder = [
+      'Small tasks',
+      'Interior',
+      'Exterior',
+      'Outdoor work',
+      'Renovation',
+      'Inspections',
+    ];
+
+    const categories = Array.from(categoriesMap.values()).sort((a, b) => {
+      const indexA = categoryOrder.indexOf(a.name);
+      const indexB = categoryOrder.indexOf(b.name);
+      // Unknown categories go to the end
+      const orderA = indexA === -1 ? categoryOrder.length : indexA;
+      const orderB = indexB === -1 ? categoryOrder.length : indexB;
+      return orderA - orderB;
+    });
 
     res.json(categories);
   } catch (error) {
