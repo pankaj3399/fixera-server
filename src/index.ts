@@ -14,10 +14,12 @@ import serviceCategoryRouter from './routes/ServiceCategory';
 import professionalRouter from './routes/Professional';
 import searchRouter from './routes/Search';
 import bookingRouter from './routes/Booking';
+import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
 
 dotenv.config();
 
 const app: Express = express();
+let idExpirySchedulerHandle: { stop: () => void } | null = null;
 
 // 🚨 Allow ALL origins but still allow credentials (cookies)
 app.use(cors({
@@ -61,11 +63,32 @@ app.use(errorHandler);
 // Traditional server: connect once at startup, then listen
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
 
+const stopIdExpiryScheduler = () => {
+  if (!idExpirySchedulerHandle) return;
+
+  try {
+    idExpirySchedulerHandle.stop();
+  } catch (error) {
+    console.error('Failed to stop ID expiry scheduler:', error);
+  } finally {
+    idExpirySchedulerHandle = null;
+  }
+};
+
+process.on('SIGINT', () => {
+  stopIdExpiryScheduler();
+});
+
+process.on('SIGTERM', () => {
+  stopIdExpiryScheduler();
+});
+
 connectDB()
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
+    idExpirySchedulerHandle = startIdExpiryScheduler();
   })
   .catch((error) => {
     console.error('Failed to connect to MongoDB at startup:', error);

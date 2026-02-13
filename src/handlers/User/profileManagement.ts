@@ -6,6 +6,7 @@ import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile } from
 import mongoose from 'mongoose';
 import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
 import { getCountryCode } from '../../utils/geocoding';
+import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 const maskEmail = (email: string): string => {
@@ -133,6 +134,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
     user.idProofFileName = uploadResult.key;
     user.idProofUploadedAt = new Date();
     user.isIdVerified = false; // Reset verification status when new file is uploaded
+    user.idExpiryEmailSentAt = undefined; // Allow expiry reminders to run for the newly uploaded ID
 
     // If re-uploading ID while approved, trigger re-verification
     if (wasApproved && hadPreviousId) {
@@ -188,6 +190,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
 export const updateProfessionalProfile = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const {
+      vatNumber,
       businessInfo,
       hourlyRate,
       currency,
@@ -225,6 +228,28 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     }
 
     console.log(`👤 Profile: Updating professional profile for ${user.email}`);
+
+    if (vatNumber !== undefined) {
+      const rawVatNumber = typeof vatNumber === 'string' ? vatNumber.trim() : '';
+      let formattedVAT = '';
+      let isVatVerified = false;
+
+      if (rawVatNumber) {
+        formattedVAT = formatVATNumber(rawVatNumber);
+        if (!isValidVATFormat(formattedVAT)) {
+          return res.status(400).json({
+            success: false,
+            msg: "Invalid VAT number format"
+          });
+        }
+
+        const validationResult = await validateVATNumber(formattedVAT);
+        isVatVerified = validationResult.valid;
+      }
+
+      user.vatNumber = formattedVAT || undefined;
+      user.isVatVerified = isVatVerified;
+    }
 
     // Update fields if provided
     if (businessInfo) {
@@ -480,18 +505,79 @@ export const submitForVerification = async (req: Request, res: Response, next: N
     console.log(`🔍 PHASE 3: Checking verification requirements for ${user.email}`);
 
     // Check minimum requirements for submission
-    const missingRequirements = [];
+    const missingRequirements: string[] = [];
+    const missingRequirementDetails: Array<{ code: string; type: string; message: string }> = [];
     
     if (!user.vatNumber) {
       missingRequirements.push('VAT number');
+      missingRequirementDetails.push({
+        code: 'VAT_NUMBER_MISSING',
+        type: 'vat',
+        message: 'VAT number'
+      });
     }
     
     if (!user.idProofUrl) {
       missingRequirements.push('ID proof upload');
+      missingRequirementDetails.push({
+        code: 'ID_PROOF_MISSING',
+        type: 'id',
+        message: 'ID proof upload'
+      });
     }
 
     if (!user.businessInfo?.companyName) {
       missingRequirements.push('Company name');
+      missingRequirementDetails.push({
+        code: 'COMPANY_NAME_MISSING',
+        type: 'business',
+        message: 'Company name'
+      });
+    }
+
+    if (!user.businessInfo?.address || !user.businessInfo?.city || !user.businessInfo?.country || !user.businessInfo?.postalCode) {
+      missingRequirements.push('Company address');
+      missingRequirementDetails.push({
+        code: 'COMPANY_ADDRESS_MISSING',
+        type: 'business',
+        message: 'Company address'
+      });
+    }
+
+    if (!user.idCountryOfIssue) {
+      missingRequirements.push('ID country of issue');
+      missingRequirementDetails.push({
+        code: 'ID_COUNTRY_OF_ISSUE_MISSING',
+        type: 'id',
+        message: 'ID country of issue'
+      });
+    }
+
+    if (!user.idExpirationDate) {
+      missingRequirements.push('ID expiration date');
+      missingRequirementDetails.push({
+        code: 'ID_EXPIRATION_DATE_MISSING',
+        type: 'id',
+        message: 'ID expiration date'
+      });
+    } else if (user.idExpirationDate <= new Date()) {
+      missingRequirements.push('ID expiration date (must be in the future)');
+      missingRequirementDetails.push({
+        code: 'ID_EXPIRATION_DATE_INVALID',
+        type: 'id',
+        message: 'ID expiration date (must be in the future)'
+      });
+    }
+
+    const companyAvailability = user.companyAvailability || {};
+    const hasCompanyDayAvailable = Object.values(companyAvailability).some((day: any) => day?.available);
+    if (!hasCompanyDayAvailable) {
+      missingRequirements.push('Company availability (at least one available day)');
+      missingRequirementDetails.push({
+        code: 'COMPANY_AVAILABILITY_MISSING',
+        type: 'availability',
+        message: 'Company availability (at least one available day)'
+      });
     }
 
     if (missingRequirements.length > 0) {
@@ -500,6 +586,7 @@ export const submitForVerification = async (req: Request, res: Response, next: N
         msg: `Cannot submit for verification. Please complete: ${missingRequirements.join(', ')}`,
         data: {
           missingRequirements,
+          missingRequirementDetails,
           hasVat: !!user.vatNumber,
           hasIdProof: !!user.idProofUrl,
           hasCompanyName: !!user.businessInfo?.companyName
@@ -507,9 +594,12 @@ export const submitForVerification = async (req: Request, res: Response, next: N
       });
     }
 
-    // Update status to pending
+    // Update status to pending and mark onboarding complete
     user.professionalStatus = 'pending';
     user.rejectionReason = undefined; 
+    if (!user.professionalOnboardingCompletedAt) {
+      user.professionalOnboardingCompletedAt = new Date();
+    }
     await user.save();
     return res.status(200).json({
       success: true,
@@ -737,7 +827,6 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
     await user.save();
 
     console.log(`🏠 Customer Profile: Updated for ${String(user._id)}`);
-
     return res.status(200).json({
       success: true,
       msg: "Customer profile updated successfully",
@@ -838,7 +927,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     }
     user.pendingIdChanges.push(...changes);
 
-    // Trigger re-verification: set status to pending
+    // Trigger re-verification only if already approved
     const wasApproved = user.professionalStatus === 'approved';
     const shouldSetPending = user.professionalStatus === 'approved' || user.professionalStatus === 'pending';
     if (shouldSetPending) {
@@ -846,6 +935,9 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
       user.isIdVerified = false;
       user.rejectionReason = undefined;
     }
+
+    // Any ID info update should allow future expiry reminders for the new data
+    user.idExpiryEmailSentAt = undefined;
 
     await user.save();
 
