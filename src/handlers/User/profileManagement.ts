@@ -821,7 +821,7 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       if (trimmedBusinessName !== undefined) {
         user.businessName = trimmedBusinessName.length > 0 ? trimmedBusinessName : undefined;
       }
-    } else {
+    } else if (customerType && customerType !== 'business') {
       // If switching to individual, clear business fields
       user.businessName = undefined;
       // We might also want to clear VAT if it was set, but that's handled separately or via another call?
