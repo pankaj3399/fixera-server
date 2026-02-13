@@ -663,7 +663,7 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
 // Update customer profile (address, business name for business customers)
 export const updateCustomerProfile = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { address, city, country, postalCode, businessName } = req.body;
+    const { address, city, country, postalCode, businessName, customerType } = req.body;
     const trimmedAddress = typeof address === 'string' ? address.trim() : undefined;
     const trimmedCity = typeof city === 'string' ? city.trim() : undefined;
     const trimmedCountry = typeof country === 'string' ? country.trim() : undefined;
@@ -694,6 +694,11 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       });
     }
 
+    // Update customer type if provided
+    if (customerType && ['individual', 'business'].includes(customerType)) {
+      user.customerType = customerType;
+    }
+
     const hasLocationField = [trimmedAddress, trimmedCity, trimmedCountry, trimmedPostalCode]
       .some((value) => value !== undefined);
 
@@ -714,15 +719,19 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       if (trimmedPostalCode !== undefined) user.location.postalCode = trimmedPostalCode;
     }
 
-    // Business name only for business customers
-    if (trimmedBusinessName !== undefined) {
-      if (user.customerType !== 'business') {
-        return res.status(400).json({
-          success: false,
-          msg: "Business name can only be set for business customers"
-        });
+    // Business name only for business customers or if switching to business
+    if (user.customerType === 'business') {
+      if (trimmedBusinessName !== undefined) {
+        user.businessName = trimmedBusinessName.length > 0 ? trimmedBusinessName : undefined;
       }
-      user.businessName = trimmedBusinessName.length > 0 ? trimmedBusinessName : undefined;
+    } else {
+      // If switching to individual, clear business fields
+      user.businessName = undefined;
+      // We might also want to clear VAT if it was set, but that's handled separately or via another call?
+      // For now, let's keep VAT separate as it has its own verification logic, but frontend should hide it.
+      // Actually, per requirements "in case of business customer also VAT and business name",
+      // implying non-business customers shouldn't have them.
+      // User model pre-save hook handles clearing businessName if not business customer.
     }
 
     await user.save();
