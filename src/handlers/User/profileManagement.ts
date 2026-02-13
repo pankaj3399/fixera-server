@@ -785,7 +785,14 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
     }
 
     // Update customer type if provided
-    if (customerType && ['individual', 'business'].includes(customerType)) {
+    // Update customer type if provided
+    if (customerType) {
+      if (!['individual', 'business'].includes(customerType)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Invalid customer type. Must be 'individual' or 'business'"
+        });
+      }
       user.customerType = customerType;
     }
 
