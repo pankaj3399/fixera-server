@@ -19,11 +19,22 @@ export const generateOTP = (): string => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
+export const escapeHtml = (value: string | undefined | null): string => {
+  const input = String(value ?? "");
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#x27;")
+    .replace(/\//g, "&#x2F;");
+};
+
 // Common email header template
 const getEmailHeader = (title: string) => `
   <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px 10px 0 0; text-align: center;">
     <h1 style="color: white; margin: 0; font-size: 28px;">Fixera</h1>
-    <p style="color: white; margin: 10px 0 0 0; font-size: 16px;">${title}</p>
+    <p style="color: white; margin: 10px 0 0 0; font-size: 16px;">${escapeHtml(title)}</p>
   </div>
 `;
 
@@ -39,13 +50,15 @@ const getEmailFooter = () => `
 // Send OTP email using Brevo
 export const sendOTPEmail = async (email: string, otp: string, userName: string): Promise<boolean> => {
   try {
+    const safeUserName = escapeHtml(userName);
+    const safeOtp = escapeHtml(otp);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Email Verification")}
         
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${userName}!</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeUserName}!</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
             Thank you for joining Fixera! To complete your registration, please use the verification code below:
@@ -54,7 +67,7 @@ export const sendOTPEmail = async (email: string, otp: string, userName: string)
           <div style="background: #fff; border: 2px solid #667eea; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;">
             <h3 style="color: #333; margin: 0 0 10px 0; font-size: 18px;">Your Verification Code</h3>
             <div style="font-size: 32px; font-weight: bold; color: #667eea; letter-spacing: 8px; font-family: 'Courier New', monospace;">
-              ${otp}
+              ${safeOtp}
             </div>
           </div>
           
@@ -96,13 +109,14 @@ export const sendOTPEmail = async (email: string, otp: string, userName: string)
 // Send welcome email after signup
 export const sendWelcomeEmail = async (email: string, userName: string): Promise<boolean> => {
   try {
+    const safeUserName = escapeHtml(userName);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Welcome to Fixera!")}
         
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Welcome ${userName}!</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Welcome ${safeUserName}!</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
             Thank you for joining Fixera! Your account has been successfully created. We're excited to have you as part of our community of homeowners and skilled professionals.
@@ -158,15 +172,73 @@ export const sendWelcomeEmail = async (email: string, userName: string): Promise
   }
 };
 
+// Send ID expired email to professionals
+export const sendIdExpiredEmail = async (email: string, userName: string): Promise<boolean> => {
+  try {
+    const safeUserName = escapeHtml(userName);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Action Required: ID Expired")}
+        
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeUserName},</h2>
+          
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            Our records show that your ID document has expired. To keep your professional profile active, please upload a valid ID and update your expiration date.
+          </p>
+          
+          <div style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">Required Action</h3>
+            <p style="color: #333; margin: 0; line-height: 1.6;">
+              Upload a valid ID document and provide the updated expiration date.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/onboarding"
+               style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+              Update ID Now
+            </a>
+          </div>
+          
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            If you have questions, reply to this email and our support team will help.
+          </p>
+          
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Fixera: Your ID Has Expired";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    return false;
+  }
+};
+
 // Send professional approval email
 export const sendProfessionalApprovalEmail = async (email: string, professionalName: string): Promise<boolean> => {
   try {
+    const safeProfessionalName = escapeHtml(professionalName);
+
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Profile Approved! 🎉")}
         
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${professionalName}!</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${safeProfessionalName}!</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
             Great news! Your professional profile has been approved by our team. You can now start accepting projects and connecting with customers on Fixera.
@@ -230,12 +302,15 @@ export const sendProfessionalApprovalEmail = async (email: string, professionalN
 // Send professional rejection email
 export const sendProfessionalRejectionEmail = async (email: string, professionalName: string, reason: string): Promise<boolean> => {
   try {
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeReason = escapeHtml(reason);
+
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Profile Update Required")}
         
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeProfessionalName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
             Thank you for your interest in becoming a verified professional on Fixera. After reviewing your profile, we need you to address some items before we can approve your account.
@@ -245,7 +320,7 @@ export const sendProfessionalRejectionEmail = async (email: string, professional
             <h3 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">⚠️ Items to Address</h3>
             <div style="background: #fff; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px;">
               <p style="color: #333; margin: 0; line-height: 1.6;">
-                <strong>Reason:</strong> ${reason}
+                <strong>Reason:</strong> ${safeReason}
               </p>
             </div>
           </div>
@@ -307,12 +382,15 @@ export const sendProfessionalIdChangeRejectionEmail = async (
   reason: string
 ): Promise<boolean> => {
   try {
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeReason = escapeHtml(reason);
+
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("ID Document Update Rejected")}
         
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeProfessionalName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
             Your recent ID document update was reviewed and could not be approved at this time.
@@ -320,7 +398,7 @@ export const sendProfessionalIdChangeRejectionEmail = async (
           </p>
 
           <div style="background: #fff3cd; border: 1px solid #ffeeba; border-radius: 8px; padding: 16px; margin: 20px 0;">
-            <p style="margin: 0; color: #856404;"><strong>Reason:</strong> ${reason}</p>
+            <p style="margin: 0; color: #856404;"><strong>Reason:</strong> ${safeReason}</p>
           </div>
 
           <p style="color: #666; line-height: 1.6;">
@@ -356,12 +434,14 @@ export const sendProfessionalIdChangeApprovalEmail = async (
   professionalName: string
 ): Promise<boolean> => {
   try {
+    const safeProfessionalName = escapeHtml(professionalName);
+
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("ID Document Update Approved")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeProfessionalName},</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
             Your recent ID document update has been reviewed and approved by our team.
@@ -403,6 +483,8 @@ export const sendProfessionalIdChangeApprovalEmail = async (
 export const sendProfessionalSuspensionEmail = async (email: string, name: string, reason: string): Promise<boolean> => {
   try {
     console.log(`📧 Sending suspension email to ${email}`);
+    const safeName = escapeHtml(name);
+    const safeReason = escapeHtml(reason);
 
     const emailContent = `
       <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8fafc; padding: 20px;">
@@ -418,7 +500,7 @@ export const sendProfessionalSuspensionEmail = async (email: string, name: strin
           </div>
           
           <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-            Dear <strong>${name}</strong>,
+            Dear <strong>${safeName}</strong>,
           </p>
           
           <p style="color: #333; line-height: 1.6; margin-bottom: 20px;">
@@ -428,7 +510,7 @@ export const sendProfessionalSuspensionEmail = async (email: string, name: strin
           <div style="background: #fef3c7; border: 2px solid #f59e0b; border-radius: 8px; padding: 20px; margin: 25px 0;">
             <h3 style="color: #92400e; margin: 0 0 15px 0; font-size: 18px;">📋 Reason for Suspension</h3>
             <p style="color: #333; margin: 0; line-height: 1.6; font-style: italic;">
-              "${reason}"
+              "${safeReason}"
             </p>
           </div>
           
@@ -486,6 +568,7 @@ export const sendProfessionalSuspensionEmail = async (email: string, name: strin
 export const sendProfessionalReactivationEmail = async (email: string, name: string): Promise<boolean> => {
   try {
     console.log(`📧 Sending reactivation email to ${email}`);
+    const safeName = escapeHtml(name);
 
     const emailContent = `
       <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8fafc; padding: 20px;">
@@ -501,7 +584,7 @@ export const sendProfessionalReactivationEmail = async (email: string, name: str
           </div>
           
           <p style="color: #333; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-            Dear <strong>${name}</strong>,
+            Dear <strong>${safeName}</strong>,
           </p>
           
           <p style="color: #333; line-height: 1.6; margin-bottom: 20px;">
@@ -562,6 +645,10 @@ export const sendTeamMemberInvitationEmail = async (
 ): Promise<boolean> => {
   try {
     const emailAPI = createEmailAPI();
+    const safeTeamMemberName = escapeHtml(teamMemberName);
+    const safeCompanyName = escapeHtml(companyName);
+    const safeLoginEmail = escapeHtml(loginEmail);
+    const safeTemporaryPassword = escapeHtml(temporaryPassword);
 
     const htmlContent = `
       <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; background: #f9f9f9; padding: 20px;">
@@ -569,16 +656,16 @@ export const sendTeamMemberInvitationEmail = async (
           ${getEmailHeader('Team Member Invitation')}
 
           <div style="padding: 30px;">
-            <h2 style="color: #333; margin-bottom: 20px;">Welcome to the Team, ${teamMemberName}!</h2>
+            <h2 style="color: #333; margin-bottom: 20px;">Welcome to the Team, ${safeTeamMemberName}!</h2>
 
             <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              You have been invited to join <strong>${companyName}</strong> as a team member on the Fixera platform.
+              You have been invited to join <strong>${safeCompanyName}</strong> as a team member on the Fixera platform.
             </p>
 
             <div style="background: #f8f9ff; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea;">
               <h3 style="color: #333; margin: 0 0 15px 0; font-size: 18px;">Your Login Credentials</h3>
-              <p style="margin: 5px 0; color: #666;"><strong>Email:</strong> ${loginEmail}</p>
-              <p style="margin: 5px 0; color: #666;"><strong>Temporary Password:</strong> <code style="background: #e8e8e8; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${temporaryPassword}</code></p>
+              <p style="margin: 5px 0; color: #666;"><strong>Email:</strong> ${safeLoginEmail}</p>
+              <p style="margin: 5px 0; color: #666;"><strong>Temporary Password:</strong> <code style="background: #e8e8e8; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${safeTemporaryPassword}</code></p>
             </div>
 
             <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
@@ -640,16 +727,19 @@ export const sendProjectApprovalEmail = async (
 ): Promise<boolean> => {
   try {
     console.log(`📧 Sending project approval email to ${email}`);
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeProjectTitle = escapeHtml(projectTitle);
+    const encodedProjectId = encodeURIComponent(projectId);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Project Approved! 🎉")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${professionalName}!</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${safeProfessionalName}!</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            Great news! Your project "<strong>${projectTitle}</strong>" has been approved and is now live on Fixera.
+            Great news! Your project "<strong>${safeProjectTitle}</strong>" has been approved and is now live on Fixera.
           </p>
 
           <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;">
@@ -658,7 +748,7 @@ export const sendProjectApprovalEmail = async (
               Customers can now find and book your project. Start managing your bookings and connecting with clients.
             </p>
             <div style="text-align: center; margin-top: 20px;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professioanl/projects/${projectId}"
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professioanl/projects/${encodedProjectId}"
                   style="background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
                  View Project
                </a>
@@ -716,23 +806,27 @@ export const sendProjectRejectionEmail = async (
 ): Promise<boolean> => {
   try {
     console.log(`📧 Sending project rejection email to ${email}`);
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeProjectTitle = escapeHtml(projectTitle);
+    const safeFeedback = escapeHtml(feedback);
+    const encodedProjectId = encodeURIComponent(projectId);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Project Update Required")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeProfessionalName},</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            Thank you for submitting your project "<strong>${projectTitle}</strong>". After reviewing it, we need you to address some items before we can approve it.
+            Thank you for submitting your project "<strong>${safeProjectTitle}</strong>". After reviewing it, we need you to address some items before we can approve it.
           </p>
 
           <div style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 20px; margin: 25px 0;">
             <h3 style="color: #856404; margin: 0 0 15px 0; font-size: 18px;">⚠️ Items to Address</h3>
             <div style="background: #fff; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px;">
               <p style="color: #333; margin: 0; line-height: 1.6;">
-                <strong>Feedback:</strong> ${feedback}
+                <strong>Feedback:</strong> ${safeFeedback}
               </p>
             </div>
           </div>
@@ -743,7 +837,7 @@ export const sendProjectRejectionEmail = async (
               Please update your project with the requested changes, then resubmit it for review.
             </p>
             <div style="text-align: center; margin-top: 20px;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${projectId}/edit"
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${encodedProjectId}/edit"
                   style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
                  Edit Project
                </a>
@@ -786,23 +880,26 @@ export const sendProjectDeletedEmail = async (
 ): Promise<boolean> => {
   try {
     console.log(`📧 Sending project deletion email to ${email}`);
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeProjectTitle = escapeHtml(projectTitle);
+    const safeReason = escapeHtml(reason);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Project Deleted")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeProfessionalName},</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            We're writing to inform you that your project "<strong>${projectTitle}</strong>" has been removed from Fixera.
+            We're writing to inform you that your project "<strong>${safeProjectTitle}</strong>" has been removed from Fixera.
           </p>
 
           <div style="background: #fee2e2; border: 2px solid #ef4444; border-radius: 8px; padding: 20px; margin: 25px 0;">
             <h3 style="color: #dc2626; margin: 0 0 15px 0; font-size: 18px;">❌ Reason for Deletion</h3>
             <div style="background: #fff; border-left: 4px solid #ef4444; padding: 15px; border-radius: 4px;">
               <p style="color: #333; margin: 0; line-height: 1.6;">
-                ${reason}
+                ${safeReason}
               </p>
             </div>
           </div>
@@ -864,23 +961,27 @@ export const sendProjectDeactivatedEmail = async (
 ): Promise<boolean> => {
   try {
     console.log(`📧 Sending project deactivation email to ${email}`);
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeProjectTitle = escapeHtml(projectTitle);
+    const safeReason = escapeHtml(reason);
+    const encodedProjectId = encodeURIComponent(projectId);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Project Temporarily Deactivated")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${professionalName},</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeProfessionalName},</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            We're writing to inform you that your project "<strong>${projectTitle}</strong>" has been temporarily deactivated.
+            We're writing to inform you that your project "<strong>${safeProjectTitle}</strong>" has been temporarily deactivated.
           </p>
 
           <div style="background: #fef3c7; border: 2px solid #f59e0b; border-radius: 8px; padding: 20px; margin: 25px 0;">
             <h3 style="color: #92400e; margin: 0 0 15px 0; font-size: 18px;">⏸️ Reason for Deactivation</h3>
             <div style="background: #fff; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 4px;">
               <p style="color: #333; margin: 0; line-height: 1.6;">
-                ${reason}
+                ${safeReason}
               </p>
             </div>
           </div>
@@ -896,7 +997,7 @@ export const sendProjectDeactivatedEmail = async (
           </div>
 
           <div style="text-align: center; margin: 30px 0;">
-            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${projectId}/edit"
+            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${encodedProjectId}/edit"
                style="background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
               View Project
             </a>
@@ -942,16 +1043,19 @@ export const sendProjectReactivatedEmail = async (
 ): Promise<boolean> => {
   try {
     console.log(`📧 Sending project reactivation email to ${email}`);
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeProjectTitle = escapeHtml(projectTitle);
+    const encodedProjectId = encodeURIComponent(projectId);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("Project Reactivated! ✅")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Great News, ${professionalName}!</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Great News, ${safeProfessionalName}!</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            Your project "<strong>${projectTitle}</strong>" has been reactivated and is now live on Fixera again!
+            Your project "<strong>${safeProjectTitle}</strong>" has been reactivated and is now live on Fixera again!
           </p>
 
           <div style="background: #dcfce7; border: 2px solid #16a34a; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;">
@@ -960,7 +1064,7 @@ export const sendProjectReactivatedEmail = async (
               Customers can now find and book your project again. Continue managing your bookings and connecting with clients.
             </p>
             <div style="text-align: center; margin-top: 20px;">
-              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${projectId}"
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/professional/projects/${encodedProjectId}"
                   style="background: #16a34a; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
                  View Project
                </a>
@@ -1019,24 +1123,28 @@ export const sendBookingNotificationEmail = async (
 ): Promise<boolean> => {
   try {
     console.log(`📧 Sending booking notification email to ${professionalEmail}`);
+    const safeProfessionalName = escapeHtml(professionalName);
+    const safeCustomerName = escapeHtml(customerName);
+    const safeProjectTitle = escapeHtml(projectTitle);
+    const safePreferredDate = escapeHtml(preferredDate);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         ${getEmailHeader("New Booking Request! 🎉")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${professionalName}!</h2>
+          <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${safeProfessionalName}!</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            You've received a new booking request for your project "<strong>${projectTitle}</strong>"!
+            You've received a new booking request for your project "<strong>${safeProjectTitle}</strong>"!
           </p>
 
           <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; padding: 20px; margin: 25px 0;">
             <h3 style="color: #2E7D32; margin: 0 0 15px 0; font-size: 18px;">📋 Booking Details</h3>
             <ul style="color: #333; margin: 0; padding-left: 20px; line-height: 1.8;">
-              <li><strong>Customer:</strong> ${customerName}</li>
-              <li><strong>Project:</strong> ${projectTitle}</li>
-              <li><strong>Preferred Start Date:</strong> ${preferredDate}</li>
+              <li><strong>Customer:</strong> ${safeCustomerName}</li>
+              <li><strong>Project:</strong> ${safeProjectTitle}</li>
+              <li><strong>Preferred Start Date:</strong> ${safePreferredDate}</li>
               <li><strong>Status:</strong> Awaiting Your Quote</li>
             </ul>
           </div>

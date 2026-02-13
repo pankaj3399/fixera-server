@@ -7,6 +7,7 @@ import { generateOTP, sendOTPEmail, sendWelcomeEmail } from "../../utils/emailSe
 import twilio from 'twilio';
 import mongoose from "mongoose";
 import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
+import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 
 // Helper function to set secure cookie
 const setTokenCookie = (res: Response, token: string) => {
@@ -38,8 +39,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       latitude,
       longitude,
       companyName,
-      vatNumber,
-      isVatValidated
+      vatNumber
     } = req.body;
 
     // Comprehensive validation
@@ -154,17 +154,36 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
 
       // Business customer fields
       if (customerType === 'business') {
-        if (companyName) {
-          // Store company name in businessInfo for consistency
-          userData.businessInfo = {
-            companyName: companyName.trim()
-          };
+        if (!companyName) {
+          return res.status(400).json({
+            success: false,
+            msg: "Company name is required for business customers"
+          });
         }
 
-        if (vatNumber) {
-          userData.vatNumber = vatNumber.trim().toUpperCase();
-          userData.isVatVerified = isVatValidated || false;
+        // Store company name in businessInfo for consistency
+        userData.businessInfo = {
+          companyName: companyName.trim()
+        };
+
+        if (!vatNumber) {
+          return res.status(400).json({
+            success: false,
+            msg: "VAT number is required for business customers"
+          });
         }
+
+        const formattedVAT = formatVATNumber(vatNumber);
+        if (!isValidVATFormat(formattedVAT)) {
+          return res.status(400).json({
+            success: false,
+            msg: "Invalid VAT number format"
+          });
+        }
+
+        userData.vatNumber = formattedVAT;
+        const viesValidationResult = await validateVATNumber(formattedVAT);
+        userData.isVatVerified = viesValidationResult.valid;
       }
     }
 
@@ -233,6 +252,8 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       idProofFileName: user.idProofFileName,
       idProofUploadedAt: user.idProofUploadedAt,
       isIdVerified: user.isIdVerified || false,
+      idCountryOfIssue: user.idCountryOfIssue,
+      idExpirationDate: user.idExpirationDate,
       professionalStatus: user.professionalStatus,
       approvedBy: user.approvedBy,
       approvedAt: user.approvedAt,
@@ -245,6 +266,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       blockedRanges: user.blockedRanges,
       bookingBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
+      professionalOnboardingCompletedAt: user.professionalOnboardingCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,
       location: user.location,
@@ -339,6 +361,15 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
       isPhoneVerified: userExists.isPhoneVerified || false,
       vatNumber: userExists.vatNumber,
       isVatVerified: userExists.isVatVerified || false,
+      idProofUrl: userExists.idProofUrl,
+      idProofFileName: userExists.idProofFileName,
+      idProofUploadedAt: userExists.idProofUploadedAt,
+      isIdVerified: userExists.isIdVerified || false,
+      idCountryOfIssue: userExists.idCountryOfIssue,
+      idExpirationDate: userExists.idExpirationDate,
+      professionalStatus: userExists.professionalStatus,
+      businessInfo: userExists.businessInfo,
+      professionalOnboardingCompletedAt: userExists.professionalOnboardingCompletedAt,
       createdAt: userExists.createdAt,
       updatedAt: userExists.updatedAt
     };
@@ -438,6 +469,8 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       idProofFileName: user.idProofFileName,
       idProofUploadedAt: user.idProofUploadedAt,
       isIdVerified: user.isIdVerified || false,
+      idCountryOfIssue: user.idCountryOfIssue,
+      idExpirationDate: user.idExpirationDate,
       professionalStatus: user.professionalStatus,
       approvedBy: user.approvedBy,
       approvedAt: user.approvedAt,
@@ -453,6 +486,7 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       companyBlockedRanges: user.companyBlockedRanges,
       bookingBlockedRanges,
       profileCompletedAt: user.profileCompletedAt,
+      professionalOnboardingCompletedAt: user.professionalOnboardingCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,
       location: user.location,
