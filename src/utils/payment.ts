@@ -22,7 +22,7 @@ const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
 export function convertToStripeAmount(amount: number, currency: string = "EUR"): number {
   const currencyUpper = currency.toUpperCase();
   if (ZERO_DECIMAL_CURRENCIES.has(currencyUpper)) {
-    return amount;
+    return Math.round(amount);
   }
   return Math.round(amount * 100);
 }

@@ -43,20 +43,30 @@ async function dedupeStripeAccountIds(apply = false) {
     }
 
     console.warn(`Found ${duplicates.length} duplicate stripe.accountId values.`);
+    const UPDATE_BATCH_SIZE = 500;
+    let totalFound = 0;
+    let totalDuplicateUsers = 0;
+    let totalCleared = 0;
 
     for (const dup of duplicates) {
+      totalFound += 1;
       const [primaryUserId, ...duplicateUserIds] = dup.userIds;
+      totalDuplicateUsers += duplicateUserIds.length;
       console.log(
         `stripe.accountId=${dup._id} primary=${primaryUserId} duplicates=${duplicateUserIds.join(",")}`
       );
 
       if (apply && duplicateUserIds.length > 0) {
-        await User.updateMany(
-          { _id: { $in: duplicateUserIds } },
-          {
-            $unset: { stripe: "" },
-          }
-        );
+        for (let i = 0; i < duplicateUserIds.length; i += UPDATE_BATCH_SIZE) {
+          const batchIds = duplicateUserIds.slice(i, i + UPDATE_BATCH_SIZE);
+          const result = await User.updateMany(
+            { _id: { $in: batchIds } },
+            {
+              $unset: { stripe: "" },
+            }
+          );
+          totalCleared += result.modifiedCount || 0;
+        }
         console.log(`Cleared stripe field for ${duplicateUserIds.length} duplicate users.`);
       }
     }
@@ -64,6 +74,10 @@ async function dedupeStripeAccountIds(apply = false) {
     if (!apply) {
       console.log("Dry run complete. Re-run with APPLY_CHANGES=true to clear duplicates.");
     }
+
+    console.log(
+      `Dedupe summary: duplicateAccountIds=${totalFound}, duplicateUsers=${totalDuplicateUsers}, clearedUsers=${totalCleared}, apply=${apply}`
+    );
   } finally {
     if (openedConnection) {
       await mongoose.disconnect();

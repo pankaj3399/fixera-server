@@ -79,10 +79,6 @@ const fetchProjectTeamMembers = async (project: IProject): Promise<IUser[]> => {
     ? project.resources.map((r) => r.toString())
     : [];
 
-  if (!resourceIds.length && project.professionalId) {
-    resourceIds.push(project.professionalId.toString());
-  }
-
   if (!resourceIds.length) {
     return [];
   }
@@ -382,6 +378,13 @@ export const getScheduleProposalsForProject = async (
       project.timeMode || project.executionDuration?.unit || "days";
 
     const teamMembers = await fetchProjectTeamMembers(project);
+    if (!teamMembers.length) {
+      console.warn(
+        `[SCHEDULING] Project ${projectId} has no resources; cannot generate schedule proposals.`
+      );
+      return null;
+    }
+
     const earliestBookableDate = await getEarliestBookableDate(project, teamMembers);
 
     if (!project.executionDuration) {
@@ -411,37 +414,11 @@ export const getScheduleProposalsForProject = async (
       ? project.minResources
       : 1;
 
-    if (!teamMembers.length) {
-      // No team members with availability information; fall back to simple proposals.
-      const fallbackStart = startOfDay(earliestBookableDate);
-      if (mode === "hours") {
-        return {
-          mode,
-          earliestBookableDate,
-          earliestProposal: {
-            start: fallbackStart,
-            end: addDuration(fallbackStart, totalHours, "hours"),
-          },
-        };
-      }
-
-      const durationDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
-      return {
-        mode,
-        earliestBookableDate,
-        earliestProposal: {
-          start: fallbackStart,
-          end: addDuration(fallbackStart, durationDays, "days"),
-        },
-        shortestThroughputProposal: {
-          start: fallbackStart,
-          end: addDuration(fallbackStart, durationDays, "days"),
-        },
-      };
-    }
-
     // Build day-by-day availability for a search horizon.
-    const searchStart = startOfDay(earliestBookableDate);
+    const searchStart =
+      mode === "hours"
+        ? new Date(earliestBookableDate)
+        : startOfDay(earliestBookableDate);
     const availabilityByDay: WindowAvailability[] = [];
 
     for (let i = 0; i < MAX_SEARCH_DAYS; i++) {
@@ -458,7 +435,7 @@ export const getScheduleProposalsForProject = async (
     }
 
     // Get the minimum overlap percentage from project settings (default 70%)
-    const minOverlapPercentage = project.minOverlapPercentage || 70;
+    const minOverlapPercentage = project.minOverlapPercentage ?? 70;
 
     if (mode === "hours") {
       // Hours mode: All resources must be available for the entire project duration.

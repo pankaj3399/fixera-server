@@ -22,6 +22,16 @@ const COUNTRY_NAME_TO_CODE: Record<string, string> = {
   'switzerland': 'CH', 'norway': 'NO',
 };
 
+const DEFAULT_ONBOARDING_THROTTLE_MS = 60_000;
+const parsedOnboardingThrottleMs = Number.parseInt(
+  process.env.STRIPE_ONBOARDING_THROTTLE_MS || `${DEFAULT_ONBOARDING_THROTTLE_MS}`,
+  10
+);
+const ONBOARDING_THROTTLE_MS =
+  Number.isFinite(parsedOnboardingThrottleMs) && parsedOnboardingThrottleMs > 0
+    ? parsedOnboardingThrottleMs
+    : DEFAULT_ONBOARDING_THROTTLE_MS;
+
 /**
  * Convert a country value to a 2-letter ISO code.
  * Accepts either a name ("Belgium") or already a code ("BE").
@@ -214,6 +224,24 @@ export const createOnboardingLink = async (req: Request, res: Response) => {
         success: false,
         error: { code: 'NO_STRIPE_ACCOUNT', message: 'Stripe account not found. Create one first.' }
       });
+    }
+
+    const lastRefreshMs = user.stripe.lastOnboardingRefresh
+      ? user.stripe.lastOnboardingRefresh.getTime()
+      : null;
+    if (lastRefreshMs && Number.isFinite(lastRefreshMs)) {
+      const elapsedMs = Date.now() - lastRefreshMs;
+      if (elapsedMs < ONBOARDING_THROTTLE_MS) {
+        const retryAfterMs = ONBOARDING_THROTTLE_MS - elapsedMs;
+        return res.status(429).json({
+          success: false,
+          error: {
+            code: 'ONBOARDING_LINK_THROTTLED',
+            message: 'Please wait before requesting another onboarding link.'
+          },
+          retryAfterMs,
+        });
+      }
     }
 
     // Generate account link for onboarding
