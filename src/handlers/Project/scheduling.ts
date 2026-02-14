@@ -1,20 +1,23 @@
 import Project, { IProject } from "../../models/project";
 import User, { IUser } from "../../models/user";
+import type { ScheduleProposals as EngineScheduleProposals } from "../../utils/scheduleEngine";
 
 interface TimeWindow {
   start: Date;
   end: Date;
 }
 
-interface ScheduleProposals {
-  mode: "hours" | "days";
+type ScheduleProposals = Pick<EngineScheduleProposals, "mode"> & {
   earliestBookableDate: Date;
   earliestProposal?: TimeWindow;
   shortestThroughputProposal?: TimeWindow;
-}
+  _debug?: EngineScheduleProposals["_debug"];
+};
 
 const HOURS_PER_DAY = 24;
 const MAX_SEARCH_DAYS = 90;
+// Business rule: if more than this many hours are blocked in a day, the day is treated as unavailable.
+export const MAX_BLOCKED_HOURS_THRESHOLD = 4;
 
 const startOfDay = (date: Date): Date => {
   const d = new Date(date);
@@ -75,8 +78,26 @@ const dayOverlapsRange = (day: Date, start: Date, end: Date): boolean => {
   return start < dayEnd && end > dayStart;
 };
 
+const fetchProjectTeamMembers = async (project: IProject): Promise<IUser[]> => {
+  const resourceIds: string[] = Array.isArray(project.resources)
+    ? project.resources.map((r) => r.toString())
+    : [];
 
-const getEarliestBookableDate = async (project: IProject): Promise<Date> => {
+  if (!resourceIds.length && project.professionalId) {
+    resourceIds.push(project.professionalId.toString());
+  }
+
+  if (!resourceIds.length) {
+    return [];
+  }
+
+  return User.find({ _id: { $in: resourceIds } });
+};
+
+const getEarliestBookableDate = async (
+  project: IProject,
+  teamMembers?: IUser[]
+): Promise<Date> => {
   const now = new Date();
   if (!project.preparationDuration || project.preparationDuration.value === 0) {
     return now;
@@ -90,23 +111,9 @@ const getEarliestBookableDate = async (project: IProject): Promise<Date> => {
   // For days-based preparation, count only working days
   const prepDays = project.preparationDuration.value;
 
-  // Get team members to determine working days
-  const resourceIds: string[] = Array.isArray(project.resources)
-    ? project.resources.map((r) => r.toString())
-    : [];
+  const resolvedTeamMembers = teamMembers || await fetchProjectTeamMembers(project);
 
-  if (!resourceIds.length && project.professionalId) {
-    resourceIds.push(project.professionalId.toString());
-  }
-
-  if (!resourceIds.length) {
-    // No team members defined, fallback to simple addition
-    return addDuration(now, prepDays, 'days');
-  }
-
-  const teamMembers: IUser[] = await User.find({ _id: { $in: resourceIds } });
-
-  if (!teamMembers.length) {
+  if (!resolvedTeamMembers.length) {
     // No team members found, fallback to simple addition
     return addDuration(now, prepDays, 'days');
   }
@@ -114,7 +121,7 @@ const getEarliestBookableDate = async (project: IProject): Promise<Date> => {
   // Count working days for preparation
   let workingDaysCount = 0;
   let currentDate = startOfDay(now);
-  const maxIterations = prepDays * 3; // Safety limit (3x expected)
+  const maxIterations = Math.max(prepDays * 3, 30); // Safety limit (3x expected, minimum 30 days)
   let iterations = 0;
 
   while (workingDaysCount < prepDays && iterations < maxIterations) {
@@ -122,7 +129,7 @@ const getEarliestBookableDate = async (project: IProject): Promise<Date> => {
     currentDate = addDuration(currentDate, 1, 'days');
 
     // Check if at least one team member is available on this day
-    const availableMembers = teamMembers.filter((member) => {
+    const availableMembers = resolvedTeamMembers.filter((member) => {
       const dayKey = getWeekdayKey(currentDate);
       const availability = member.availability || undefined;
       const dayAvailability = availability?.[dayKey];
@@ -162,6 +169,14 @@ const getEarliestBookableDate = async (project: IProject): Promise<Date> => {
     if (availableMembers.length > 0) {
       workingDaysCount++;
     }
+  }
+
+  if (iterations >= maxIterations && workingDaysCount < prepDays) {
+    const message =
+      `getEarliestBookableDate exceeded max iterations while counting preparation days: ` +
+      `prepDays=${prepDays}, workingDaysCount=${workingDaysCount}, maxIterations=${maxIterations}, currentDate=${currentDate.toISOString()}`;
+    console.warn(message);
+    throw new Error(message);
   }
 
   return currentDate;
@@ -250,8 +265,8 @@ const getAvailableMembersForDay = (members: IUser[], day: Date): IUser[] => {
     // Calculate blocked hours
     const blockedHours = calculateBlockedHoursForDay(member, day);
 
-    // Apply 4-hour rule: if more than 4 hours blocked, day is unavailable
-    if (blockedHours > 4) {
+    // Apply blocked-hours rule: if blocked hours exceed threshold, day is unavailable.
+    if (blockedHours > MAX_BLOCKED_HOURS_THRESHOLD) {
       return false;
     }
 
@@ -354,103 +369,92 @@ const meetsOverlapRequirement = (
 export const getScheduleProposalsForProject = async (
   projectId: string
 ): Promise<ScheduleProposals | null> => {
-  const project = await Project.findById(projectId);
-  if (!project) return null;
+  try {
+    const project = await Project.findById(projectId);
+    if (!project) return null;
 
-  const mode: "hours" | "days" =
-    project.timeMode || project.executionDuration?.unit || "days";
+    const mode: "hours" | "days" =
+      project.timeMode || project.executionDuration?.unit || "days";
 
-  const earliestBookableDate = await getEarliestBookableDate(project);
+    const teamMembers = await fetchProjectTeamMembers(project);
+    const earliestBookableDate = await getEarliestBookableDate(project, teamMembers);
 
-  if (!project.executionDuration) {
-    return {
-      mode,
-      earliestBookableDate,
-    };
-  }
+    if (!project.executionDuration) {
+      return {
+        mode,
+        earliestBookableDate,
+      };
+    }
 
-  const executionHours = toHours(
-    project.executionDuration.value,
-    project.executionDuration.unit
-  );
+    const executionHours = toHours(
+      project.executionDuration.value,
+      project.executionDuration.unit
+    );
 
   // Buffer duration is optional, default to 0 if not set
-  const bufferHours = project.bufferDuration
-    ? toHours(project.bufferDuration.value, project.bufferDuration.unit)
-    : 0;
+    const bufferHours = project.bufferDuration
+      ? toHours(project.bufferDuration.value, project.bufferDuration.unit)
+      : 0;
 
-  const totalHours = executionHours + bufferHours;
+    const totalHours = executionHours + bufferHours;
 
   // Separate execution and buffer for formula calculations
-  const executionDays = Math.max(1, Math.ceil(executionHours / HOURS_PER_DAY));
-  const bufferDays = Math.ceil(bufferHours / HOURS_PER_DAY);
+    const executionDays = Math.max(1, Math.ceil(executionHours / HOURS_PER_DAY));
+    const bufferDays = Math.ceil(bufferHours / HOURS_PER_DAY);
 
-  const minResources = project.minResources && project.minResources > 0
-    ? project.minResources
-    : 1;
+    const minResources = project.minResources && project.minResources > 0
+      ? project.minResources
+      : 1;
 
-  // Load team members based on project.resources; if none, fallback to professionalId.
-  const resourceIds: string[] = Array.isArray(project.resources)
-    ? project.resources.map((r) => r.toString())
-    : [];
+    if (!teamMembers.length) {
+      // No team members with availability information; fall back to simple proposals.
+      const fallbackStart = startOfDay(earliestBookableDate);
+      if (mode === "hours") {
+        return {
+          mode,
+          earliestBookableDate,
+          earliestProposal: {
+            start: fallbackStart,
+            end: addDuration(fallbackStart, totalHours, "hours"),
+          },
+        };
+      }
 
-  if (!resourceIds.length && project.professionalId) {
-    resourceIds.push(project.professionalId.toString());
-  }
-
-  const teamMembers: IUser[] = resourceIds.length
-    ? await User.find({ _id: { $in: resourceIds } })
-    : [];
-
-  if (!teamMembers.length) {
-    // No team members with availability information; fall back to simple proposals.
-    const fallbackStart = startOfDay(earliestBookableDate);
-    if (mode === "hours") {
+      const durationDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
       return {
         mode,
         earliestBookableDate,
         earliestProposal: {
           start: fallbackStart,
-          end: addDuration(fallbackStart, totalHours, "hours"),
+          end: addDuration(fallbackStart, durationDays, "days"),
+        },
+        shortestThroughputProposal: {
+          start: fallbackStart,
+          end: addDuration(fallbackStart, durationDays, "days"),
         },
       };
     }
 
-    const durationDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
-    return {
-      mode,
-      earliestBookableDate,
-      earliestProposal: {
-        start: fallbackStart,
-        end: addDuration(fallbackStart, durationDays, "days"),
-      },
-      shortestThroughputProposal: {
-        start: fallbackStart,
-        end: addDuration(fallbackStart, durationDays, "days"),
-      },
-    };
-  }
+    // Build day-by-day availability for a search horizon.
+    const searchStart = startOfDay(earliestBookableDate);
+    const availabilityByDay: {
+      date: Date;
+      availableMembers: IUser[];
+    }[] = [];
 
-  // Build day-by-day availability for a search horizon.
-  const searchStart = startOfDay(earliestBookableDate);
-  const availabilityByDay: {
-    date: Date;
-    availableMembers: IUser[];
-  }[] = [];
-
-  for (let i = 0; i < MAX_SEARCH_DAYS; i++) {
-    const day = addDuration(searchStart, i, "days");
-    const availableMembers = getAvailableMembersForDay(teamMembers, day);
-    availabilityByDay.push({
-      date: day,
-      availableMembers: availableMembers,
-    });
-  }
+    for (let i = 0; i < MAX_SEARCH_DAYS; i++) {
+      const day = addDuration(searchStart, i, "days");
+      const availableMembers = getAvailableMembersForDay(teamMembers, day);
+      availabilityByDay.push({
+        date: day,
+        availableMembers: availableMembers,
+      });
+    }
 
   // Get the minimum overlap percentage from project settings (default 70%)
-  const minOverlapPercentage = project.minOverlapPercentage || 70;
+    const minOverlapPercentage = project.minOverlapPercentage || 70;
 
-  if (mode === "hours") {
+    if (mode === "hours") {
     // Hours mode: All resources must be available for the entire project duration.
     // We look for the earliest window where ALL minResources are continuously available.
     const requiredDurationHours = totalHours;
@@ -482,30 +486,30 @@ export const getScheduleProposalsForProject = async (
       break;
     }
 
-    return {
-      mode,
-      earliestBookableDate,
-      earliestProposal: earliestWindow,
-    };
-  }
+      return {
+        mode,
+        earliestBookableDate,
+        earliestProposal: earliestWindow,
+      };
+    }
 
   // Days mode: compute duration and throughput limits.
   // NEW FORMULA: (execution + X%) + buffer
   // Earliest: (execution + 100%) + buffer
   // Shortest: (execution + 20%) + buffer
-  const totalDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
-  const maxThroughputEarliest = (executionDays * 2) + bufferDays; // (execution + 100%) + buffer
-  const maxThroughputShortest = Math.max(
-    totalDays,
-    Math.floor(executionDays * 1.2) + bufferDays
-  ); // (execution + 20%) + buffer
+    const totalDays = Math.max(1, Math.ceil(totalHours / HOURS_PER_DAY));
+    const maxThroughputEarliest = (executionDays * 2) + bufferDays; // (execution + 100%) + buffer
+    const maxThroughputShortest = Math.max(
+      totalDays,
+      Math.floor(executionDays * 1.2) + bufferDays
+    ); // (execution + 20%) + buffer
 
-  let earliestProposal: TimeWindow | undefined;
-  let shortestThroughputProposal: TimeWindow | undefined;
+    let earliestProposal: TimeWindow | undefined;
+    let shortestThroughputProposal: TimeWindow | undefined;
 
   // EARLIEST POSSIBLE: Find earliest contiguous block where primary person (earliest availability)
   // and other resources meet overlap requirements
-  if (minResources === 1) {
+    if (minResources === 1) {
     // Single resource - simple case
     for (let i = 0; i <= MAX_SEARCH_DAYS - totalDays; i++) {
       const windowDays = availabilityByDay.slice(i, i + totalDays);
@@ -520,7 +524,7 @@ export const getScheduleProposalsForProject = async (
       earliestProposal = { start, end };
       break;
     }
-  } else {
+    } else {
     // Multiple resources - need primary person selection and overlap calculation
     // Find earliest availability for each member
     const earliestAvailability = findEarliestAvailabilityPerMember(
@@ -603,9 +607,9 @@ export const getScheduleProposalsForProject = async (
         if (found) break;
       }
     }
-  }
+    }
 
-  if (minResources === 1) {
+    if (minResources === 1) {
     // Single resource - simple case
     for (let length = totalDays; length <= maxThroughputShortest; length++) {
       let found = false;
@@ -625,7 +629,7 @@ export const getScheduleProposalsForProject = async (
       }
       if (found) break;
     }
-  } else {
+    } else {
     // Multiple resources - select primary person with MOST availability
     const searchEnd = addDuration(searchStart, MAX_SEARCH_DAYS, "days");
     let primaryMember: IUser | undefined;
@@ -697,12 +701,20 @@ export const getScheduleProposalsForProject = async (
         if (found) break;
       }
     }
-  }
+    }
 
-  return {
-    mode,
-    earliestBookableDate,
-    earliestProposal,
-    shortestThroughputProposal,
-  };
+    return {
+      mode,
+      earliestBookableDate,
+      earliestProposal,
+      shortestThroughputProposal,
+    };
+  } catch (error: any) {
+    const contextualError = new Error(
+      `getScheduleProposalsForProject: failed to load project or users: ${error?.message || error}`
+    );
+    (contextualError as any).cause = error;
+    console.error("getScheduleProposalsForProject error:", error);
+    throw contextualError;
+  }
 };

@@ -467,7 +467,7 @@ async function searchProjects(
       ]);
     }
 
-    console.log("Found", total, "projects, returning", projects.length);
+    console.log("[SEARCH] Found", total, "projects, returning", projects.length);
 
     if (hasLocationFilter && !usedGeoSearch) {
       filteredResults = projects.filter((project: any) => {

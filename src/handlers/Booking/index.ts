@@ -4,7 +4,6 @@ import Payment from "../../models/payment";
 import User from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
-import { createPaymentIntent } from "../Stripe/payment";
 import {
   buildProjectScheduleWindow,
   validateProjectScheduleSelection,

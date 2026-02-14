@@ -1,6 +1,5 @@
 import { Request, Response } from 'express';
 import Payment from '../../models/payment';
-import Booking from '../../models/booking';
 import { captureAndTransferPayment } from '../Stripe/payment';
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -99,17 +98,27 @@ export const capturePayment = async (req: Request, res: Response) => {
     const result = await captureAndTransferPayment(bookingId);
 
     if (!result.success) {
+      if (result.error?.code === 'TRANSFER_FAILED') {
+        return res.status(207).json({
+          success: true,
+          msg: 'Payment capture succeeded, but transfer to professional failed',
+          warning: {
+            code: result.error.code,
+            details: result.error,
+          },
+          data: {
+            bookingId,
+            captureSucceeded: true,
+            transferSucceeded: false,
+          },
+        });
+      }
+
       return res.status(500).json({
         success: false,
         msg: 'Failed to capture and transfer payment',
         error: result.error
       });
-    }
-
-    // Update booking status to completed
-    const booking = await Booking.findById(bookingId);
-    if (booking && booking.status !== 'completed') {
-      await (booking as any).updateStatus('completed', req.user?._id?.toString(), 'Payment captured by admin');
     }
 
     return res.json({

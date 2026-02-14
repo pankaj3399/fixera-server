@@ -12,17 +12,22 @@ import Payment from '../../models/payment';
  */
 export const getPaymentStats = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user._id;
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
+      });
+    }
 
     const [completedStats, pendingStats] = await Promise.all([
       Payment.aggregate([
         { $match: { professional: userId, status: 'completed' } },
         {
           $group: {
-            _id: null,
+            _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
             totalEarnings: { $sum: '$professionalPayout' },
             count: { $sum: 1 },
-            currency: { $first: '$currency' },
           },
         },
       ]),
@@ -30,23 +35,54 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         { $match: { professional: userId, status: 'authorized' } },
         {
           $group: {
-            _id: null,
+            _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
             pendingEarnings: { $sum: '$professionalPayout' },
           },
         },
       ]),
     ]);
 
-    const completed = completedStats[0] || { totalEarnings: 0, count: 0, currency: 'EUR' };
-    const pending = pendingStats[0] || { pendingEarnings: 0 };
+    const totalsByCurrencyMap = new Map<
+      string,
+      { currency: string; totalEarnings: number; pendingEarnings: number; completedBookings: number }
+    >();
+
+    completedStats.forEach((bucket: any) => {
+      const currency = bucket?._id?.currency || 'EUR';
+      totalsByCurrencyMap.set(currency, {
+        currency,
+        totalEarnings: bucket.totalEarnings || 0,
+        pendingEarnings: 0,
+        completedBookings: bucket.count || 0,
+      });
+    });
+
+    pendingStats.forEach((bucket: any) => {
+      const currency = bucket?._id?.currency || 'EUR';
+      const current = totalsByCurrencyMap.get(currency) || {
+        currency,
+        totalEarnings: 0,
+        pendingEarnings: 0,
+        completedBookings: 0,
+      };
+      current.pendingEarnings = bucket.pendingEarnings || 0;
+      totalsByCurrencyMap.set(currency, current);
+    });
+
+    const totalsByCurrency = Array.from(totalsByCurrencyMap.values());
+    const totalEarnings = totalsByCurrency.reduce((sum, item) => sum + (item.totalEarnings || 0), 0);
+    const pendingEarnings = totalsByCurrency.reduce((sum, item) => sum + (item.pendingEarnings || 0), 0);
+    const completedBookings = totalsByCurrency.reduce((sum, item) => sum + (item.completedBookings || 0), 0);
+    const currency = totalsByCurrency.length === 1 ? totalsByCurrency[0].currency : 'MULTI';
 
     res.json({
       success: true,
       data: {
-        totalEarnings: completed.totalEarnings || 0,
-        pendingEarnings: pending.pendingEarnings || 0,
-        completedBookings: completed.count || 0,
-        currency: completed.currency || 'EUR',
+        totalEarnings,
+        pendingEarnings,
+        completedBookings,
+        currency,
+        totalsByCurrency,
       },
     });
   } catch (error: any) {
@@ -64,7 +100,14 @@ export const getPaymentStats = async (req: Request, res: Response) => {
  */
 export const getTransactions = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user._id;
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
+      });
+    }
+
     const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 10, 1), 50);
 
     const transactions = await Payment.find({ professional: userId })

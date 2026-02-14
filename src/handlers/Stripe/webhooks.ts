@@ -9,19 +9,85 @@ import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import Booking from '../../models/booking';
 import Payment from '../../models/payment';
 import User from '../../models/user';
+import StripeEvent from '../../models/stripeEvent';
+import { convertFromStripeAmount } from '../../utils/payment';
+import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 
-// In-memory set for recent event deduplication (supplement with DB check for durability)
-const processedEvents = new Set<string>();
-const MAX_PROCESSED_EVENTS = 10000;
+const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
+  const now = new Date();
 
-function markEventProcessed(eventId: string) {
-  processedEvents.add(eventId);
-  // Evict oldest entries when set gets too large
-  if (processedEvents.size > MAX_PROCESSED_EVENTS) {
-    const first = processedEvents.values().next().value;
-    if (first) processedEvents.delete(first);
+  try {
+    const insertResult = await StripeEvent.updateOne(
+      { eventId: event.id },
+      {
+        $setOnInsert: {
+          eventId: event.id,
+          eventType: event.type,
+          status: 'processing',
+          attempts: 1,
+          stripeCreatedAt: new Date(event.created * 1000),
+          firstSeenAt: now,
+          lastAttemptAt: now,
+        },
+      },
+      { upsert: true }
+    );
+
+    if (insertResult.upsertedCount === 1) {
+      return { shouldProcess: true };
+    }
+
+    const existing = await StripeEvent.findOne({ eventId: event.id }).lean();
+    if (existing?.status === 'failed') {
+      const claimResult = await StripeEvent.updateOne(
+        { eventId: event.id, status: 'failed' },
+        {
+          $set: { status: 'processing', lastAttemptAt: now, lastError: undefined },
+          $inc: { attempts: 1 },
+        }
+      );
+      if (claimResult.modifiedCount === 1) {
+        return { shouldProcess: true };
+      }
+    }
+
+    return { shouldProcess: false };
+  } catch (error: any) {
+    if (error?.code === 11000) {
+      return { shouldProcess: false };
+    }
+    throw error;
   }
-}
+};
+
+const markWebhookEventProcessed = async (eventId: string) => {
+  await StripeEvent.updateOne(
+    { eventId },
+    {
+      $set: {
+        status: 'processed',
+        processedAt: new Date(),
+        lastAttemptAt: new Date(),
+        lastError: undefined,
+      },
+    }
+  );
+};
+
+const markWebhookEventFailed = async (eventId: string, error: unknown) => {
+  const message =
+    error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
+  await StripeEvent.updateOne(
+    { eventId },
+    {
+      $set: {
+        status: 'failed',
+        lastError: message,
+        lastAttemptAt: new Date(),
+      },
+    }
+  );
+};
 
 /**
  * Main webhook endpoint handler
@@ -48,8 +114,15 @@ export const handleWebhook = async (req: Request, res: Response) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Deduplicate: skip already-processed events
-  if (processedEvents.has(event.id)) {
+  let reservation: { shouldProcess: boolean };
+  try {
+    reservation = await reserveWebhookEvent(event);
+  } catch (reservationError: any) {
+    console.error(`Failed to persist Stripe event ${event.id} before processing:`, reservationError);
+    return res.status(500).json({ received: false, error: 'Failed to reserve webhook event' });
+  }
+
+  if (!reservation.shouldProcess) {
     console.log(`Webhook duplicate skipped: ${event.id}`);
     return res.json({ received: true, duplicate: true });
   }
@@ -112,12 +185,13 @@ export const handleWebhook = async (req: Request, res: Response) => {
     }
 
     // Mark as processed after successful handling
-    markEventProcessed(event.id);
+    await markWebhookEventProcessed(event.id);
 
     // Return 200 to acknowledge receipt
     res.json({ received: true });
 
   } catch (error: any) {
+    await markWebhookEventFailed(event.id, error);
     console.error(`Error handling webhook ${event.type}:`, error);
     // Return 500 so Stripe retries the webhook
     res.status(500).json({ received: false, error: error.message });
@@ -239,17 +313,18 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
   const booking = await Booking.findOne({ 'payment.stripePaymentIntentId': paymentIntentId });
   if (!booking || !booking.payment) return;
 
-  const refundAmount = charge.amount_refunded / 100;
-  const totalAmount = charge.amount / 100;
+  const refundAmount = convertFromStripeAmount(charge.amount_refunded, charge.currency);
+  const totalAmount = convertFromStripeAmount(charge.amount, charge.currency);
 
   if (refundAmount >= totalAmount) {
     booking.payment.status = 'refunded';
+    booking.status = 'refunded';
   } else {
     booking.payment.status = 'partially_refunded';
+    // Keep booking.status unchanged for partial refunds.
   }
 
   booking.payment.refundedAt = new Date();
-  booking.status = 'refunded';
   await booking.save();
 
   await Payment.findOneAndUpdate(
@@ -274,33 +349,38 @@ async function handleDisputeCreated(dispute: Stripe.Dispute) {
     return;
   }
 
-  // Record dispute on the payment
-  booking.payment.status = 'refunded';
-  booking.payment.refundReason = `Dispute: ${dispute.reason || 'unknown'}`;
-  booking.payment.refundSource = 'platform';
-  booking.payment.refundNotes = `Dispute ${dispute.id} opened. Amount: ${dispute.amount / 100} ${dispute.currency}. Status: ${dispute.status}`;
-  booking.payment.refundedAt = new Date();
+  const disputeAmount = convertFromStripeAmount(dispute.amount, dispute.currency);
+
+  // Record dispute metadata while preserving financial state until dispute resolution.
+  booking.payment.status = 'disputed';
+  booking.payment.disputeId = dispute.id;
+  booking.payment.disputeReason = dispute.reason || 'unknown';
+  booking.payment.disputeAmountPending = disputeAmount;
+  booking.payment.disputeStatus = dispute.status;
+  booking.payment.disputeOpenedAt = new Date();
+  booking.payment.refundNotes = `Dispute ${dispute.id} opened. Amount pending: ${disputeAmount} ${String(dispute.currency).toUpperCase()}. Status: ${dispute.status}`;
   await booking.save();
 
   await Payment.findOneAndUpdate(
     { booking: booking._id },
     {
-      status: 'refunded',
-      refundedAt: new Date(),
-      $push: {
-        refunds: {
-          amount: dispute.amount / 100,
-          reason: `Dispute: ${dispute.reason || 'unknown'}`,
-          refundId: dispute.id,
-          refundedAt: new Date(),
-          source: 'platform',
-          notes: `Chargeback dispute opened. Status: ${dispute.status}`,
+      $set: {
+        status: 'disputed',
+        metadata: {
+          disputeId: dispute.id,
+          disputeReason: dispute.reason || 'unknown',
+          disputeAmountPending: disputeAmount,
+          disputeStatus: dispute.status,
+          disputeOpenedAt: booking.payment.disputeOpenedAt,
         },
       },
-    }
+    },
+    { upsert: true }
   );
 
-  console.error(`DISPUTE CREATED for booking ${booking._id}: ${dispute.id} - Amount: ${dispute.amount / 100} ${dispute.currency} - Reason: ${dispute.reason}`);
+  console.error(
+    `DISPUTE CREATED for booking ${booking._id}: ${dispute.id} - Amount pending: ${disputeAmount} ${String(dispute.currency).toUpperCase()} - Reason: ${dispute.reason}`
+  );
 }
 
 /**
@@ -318,6 +398,7 @@ async function handleDisputeClosed(dispute: Stripe.Dispute) {
     // We won the dispute - restore payment status
     booking.payment.status = 'completed';
     booking.payment.refundNotes = `Dispute ${dispute.id} won. Funds restored.`;
+    booking.payment.disputeStatus = dispute.status;
     await booking.save();
 
     await Payment.findOneAndUpdate(
@@ -328,8 +409,40 @@ async function handleDisputeClosed(dispute: Stripe.Dispute) {
     console.log(`Dispute WON for booking ${booking._id}: ${dispute.id}`);
   } else {
     // Dispute lost - funds are gone
+    const disputeAmount = convertFromStripeAmount(dispute.amount, dispute.currency);
+    booking.payment.status = 'refunded';
+    booking.payment.refundedAt = new Date();
+    booking.payment.refundReason = `Dispute lost: ${dispute.reason || 'unknown'}`;
+    booking.payment.refundSource = 'platform';
     booking.payment.refundNotes = `Dispute ${dispute.id} lost. Status: ${dispute.status}`;
+    booking.payment.disputeStatus = dispute.status;
+    booking.status = 'refunded';
     await booking.save();
+
+    await Payment.findOneAndUpdate(
+      { booking: booking._id },
+      {
+        $set: {
+          status: 'refunded',
+          refundedAt: booking.payment.refundedAt,
+          metadata: {
+            disputeId: dispute.id,
+            disputeStatus: dispute.status,
+          },
+        },
+        $push: {
+          refunds: {
+            amount: disputeAmount,
+            reason: `Dispute lost: ${dispute.reason || 'unknown'}`,
+            refundId: dispute.id,
+            refundedAt: booking.payment.refundedAt || new Date(),
+            source: 'platform',
+            notes: `Dispute ${dispute.id} closed with status ${dispute.status}`,
+          },
+        },
+      },
+      { upsert: true }
+    );
 
     console.error(`DISPUTE LOST for booking ${booking._id}: ${dispute.id} - Status: ${dispute.status}`);
   }
@@ -371,8 +484,8 @@ async function handleTransferReversed(transfer: Stripe.Transfer) {
 }
 
 /**
- * Handle transfer.failed event
- * Transfer to professional's connected account failed
+ * Handle account.updated event.
+ * Processes changes to a connected account and syncs status fields locally.
  */
 async function handleAccountUpdated(account: Stripe.Account) {
   const userId = account.metadata?.userId;
@@ -386,8 +499,10 @@ async function handleAccountUpdated(account: Stripe.Account) {
   user.stripe.chargesEnabled = account.charges_enabled || false;
   user.stripe.payoutsEnabled = account.payouts_enabled || false;
   user.stripe.detailsSubmitted = account.details_submitted || false;
-  user.stripe.accountStatus = account.charges_enabled ? 'active' :
-                               account.details_submitted ? 'pending' : 'pending';
+  user.stripe.accountStatus = mapStripeAccountStatus(
+    account.charges_enabled,
+    account.details_submitted
+  );
   await user.save();
 
   console.log(`Account updated via webhook for user ${userId}`);
@@ -417,5 +532,6 @@ async function handleAccountDeauthorized(connectedAccountId: string | null) {
  * Handle payout.paid event
  */
 async function handlePayoutPaid(payout: Stripe.Payout) {
-  console.log(`Payout paid: ${payout.id} - Amount: ${payout.amount / 100} ${payout.currency}`);
+  const payoutAmount = convertFromStripeAmount(payout.amount, payout.currency);
+  console.log(`Payout paid: ${payout.id} - Amount: ${payoutAmount} ${String(payout.currency).toUpperCase()}`);
 }

@@ -7,6 +7,7 @@ import { Request, Response } from 'express';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import User from '../../models/user';
 import { StripeAccountStatusResponse } from '../../Types/stripe';
+import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 
 // Map country names to ISO 3166-1 alpha-2 codes for Stripe
 const COUNTRY_NAME_TO_CODE: Record<string, string> = {
@@ -25,14 +26,25 @@ const COUNTRY_NAME_TO_CODE: Record<string, string> = {
  * Convert a country value to a 2-letter ISO code.
  * Accepts either a name ("Belgium") or already a code ("BE").
  */
-function toCountryCode(value: string | undefined): string {
-  if (!value) return 'BE';
+function toCountryCode(value: string | undefined): string | null {
+  if (!value) {
+    console.warn('[STRIPE CONNECT] Missing country value, cannot derive Stripe country code');
+    return null;
+  }
+
   const trimmed = value.trim();
   // Already a 2-letter code
   if (/^[A-Z]{2}$/.test(trimmed)) return trimmed;
   if (/^[a-z]{2}$/.test(trimmed)) return trimmed.toUpperCase();
   // Look up by name
-  return COUNTRY_NAME_TO_CODE[trimmed.toLowerCase()] || 'BE';
+  const mapped = COUNTRY_NAME_TO_CODE[trimmed.toLowerCase()];
+  if (!mapped) {
+    console.warn(
+      `[STRIPE CONNECT] Unknown country value "${value}", refusing to default silently`
+    );
+    return null;
+  }
+  return mapped;
 }
 
 /**
@@ -41,7 +53,13 @@ function toCountryCode(value: string | undefined): string {
  */
 export const createConnectAccount = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user._id;
+    const userId = (req as any).user?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Unauthenticated' }
+      });
+    }
 
     // Get user and verify they're a professional
     const user = await User.findById(userId);
@@ -83,7 +101,10 @@ export const createConnectAccount = async (req: Request, res: Response) => {
             chargesEnabled: account.charges_enabled || false,
             payoutsEnabled: account.payouts_enabled || false,
             detailsSubmitted: account.details_submitted || false,
-            accountStatus: account.charges_enabled ? 'active' : 'pending',
+            accountStatus: mapStripeAccountStatus(
+              account.charges_enabled,
+              account.details_submitted
+            ),
             message: 'Stripe account already exists'
           }
         });
@@ -93,16 +114,40 @@ export const createConnectAccount = async (req: Request, res: Response) => {
       }
     }
 
+    const countryCode = toCountryCode(user.businessInfo?.country || user.location?.country);
+    if (!countryCode) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INVALID_COUNTRY',
+          message: 'Unable to determine a valid country code for Stripe account creation'
+        }
+      });
+    }
+
+    const isCompany =
+      Boolean((user as any).isCompany) ||
+      user.businessInfo?.companyName != null;
+    const businessType: 'company' | 'individual' = isCompany ? 'company' : 'individual';
+
     // Create new Stripe Connect Express account
     const account = await stripe.accounts.create({
       type: 'express',
-      country: toCountryCode(user.businessInfo?.country || user.location?.country),
+      country: countryCode,
       email: user.email,
       capabilities: {
         card_payments: { requested: true },
         transfers: { requested: true },
       },
-      business_type: 'individual', // or 'company' based on user type
+      business_type: businessType,
+      ...(businessType === 'company'
+        ? {
+            company: {
+              name: user.businessInfo?.companyName || user.name,
+              ...(user.vatNumber ? { tax_id: user.vatNumber } : {}),
+            },
+          }
+        : {}),
       metadata: {
         userId: user._id.toString(),
         professionalId: user.professionalId || user._id.toString(),
@@ -156,7 +201,13 @@ export const createConnectAccount = async (req: Request, res: Response) => {
  */
 export const createOnboardingLink = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user._id;
+    const userId = (req as any).user?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Unauthenticated' }
+      });
+    }
 
     const user = await User.findById(userId);
     if (!user || !user.stripe?.accountId) {
@@ -204,7 +255,13 @@ export const createOnboardingLink = async (req: Request, res: Response) => {
  */
 export const getAccountStatus = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user._id;
+    const userId = (req as any).user?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Unauthenticated' }
+      });
+    }
 
     const user = await User.findById(userId);
     if (!user || !user.stripe?.accountId) {
@@ -222,8 +279,10 @@ export const getAccountStatus = async (req: Request, res: Response) => {
     user.stripe.chargesEnabled = account.charges_enabled || false;
     user.stripe.payoutsEnabled = account.payouts_enabled || false;
     user.stripe.detailsSubmitted = account.details_submitted || false;
-    user.stripe.accountStatus = account.charges_enabled ? 'active' :
-                                 account.details_submitted ? 'pending' : 'pending';
+    user.stripe.accountStatus = mapStripeAccountStatus(
+      account.charges_enabled,
+      account.details_submitted
+    );
     await user.save();
 
     const statusResponse: StripeAccountStatusResponse = {
@@ -262,7 +321,13 @@ export const getAccountStatus = async (req: Request, res: Response) => {
  */
 export const createDashboardLink = async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user._id;
+    const userId = (req as any).user?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Unauthenticated' }
+      });
+    }
 
     const user = await User.findById(userId);
     if (!user || !user.stripe?.accountId) {

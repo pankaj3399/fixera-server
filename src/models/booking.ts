@@ -11,8 +11,7 @@ export type BookingStatus =
   | 'completed'     // Work finished
   | 'cancelled'     // Booking cancelled by either party
   | 'dispute'       // Issue raised
-  | 'refunded'      // Payment refunded
-  | 'expired';      // Payment authorization expired (7-day limit)
+  | 'refunded';     // Payment refunded
 
 export type BookingType = 'professional' | 'project';
 
@@ -91,7 +90,7 @@ export interface IBooking extends Document {
     amount: number;
     currency: string;
     method?: 'card' | 'bank_transfer' | 'cash';
-    status: 'pending' | 'authorized' | 'completed' | 'failed' | 'refunded' | 'partially_refunded' | 'expired';
+    status: 'pending' | 'authorized' | 'completed' | 'failed' | 'refunded' | 'partially_refunded' | 'disputed';
 
     // Stripe Payment Intent fields
     stripePaymentIntentId?: string;
@@ -102,12 +101,13 @@ export interface IBooking extends Document {
 
     // Financial breakdown
     stripeFeeAmount?: number;
-    platformCommission: number;
-    professionalPayout: number;
-    netAmount: number;
-    vatAmount: number;
-    vatRate: number;
-    totalWithVat: number;
+    platformCommission?: number;
+    professionalPayout?: number;
+    netAmount?: number;
+    vatAmount?: number;
+    vatRate?: number;
+    totalWithVat?: number;
+    reverseCharge?: boolean;
 
     // Multi-currency support
     originalCurrency?: string;
@@ -120,11 +120,16 @@ export interface IBooking extends Document {
     transferredAt?: Date;
     paidAt?: Date;
     refundedAt?: Date;
+    disputeOpenedAt?: Date;
 
     // Refund
     refundReason?: string;
     refundSource?: 'professional' | 'platform' | 'mixed';
     refundNotes?: string;
+    disputeId?: string;
+    disputeReason?: string;
+    disputeAmountPending?: number;
+    disputeStatus?: string;
 
     invoiceNumber?: string;
     invoiceUrl?: string;
@@ -243,7 +248,7 @@ const BookingSchema = new Schema({
   // Status and lifecycle
   status: {
     type: String,
-    enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded', 'expired'],
+    enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
     default: 'rfq',
     required: true,
     index: true
@@ -251,7 +256,7 @@ const BookingSchema = new Schema({
   statusHistory: [{
     status: {
       type: String,
-      enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded', 'expired'],
+      enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
       required: true
     },
     timestamp: {
@@ -406,7 +411,7 @@ const BookingSchema = new Schema({
     },
     status: {
       type: String,
-      enum: ['pending', 'authorized', 'completed', 'failed', 'refunded', 'partially_refunded', 'expired'],
+      enum: ['pending', 'authorized', 'completed', 'failed', 'refunded', 'partially_refunded', 'disputed'],
       default: 'pending'
     },
 
@@ -427,6 +432,7 @@ const BookingSchema = new Schema({
     vatAmount: { type: Number },
     vatRate: { type: Number },
     totalWithVat: { type: Number },
+    reverseCharge: { type: Boolean },
 
     // Multi-currency support
     originalCurrency: { type: String },
@@ -442,6 +448,7 @@ const BookingSchema = new Schema({
     transferredAt: { type: Date },
     paidAt: { type: Date },
     refundedAt: { type: Date },
+    disputeOpenedAt: { type: Date },
 
     // Refund metadata
     refundReason: { type: String, maxlength: 500 },
@@ -450,6 +457,10 @@ const BookingSchema = new Schema({
       enum: ['professional', 'platform', 'mixed']
     },
     refundNotes: { type: String, maxlength: 1000 },
+    disputeId: { type: String },
+    disputeReason: { type: String, maxlength: 500 },
+    disputeAmountPending: { type: Number },
+    disputeStatus: { type: String },
 
     // Invoice
     invoiceNumber: { type: String },

@@ -1,4 +1,4 @@
-import { Schema, model, Document } from "mongoose";
+import { Schema, model, Document, Types } from "mongoose";
 
 // Interfaces for nested schemas
 export interface ICertification {
@@ -485,7 +485,17 @@ const ProjectSchema = new Schema<IProject>(
       default: 70,
     },
     // Step 1: Basic Info
-    professionalId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    professionalId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      set: (value: unknown) => {
+        if (typeof value === "string" && Types.ObjectId.isValid(value)) {
+          return new Types.ObjectId(value);
+        }
+        return value;
+      },
+    },
     category: { type: String, required: true },
     service: { type: String, required: true },
     areaOfWork: { type: String },

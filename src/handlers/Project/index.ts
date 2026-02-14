@@ -187,7 +187,7 @@ export const getCategoryServices = async (req: Request, res: Response) => {
 
 export const createOrUpdateDraft = async (req: Request, res: Response) => {
   try {
-    console.log("?? SAVE PROJECT REQUEST RECEIVED");
+    console.log("[PROJECT] SAVE PROJECT REQUEST RECEIVED");
     console.log("User ID:", req.user?.id);
     console.log("Request body keys:", Object.keys(req.body));
     console.log("Project ID from request:", req.body.id);
@@ -196,14 +196,14 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
     const projectData = normalizePreparationDuration(req.body);
 
     if (!professionalId) {
-      console.log("? No professional ID found");
+      console.log("[PROJECT] No professional ID found");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     let project;
 
     if (projectData.id) {
-      console.log(`?? UPDATING existing project: ${projectData.id}`);
+      console.log(`[PROJECT] Updating existing project: ${projectData.id}`);
       console.log("Professional ID:", professionalId);
 
       // First check if project exists
@@ -216,12 +216,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("Existing project title:", existingProject?.title);
 
       if (!existingProject) {
-        console.log("? Project not found or not owned by user");
+        console.log("[PROJECT] Project not found or not owned by user");
         return res.status(404).json({ error: "Project not found" });
       }
 
       // Log what fields are being updated
-      console.log("?? Fields being updated:");
+      console.log("[PROJECT] Fields being updated:");
       console.log("- Title:", projectData.title);
       console.log(
         "- Description length:",
@@ -249,8 +249,8 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         updateData.approvedBy = undefined;
       }
 
-      console.log("?? Update query:", { _id: projectData.id, professionalId });
-      console.log("?? Update data keys:", Object.keys(updateData));
+      console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
+      console.log("[PROJECT] Update data keys:", Object.keys(updateData));
 
       project = await Project.findOneAndUpdate(
         { _id: projectData.id, professionalId },
@@ -258,12 +258,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         { new: true, runValidators: true }
       );
 
-      console.log("? Project updated successfully");
+      console.log("[PROJECT] Project updated successfully");
       console.log("Updated project ID:", project?._id);
       console.log("Updated project title:", project?.title);
       console.log("Updated project status:", project?.status);
     } else {
-      console.log("?? CREATING new project");
+      console.log("[PROJECT] Creating new project");
       project = new Project({
         ...projectData,
         professionalId,
@@ -271,16 +271,16 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         autoSaveTimestamp: new Date(),
       });
       await project.save();
-      console.log("? New project created with ID:", project._id);
+      console.log("[PROJECT] New project created with ID:", project._id);
     }
 
-    console.log("?? SENDING RESPONSE - Project save complete");
+    console.log("[PROJECT] Sending response - project save complete");
     console.log("Response project ID:", project?._id);
     console.log("Response status code: 200");
 
     res.json(project);
   } catch (error: any) {
-    console.error("? AUTO-SAVE ERROR:", error);
+    console.error("[PROJECT] Auto-save error:", error);
     console.error("Error stack:", error.stack);
     res
       .status(500)
@@ -1186,7 +1186,7 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
 
 export const submitProject = async (req: Request, res: Response) => {
   try {
-    console.log("?? SUBMIT PROJECT REQUEST RECEIVED");
+    console.log("[PROJECT] SUBMIT PROJECT REQUEST RECEIVED");
     const { id } = req.params;
     const professionalId = req.user?.id;
 
@@ -1194,7 +1194,7 @@ export const submitProject = async (req: Request, res: Response) => {
     console.log("Professional ID:", professionalId);
 
     if (!professionalId) {
-      console.log("? No professional ID found");
+      console.log("[PROJECT] No professional ID found");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
@@ -1207,7 +1207,7 @@ export const submitProject = async (req: Request, res: Response) => {
     console.log("Project status:", project?.status);
 
     if (!project) {
-      console.log("? Project not found");
+      console.log("[PROJECT] Project not found");
       return res.status(404).json({ error: "Project not found" });
     }
 
@@ -1215,13 +1215,13 @@ export const submitProject = async (req: Request, res: Response) => {
     if (
       !["draft", "rejected", "pending", "published"].includes(project.status)
     ) {
-      console.log("? Invalid status for submission:", project.status);
+      console.log("[PROJECT] Invalid status for submission:", project.status);
       return res
         .status(400)
         .json({ error: "Project cannot be submitted in current status" });
     }
 
-    console.log("? Project validation passed, running quality checks...");
+    console.log("[PROJECT] Project validation passed, running quality checks...");
 
     const qualityChecks = [];
 
@@ -1281,12 +1281,12 @@ export const submitProject = async (req: Request, res: Response) => {
     const message = isResubmission
       ? "Project resubmitted for approval"
       : "Project submitted for approval";
-    console.log("? Project submitted successfully");
+    console.log("[PROJECT] Project submitted successfully");
     console.log("Message:", message);
 
     res.json({ message, project });
   } catch (error: any) {
-    console.error("? SUBMIT PROJECT ERROR:", error);
+    console.error("[PROJECT] Submit project error:", error);
     console.error("Error stack:", error.stack);
     res
       .status(500)

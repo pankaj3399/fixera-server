@@ -24,10 +24,6 @@ router.get('/connect/account-status', protect, getAccountStatus);
 router.get('/connect/dashboard-link', protect, createDashboardLink);
 router.post('/payment/confirm', protect, confirmPayment);
 router.post('/payment/refund', protect, refundPayment);
-router.post(
-  '/webhooks',
-  express.raw({ type: 'application/json' }),
-  handleWebhook
-);
+router.post('/webhooks', handleWebhook);
 
 export default router;

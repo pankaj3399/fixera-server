@@ -36,7 +36,7 @@ export interface PaymentIntentResponse {
   paymentIntentId: string;
   amount: number;
   currency: string;
-  status: 'pending' | 'requires_payment_method' | 'requires_confirmation' | 'requires_action' | 'processing' | 'requires_capture' | 'canceled' | 'succeeded';
+  status: 'requires_payment_method' | 'requires_confirmation' | 'requires_action' | 'processing' | 'requires_capture' | 'canceled' | 'succeeded';
 }
 
 export interface PaymentIntentMetadata {
@@ -56,7 +56,7 @@ export interface BookingPayment {
   // Core payment info
   amount: number;
   currency: string;
-  status: 'pending' | 'authorized' | 'completed' | 'failed' | 'refunded' | 'partially_refunded' | 'expired';
+  status: 'pending' | 'authorized' | 'completed' | 'failed' | 'refunded' | 'partially_refunded' | 'disputed';
   method: 'card' | 'bank_transfer' | 'cash';
 
   // Stripe IDs

@@ -4,6 +4,7 @@
  */
 
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Stripe from 'stripe';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import Booking from '../../models/booking';
@@ -28,6 +29,42 @@ const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   return { customerId, professionalId };
 };
 
+const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
+  'status',
+  'method',
+  'netAmount',
+  'vatAmount',
+  'vatRate',
+  'totalWithVat',
+  'platformCommission',
+  'professionalPayout',
+  'stripePaymentIntentId',
+  'stripeChargeId',
+  'stripeTransferId',
+  'stripeDestinationPayment',
+  'authorizedAt',
+  'capturedAt',
+  'transferredAt',
+  'refundedAt',
+  'canceledAt',
+  'invoiceNumber',
+  'invoiceUrl',
+  'invoiceGeneratedAt',
+  'metadata',
+  'notes',
+  'refundReason',
+  'refundSource',
+  'refundNotes',
+]);
+
+const filterPaymentOverrides = (overrides: Record<string, any>) =>
+  Object.entries(overrides).reduce((acc, [key, value]) => {
+    if (ALLOWED_PAYMENT_OVERRIDE_KEYS.has(key)) {
+      acc[key] = value;
+    }
+    return acc;
+  }, {} as Record<string, any>);
+
 const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {}, professionalOverride?: any) => {
   const { customerId, professionalId } = extractParticipantIds(booking, professionalOverride);
   const paymentSummary = booking.payment || {};
@@ -50,7 +87,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     totalWithVat: paymentSummary.totalWithVat || amount,
     platformCommission: paymentSummary.platformCommission,
     professionalPayout: paymentSummary.professionalPayout,
-    ...overrides,
+    ...filterPaymentOverrides(overrides),
   };
 };
 
@@ -197,6 +234,7 @@ export const createPaymentIntent = async (
       idempotencyKey: generateIdempotencyKey({
         bookingId: booking._id.toString(),
         operation: 'payment-intent',
+        timestamp: Date.now(),
       })
     });
 
@@ -235,7 +273,6 @@ export const createPaymentIntent = async (
           platformCommission,
           professionalPayout,
           stripePaymentIntentId: paymentIntent.id,
-          stripeClientSecret: paymentIntent.client_secret || undefined,
           metadata: {
             environment: STRIPE_CONFIG.environment,
             projectId: projectInfo?._id?.toString?.(),
@@ -273,6 +310,20 @@ export const confirmPayment = async (req: Request, res: Response) => {
   try {
     const { bookingId, paymentIntentId } = req.body;
     const userId = (req as any).user._id;
+
+    if (typeof bookingId !== 'string' || !bookingId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_BOOKING_ID', message: 'bookingId must be a non-empty string' }
+      });
+    }
+
+    if (typeof paymentIntentId !== 'string' || !paymentIntentId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_PAYMENT_INTENT_ID', message: 'paymentIntentId must be a non-empty string' }
+      });
+    }
 
     const booking = await Booking.findById(bookingId);
     if (!booking) {
@@ -405,6 +456,16 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
       booking.payment.professionalPayout ?? booking.payment.totalWithVat ?? booking.payment.amount ?? 0
     );
     const bookingCurrency = (booking.payment.currency || 'EUR').toLowerCase();
+    const destinationAccountId = professional?.stripe?.accountId;
+    if (!destinationAccountId) {
+      return {
+        success: false,
+        error: {
+          code: 'PROFESSIONAL_STRIPE_ACCOUNT_MISSING',
+          message: 'Professional Stripe account missing or deauthorized',
+        },
+      };
+    }
 
     let transferAmount = convertToStripeAmount(payoutMajorAmount);
     let transferCurrency = bookingCurrency;
@@ -448,7 +509,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
       transfer = await stripe.transfers.create({
         amount: transferAmount,
         currency: transferCurrency,
-        destination: professional.stripe.accountId,
+        destination: destinationAccountId,
         source_transaction: sourceTransaction,
         metadata: {
           ...buildTransferMetadata(
@@ -548,6 +609,26 @@ export const refundPayment = async (req: Request, res: Response) => {
     const { bookingId, reason, amount } = req.body;
     const userId = (req as any).user._id;
 
+    if (typeof bookingId !== 'string' || !bookingId.trim() || !mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_BOOKING_ID', message: 'bookingId must be a valid non-empty ID' }
+      });
+    }
+
+    let normalizedAmount: number | undefined;
+    if (amount !== undefined && amount !== null) {
+      const parsedAmount =
+        typeof amount === 'string' ? Number.parseFloat(amount) : Number(amount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_AMOUNT', message: 'amount must be a number greater than 0' }
+        });
+      }
+      normalizedAmount = parsedAmount;
+    }
+
     const booking = await Booking.findById(bookingId).populate('professional');
     if (!booking) {
       return res.status(404).json({
@@ -573,21 +654,22 @@ export const refundPayment = async (req: Request, res: Response) => {
       });
     }
 
-    const refundAmount = amount || booking.payment.totalWithVat;
+    const totalWithVat = booking.payment?.totalWithVat ?? 0;
+    const refundAmount = normalizedAmount ?? totalWithVat;
 
     // Validate refund amount doesn't exceed remaining refundable amount
-    if (amount && booking.payment.status === 'completed') {
+    if (normalizedAmount && booking.payment.status === 'completed') {
       const existingPayment = await Payment.findOne({ booking: booking._id });
       if (existingPayment) {
         const previousRefundTotal = (existingPayment.refunds || []).reduce(
           (sum: number, r: any) => sum + (r.amount || 0), 0
         );
-        if (previousRefundTotal + amount > booking.payment.totalWithVat) {
+        if (previousRefundTotal + normalizedAmount > totalWithVat) {
           return res.status(400).json({
             success: false,
             error: {
               code: 'REFUND_EXCEEDS_TOTAL',
-              message: `Refund of ${amount} would exceed total payment. Already refunded: ${previousRefundTotal}, original: ${booking.payment.totalWithVat}`
+              message: `Refund of ${normalizedAmount} would exceed total payment. Already refunded: ${previousRefundTotal}, original: ${totalWithVat}`
             }
           });
         }
@@ -598,7 +680,7 @@ export const refundPayment = async (req: Request, res: Response) => {
     if (booking.payment.status === 'authorized') {
       const refund = await stripe.refunds.create({
         payment_intent: booking.payment.stripePaymentIntentId,
-        amount: amount ? convertToStripeAmount(amount) : undefined,
+        amount: normalizedAmount ? convertToStripeAmount(normalizedAmount) : undefined,
       }, {
         idempotencyKey: generateIdempotencyKey({
           bookingId: booking._id.toString(),
@@ -648,7 +730,7 @@ export const refundPayment = async (req: Request, res: Response) => {
       // Create refund
       const refund = await stripe.refunds.create({
         payment_intent: booking.payment.stripePaymentIntentId,
-        amount: amount ? convertToStripeAmount(amount) : undefined,
+        amount: normalizedAmount ? convertToStripeAmount(normalizedAmount) : undefined,
       }, {
         idempotencyKey: generateIdempotencyKey({
           bookingId: booking._id.toString(),
@@ -663,7 +745,7 @@ export const refundPayment = async (req: Request, res: Response) => {
           await stripe.transfers.createReversal(
             booking.payment.stripeTransferId,
             {
-              amount: amount ? convertToStripeAmount(amount) : undefined,
+              amount: normalizedAmount ? convertToStripeAmount(normalizedAmount) : undefined,
               metadata: { reason, bookingId: booking._id.toString() }
             }
           );
@@ -677,7 +759,8 @@ export const refundPayment = async (req: Request, res: Response) => {
         booking.payment.refundSource = 'platform';
       }
 
-      booking.payment.status = amount && amount < booking.payment.totalWithVat ? 'partially_refunded' : 'refunded';
+      booking.payment.status =
+        normalizedAmount && normalizedAmount < totalWithVat ? 'partially_refunded' : 'refunded';
       booking.payment.refundedAt = new Date();
       booking.payment.refundReason = reason;
       booking.status = 'refunded';

@@ -5,6 +5,13 @@
 
 import { SupportedCurrency, IdempotencyKeyParams } from '../Types/stripe';
 
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
+  'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+]);
+
+const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
+
 // ==================== Currency Utilities ====================
 
 /**
@@ -21,7 +28,11 @@ export function convertToStripeAmount(amount: number): number {
  * @param amount - Amount in cents (e.g., 10050)
  * @returns Amount in major currency units (e.g., 100.50)
  */
-export function convertFromStripeAmount(amount: number): number {
+export function convertFromStripeAmount(amount: number, currency: string): number {
+  const currencyUpper = currency.toUpperCase();
+  if (ZERO_DECIMAL_CURRENCIES.has(currencyUpper)) {
+    return amount;
+  }
   return amount / 100;
 }
 
@@ -57,15 +68,11 @@ export function getCurrencySymbol(currency: string): string {
  * @param currency - Currency code
  * @returns Formatted string (e.g., "€100.50")
  */
-export function formatCurrency(amount: number, currency: string): string {
-  const symbol = getCurrencySymbol(currency);
-  const formatted = amount.toFixed(2);
-
-  // EUR puts symbol after, others before
-  if (currency === 'EUR') {
-    return `${formatted}${symbol}`;
-  }
-  return `${symbol}${formatted}`;
+export function formatCurrency(amount: number, currency: string, locale?: string): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency: currency.toUpperCase(),
+  }).format(amount);
 }
 
 /**
@@ -79,7 +86,7 @@ export function getCurrencyByCountry(countryCode: string): SupportedCurrency {
     BE: 'EUR', NL: 'EUR', FR: 'EUR', DE: 'EUR', IT: 'EUR',
     ES: 'EUR', PT: 'EUR', IE: 'EUR', LU: 'EUR', AT: 'EUR',
     FI: 'EUR', GR: 'EUR', SI: 'EUR', CY: 'EUR', MT: 'EUR',
-    SK: 'EUR', EE: 'EUR', LV: 'EUR', LT: 'EUR',
+    SK: 'EUR', EE: 'EUR', LV: 'EUR', LT: 'EUR', HR: 'EUR',
 
     // Other currencies
     US: 'USD',
@@ -159,8 +166,10 @@ export function calculateProfessionalPayout(
   totalAmount: number,
   platformCommissionPercent: number = 0
 ): number {
-  const commission = (totalAmount * platformCommissionPercent) / 100;
-  return totalAmount - commission;
+  const safeCommissionPercent = Math.max(0, Math.min(100, platformCommissionPercent));
+  const commission = roundToTwo((totalAmount * safeCommissionPercent) / 100);
+  const payout = roundToTwo(totalAmount - commission);
+  return Math.max(0, payout);
 }
 
 /**
@@ -173,7 +182,8 @@ export function calculatePlatformCommission(
   amount: number,
   commissionPercent: number = 0
 ): number {
-  return (amount * commissionPercent) / 100;
+  const safeCommissionPercent = Math.max(0, Math.min(100, commissionPercent));
+  return roundToTwo((amount * safeCommissionPercent) / 100);
 }
 
 // ==================== Currency Selection ====================
@@ -223,6 +233,13 @@ export function validatePaymentAmount(amount: number, currency: string): {
   valid: boolean;
   error?: string;
 } {
+  if (!Number.isFinite(amount)) {
+    return {
+      valid: false,
+      error: 'Invalid amount',
+    };
+  }
+
   // Minimum amounts per currency (Stripe minimums)
   const minimums: Record<string, number> = {
     EUR: 0.50,
@@ -271,8 +288,9 @@ export function buildPaymentMetadata(
   customerId: string,
   professionalId: string,
   professionalStripeAccountId: string,
-  environment: 'production' | 'test' = 'test'
+  environment: 'production' | 'test' = process.env.NODE_ENV === 'production' ? 'production' : 'test'
 ): Record<string, string> {
+  const computedEnv = environment || (process.env.NODE_ENV === 'production' ? 'production' : 'test');
   return {
     bookingId,
     bookingNumber,
@@ -280,7 +298,7 @@ export function buildPaymentMetadata(
     professionalId,
     professionalStripeAccountId,
     type: 'booking_payment',
-    environment,
+    environment: computedEnv,
     version: 'v1',
   };
 }
@@ -297,14 +315,15 @@ export function buildTransferMetadata(
   bookingId: string,
   bookingNumber: string,
   payoutDate: string,
-  environment: 'production' | 'test' = 'test'
+  environment: 'production' | 'test' = process.env.NODE_ENV === 'production' ? 'production' : 'test'
 ): Record<string, string> {
+  const computedEnv = environment || (process.env.NODE_ENV === 'production' ? 'production' : 'test');
   return {
     bookingId,
     bookingNumber,
     type: 'booking_completion_payout',
     payoutDate,
-    environment,
+    environment: computedEnv,
   };
 }
 
@@ -326,17 +345,6 @@ export function isPaymentExpiringSoon(
   return daysSinceAuth >= warningDays;
 }
 
-/**
- * Check if payment authorization has expired
- * @param authorizedAt - Date when payment was authorized
- * @returns True if payment authorization has expired
- */
-export function isPaymentExpired(authorizedAt: Date): boolean {
-  const now = new Date();
-  const daysSinceAuth = (now.getTime() - authorizedAt.getTime()) / (1000 * 60 * 60 * 24);
-  return daysSinceAuth >= 7;
-}
-
 // ==================== Export All ====================
 
 export default {
@@ -355,5 +363,4 @@ export default {
   buildPaymentMetadata,
   buildTransferMetadata,
   isPaymentExpiringSoon,
-  isPaymentExpired,
 };

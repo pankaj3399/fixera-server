@@ -4,9 +4,43 @@
  */
 
 import { Request, Response } from 'express';
-import Booking from '../../models/booking';
+import Booking, { BookingStatus } from '../../models/booking';
 import { createPaymentIntent } from '../Stripe/payment';
 import { captureAndTransferPayment } from '../Stripe/payment';
+
+const BOOKING_STATUS_VALUES: BookingStatus[] = [
+  'rfq',
+  'quoted',
+  'quote_accepted',
+  'quote_rejected',
+  'payment_pending',
+  'booked',
+  'in_progress',
+  'completed',
+  'cancelled',
+  'dispute',
+  'refunded',
+];
+
+const ALLOWED_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
+  rfq: ['quoted', 'cancelled'],
+  quoted: ['quote_accepted', 'quote_rejected', 'cancelled'],
+  quote_accepted: ['payment_pending', 'booked', 'cancelled'],
+  quote_rejected: [],
+  payment_pending: ['booked', 'cancelled'],
+  booked: ['in_progress', 'completed', 'cancelled', 'dispute'],
+  in_progress: ['completed', 'cancelled', 'dispute'],
+  completed: [],
+  cancelled: [],
+  dispute: ['completed', 'cancelled', 'refunded'],
+  refunded: [],
+};
+
+const isValidBookingStatus = (value: string): value is BookingStatus =>
+  BOOKING_STATUS_VALUES.includes(value as BookingStatus);
+
+const isTransitionAllowed = (current: BookingStatus, requested: BookingStatus): boolean =>
+  current === requested || ALLOWED_TRANSITIONS[current]?.includes(requested) === true;
 
 /**
  * Enhanced respond to quote handler with payment integration
@@ -16,7 +50,14 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
   try {
     const { bookingId } = req.params;
     const { action } = req.body; // 'accept' or 'reject'
-    const userId = (req as any).user._id?.toString();
+    const userId = (req as any).user?._id?.toString();
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' }
+      });
+    }
 
     const booking = await Booking.findById(bookingId);
     if (!booking) {
@@ -107,8 +148,10 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
   try {
     const { bookingId } = req.params;
     const { status } = req.body;
-    const userId = (req as any).user._id as { toString: () => string } | undefined;
-    const userIdStr = userId?.toString();
+    const authUser = (req as any).user;
+    const userIdStr = authUser?._id?.toString();
+    const requestedStatusRaw =
+      typeof status === 'string' ? status.trim() : '';
 
     if (!userIdStr) {
       return res.status(401).json({
@@ -116,6 +159,22 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         error: { code: 'UNAUTHORIZED', message: 'Authentication required' }
       });
     }
+
+    if (!requestedStatusRaw) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_STATUS', message: 'Status is required' }
+      });
+    }
+
+    if (!isValidBookingStatus(requestedStatusRaw)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_STATUS', message: `Unsupported booking status: ${requestedStatusRaw}` }
+      });
+    }
+
+    const requestedStatus: BookingStatus = requestedStatusRaw;
 
     const booking = await Booking.findById(bookingId);
     if (!booking) {
@@ -128,7 +187,9 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
     // Authorization check (professional, customer, or admin)
     const bookingProfessionalId = booking.professional ? booking.professional.toString() : undefined;
     const bookingCustomerId = booking.customer.toString();
+    const isAdmin = authUser?.role === 'admin' || authUser?.isAdmin === true;
     const isAuthorized =
+      isAdmin ||
       bookingProfessionalId === userIdStr ||
       bookingCustomerId === userIdStr;
 
@@ -139,9 +200,38 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       });
     }
 
-    // If status is changing to 'completed', capture payment and transfer
-    if (status === 'completed' && booking.status !== 'completed') {
-      if (booking.payment?.status === 'authorized') {
+    if (!isTransitionAllowed(booking.status as BookingStatus, requestedStatus)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INVALID_TRANSITION',
+          message: `Transition from ${booking.status} to ${requestedStatus} is not allowed`
+        }
+      });
+    }
+
+    // If status is changing to 'completed', enforce payment capture constraints.
+    if (requestedStatus === 'completed') {
+      const paymentStatus = booking.payment?.status;
+      const paymentStatusValue = paymentStatus ? String(paymentStatus) : '';
+      const isAlreadyCaptured =
+        paymentStatusValue === 'captured' || paymentStatusValue === 'completed';
+
+      if (isAlreadyCaptured) {
+        booking.status = 'completed';
+        booking.actualEndDate = booking.actualEndDate || new Date();
+        await booking.save();
+
+        return res.json({
+          success: true,
+          data: {
+            message: 'Booking completed',
+            booking
+          }
+        });
+      }
+
+      if (paymentStatus === 'authorized') {
         const captureResult = await captureAndTransferPayment(booking._id.toString());
 
         if (!captureResult.success) {
@@ -151,9 +241,8 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           });
         }
 
-        // Payment capture successful, update status
         booking.status = 'completed';
-        booking.actualEndDate = new Date();
+        booking.actualEndDate = booking.actualEndDate || new Date();
         await booking.save();
 
         return res.json({
@@ -164,13 +253,21 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           }
         });
       }
+
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'PAYMENT_NOT_CAPTURABLE',
+          message: `Cannot mark booking completed while payment status is "${paymentStatus || 'missing'}"`
+        }
+      });
     }
 
-    // For other status updates, just update normally
-    booking.status = status as any;
+    // For other status updates, update normally after validation.
+    booking.status = requestedStatus;
 
     // Set timestamps based on status
-    if (status === 'in_progress' && !booking.actualStartDate) {
+    if (requestedStatus === 'in_progress' && !booking.actualStartDate) {
       booking.actualStartDate = new Date();
     }
 
@@ -256,7 +353,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
     }
 
     // If client secret exists and payment is not failed or refunded, return existing secret
-    if (booking.payment?.stripeClientSecret && !['failed', 'refunded', 'expired'].includes(booking.payment.status)) {
+    if (booking.payment?.stripeClientSecret && !['failed', 'refunded'].includes(booking.payment.status)) {
       return res.json({
         success: true,
         data: {

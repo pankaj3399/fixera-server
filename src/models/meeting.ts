@@ -1,4 +1,4 @@
-import { Schema, model, Document } from "mongoose";
+import { Schema, model, Document, Types } from "mongoose";
 
 export type MeetingType = 'planning' | 'team';
 
@@ -12,7 +12,7 @@ export interface IMeetingAttendee {
 
 export interface IMeeting extends Document {
     projectId: string;
-    professionalId: string;
+    professionalId: Types.ObjectId | string;
     meetingType: MeetingType;
     title: string;
     description?: string;
@@ -64,7 +64,7 @@ const MeetingAttendeeSchema = new Schema<IMeetingAttendee>({
 
 const MeetingSchema = new Schema<IMeeting>({
     projectId: { type: String, required: true, index: true },
-    professionalId: { type: String, required: true, index: true },
+    professionalId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     meetingType: {
         type: String,
         enum: ['planning', 'team'],

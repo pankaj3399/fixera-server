@@ -427,19 +427,22 @@ const UserSchema = new Schema({
     },
     // Stripe Connect fields (for professionals)
     stripe: {
-        accountId: { type: String, required: false },
-        onboardingCompleted: { type: Boolean, default: false },
-        payoutsEnabled: { type: Boolean, default: false },
-        detailsSubmitted: { type: Boolean, default: false },
-        chargesEnabled: { type: Boolean, default: false },
-        accountStatus: {
-            type: String,
-            enum: ['pending', 'active', 'restricted', 'rejected'],
-            default: 'pending',
-            required: false
-        },
-        lastOnboardingRefresh: { type: Date, required: false },
-        createdAt: { type: Date, required: false }
+        type: new Schema({
+            accountId: { type: String, required: false },
+            onboardingCompleted: { type: Boolean, default: false },
+            payoutsEnabled: { type: Boolean, default: false },
+            detailsSubmitted: { type: Boolean, default: false },
+            chargesEnabled: { type: Boolean, default: false },
+            accountStatus: {
+                type: String,
+                enum: ['pending', 'active', 'restricted', 'rejected'],
+                default: 'pending',
+                required: false
+            },
+            lastOnboardingRefresh: { type: Date, required: false },
+            createdAt: { type: Date, required: false }
+        }, { _id: false }),
+        default: undefined
     },
     // Customer-specific fields
     businessName: {
@@ -495,6 +498,10 @@ UserSchema.pre("save", function (next) {
 
     if (this.role === "professional") {
         this.set("availability", undefined);
+    }
+
+    if (this.role !== "professional") {
+        this.set("stripe", undefined);
     }
 
     // Clear fields that employees don't need - they only need:
@@ -557,7 +564,7 @@ UserSchema.index({ customerType: 1 });
 UserSchema.index({ 'location.coordinates': '2dsphere' }); // Geospatial index for location-based queries
 UserSchema.index({ 'location.city': 1, 'location.country': 1 });
 // Stripe Connect indexes
-UserSchema.index({ 'stripe.accountId': 1 });
+UserSchema.index({ 'stripe.accountId': 1 }, { unique: true, sparse: true });
 UserSchema.index({ role: 1, 'stripe.chargesEnabled': 1 });
 
 const User = model<IUser>('User', UserSchema);

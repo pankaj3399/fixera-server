@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { STRIPE_CONFIG } from "../services/stripe";
 
 export type PaymentStatus =
   | "pending"
@@ -7,7 +8,7 @@ export type PaymentStatus =
   | "failed"
   | "refunded"
   | "partially_refunded"
-  | "expired";
+  | "disputed";
 
 export interface IPaymentRefund {
   amount: number;
@@ -36,7 +37,6 @@ export interface IPayment extends Document {
   professionalPayout?: number;
 
   stripePaymentIntentId?: string;
-  stripeClientSecret?: string;
   stripeChargeId?: string;
   stripeTransferId?: string;
   stripeDestinationPayment?: string;
@@ -76,6 +76,13 @@ const PaymentRefundSchema = new Schema<IPaymentRefund>(
   { _id: false }
 );
 
+const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
+  ? STRIPE_CONFIG.supportedCurrencies
+  : [STRIPE_CONFIG.defaultCurrency || "EUR"];
+const DEFAULT_CURRENCY = SUPPORTED_CURRENCIES.includes(STRIPE_CONFIG.defaultCurrency)
+  ? STRIPE_CONFIG.defaultCurrency
+  : SUPPORTED_CURRENCIES[0];
+
 const PaymentSchema = new Schema<IPayment>(
   {
     booking: { type: Schema.Types.ObjectId, ref: "Booking", required: true, unique: true },
@@ -84,7 +91,7 @@ const PaymentSchema = new Schema<IPayment>(
     professional: { type: Schema.Types.ObjectId, ref: "User" },
     status: {
       type: String,
-      enum: ["pending", "authorized", "completed", "failed", "refunded", "partially_refunded", "expired"],
+      enum: ["pending", "authorized", "completed", "failed", "refunded", "partially_refunded", "disputed"],
       default: "pending",
       required: true,
     },
@@ -93,7 +100,7 @@ const PaymentSchema = new Schema<IPayment>(
       enum: ["card", "bank_transfer", "cash"],
     },
 
-    currency: { type: String, enum: ["USD", "EUR", "GBP", "CAD", "AUD"], default: "EUR" },
+    currency: { type: String, enum: SUPPORTED_CURRENCIES, default: DEFAULT_CURRENCY },
     amount: { type: Number, required: true },
     netAmount: { type: Number },
     vatAmount: { type: Number },
@@ -103,7 +110,6 @@ const PaymentSchema = new Schema<IPayment>(
     professionalPayout: { type: Number },
 
     stripePaymentIntentId: { type: String },
-    stripeClientSecret: { type: String },
     stripeChargeId: { type: String },
     stripeTransferId: { type: String },
     stripeDestinationPayment: { type: String },

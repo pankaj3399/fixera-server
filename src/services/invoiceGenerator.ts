@@ -3,9 +3,10 @@
  * Generates PDF invoices for completed bookings
  */
 
-import PDFDocument from 'pdfkit';
-import { getVATExplanation } from '../utils/vat';
-import { formatCurrency } from '../utils/payment';
+import PDFDocument from "pdfkit";
+import InvoiceSequence from "../models/invoiceSequence";
+import { getVATExplanation, isEUCountry } from "../utils/vat";
+import { formatCurrency } from "../utils/payment";
 
 interface InvoiceData {
   invoiceNumber: string;
@@ -48,14 +49,61 @@ interface InvoiceData {
   vatExplanation?: string;
 }
 
+interface InvoiceBooking {
+  _id: { toString(): string } | string;
+  bookingNumber?: string;
+  quote?: { description?: string };
+  rfqDetails?: { description?: string };
+  customer: {
+    name: string;
+    email: string;
+    vatNumber?: string;
+    location?: {
+      address?: string;
+      city?: string;
+      country?: string;
+    };
+  };
+  professional: {
+    name: string;
+    vatNumber?: string;
+    businessInfo?: {
+      companyName?: string;
+      address?: string;
+      city?: string;
+      country?: string;
+    };
+  };
+  payment: {
+    netAmount?: number;
+    vatAmount?: number;
+    vatRate?: number;
+    totalWithVat?: number;
+    currency?: string;
+    reverseCharge?: boolean;
+  };
+}
+
 /**
  * Generate invoice number
  * Format: INV-YYYY-NNNNNN
  */
-export function generateInvoiceNumber(): string {
+export async function generateInvoiceNumber(): Promise<string> {
   const year = new Date().getFullYear();
-  const random = Math.floor(Math.random() * 1000000).toString().padStart(6, '0');
-  return `INV-${year}-${random}`;
+  const sequence = await InvoiceSequence.findOneAndUpdate(
+    { year },
+    {
+      $setOnInsert: { year, value: 0 },
+      $inc: { value: 1 },
+    },
+    { new: true, upsert: true }
+  );
+
+  if (!sequence) {
+    throw new Error("Failed to generate invoice sequence");
+  }
+
+  return `INV-${year}-${String(sequence.value).padStart(6, "0")}`;
 }
 
 /**
@@ -65,50 +113,48 @@ export function generateInvoiceNumber(): string {
 export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const doc = new PDFDocument({ size: "A4", margin: 50 });
       const buffers: Buffer[] = [];
+      const invoiceDate =
+        data.invoiceDate instanceof Date ? data.invoiceDate : new Date(data.invoiceDate);
+      const invoiceDateText = Number.isNaN(invoiceDate.getTime())
+        ? new Date().toLocaleDateString("en-GB")
+        : invoiceDate.toLocaleDateString("en-GB");
 
-      doc.on('data', buffers.push.bind(buffers));
-      doc.on('end', () => {
+      doc.on("data", buffers.push.bind(buffers));
+      doc.on("end", () => {
         const pdfData = Buffer.concat(buffers);
         resolve(pdfData);
+      });
+      doc.on("error", (error) => {
+        reject(error);
       });
 
       // Header
       doc
         .fontSize(20)
-        .text('FIXERA', 50, 50)
+        .text("FIXERA", 50, 50)
         .fontSize(10)
-        .text('Property Services Marketplace', 50, 75)
-        .text('Belgium', 50, 90);
+        .text("Property Services Marketplace", 50, 75)
+        .text("Belgium", 50, 90);
 
       // Invoice title
-      doc
-        .fontSize(20)
-        .text('INVOICE', 400, 50, { align: 'right' });
+      doc.fontSize(20).text("INVOICE", 400, 50, { align: "right" });
 
       // Invoice details
       doc
         .fontSize(10)
-        .text(`Invoice #: ${data.invoiceNumber}`, 400, 75, { align: 'right' })
-        .text(`Date: ${data.invoiceDate.toLocaleDateString()}`, 400, 90, { align: 'right' })
-        .text(`Booking #: ${data.bookingNumber}`, 400, 105, { align: 'right' });
+        .text(`Invoice #: ${data.invoiceNumber}`, 400, 75, { align: "right" })
+        .text(`Date: ${invoiceDateText}`, 400, 90, { align: "right" })
+        .text(`Booking #: ${data.bookingNumber}`, 400, 105, { align: "right" });
 
       // Horizontal line
-      doc
-        .moveTo(50, 130)
-        .lineTo(550, 130)
-        .stroke();
+      doc.moveTo(50, 130).lineTo(550, 130).stroke();
 
       // Bill To section
-      doc
-        .fontSize(12)
-        .text('BILL TO:', 50, 150);
+      doc.fontSize(12).text("BILL TO:", 50, 150);
 
-      doc
-        .fontSize(10)
-        .text(data.customer.name, 50, 170)
-        .text(data.customer.email, 50, 185);
+      doc.fontSize(10).text(data.customer.name, 50, 170).text(data.customer.email, 50, 185);
 
       if (data.customer.address) {
         doc.text(data.customer.address, 50, 200);
@@ -121,13 +167,9 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       }
 
       // Service Provider section
-      doc
-        .fontSize(12)
-        .text('SERVICE PROVIDER:', 320, 150);
+      doc.fontSize(12).text("SERVICE PROVIDER:", 320, 150);
 
-      doc
-        .fontSize(10)
-        .text(data.professional.companyName || data.professional.name, 320, 170);
+      doc.fontSize(10).text(data.professional.companyName || data.professional.name, 320, 170);
 
       if (data.professional.address) {
         doc.text(data.professional.address, 320, 185);
@@ -140,96 +182,74 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       }
 
       // Service description
-      doc
-        .fontSize(12)
-        .text('SERVICE DESCRIPTION:', 50, 280);
+      doc.fontSize(12).text("SERVICE DESCRIPTION:", 50, 280);
 
-      doc
-        .fontSize(10)
-        .text(data.serviceDescription, 50, 300, { width: 500 });
+      doc.fontSize(10).text(data.serviceDescription, 50, 300, { width: 500 });
 
       // Invoice table
       const tableTop = 360;
 
       doc
-        .font('Helvetica-Bold')
+        .font("Helvetica-Bold")
         .fontSize(10)
-        .text('Description', 50, tableTop)
-        .text('Amount', 450, tableTop, { align: 'right' });
-      doc.font('Helvetica');
+        .text("Description", 50, tableTop)
+        .text("Amount", 450, tableTop, { align: "right" });
+      doc.font("Helvetica");
 
       // Line
-      doc
-        .moveTo(50, tableTop + 20)
-        .lineTo(550, tableTop + 20)
-        .stroke();
+      doc.moveTo(50, tableTop + 20).lineTo(550, tableTop + 20).stroke();
 
       // Net amount
       doc
-        .text('Service Amount', 50, tableTop + 30)
-        .text(
-          formatCurrency(data.payment.netAmount, data.payment.currency),
-          450,
-          tableTop + 30,
-          { align: 'right' }
-        );
+        .text("Service Amount", 50, tableTop + 30)
+        .text(formatCurrency(data.payment.netAmount, data.payment.currency), 450, tableTop + 30, {
+          align: "right",
+        });
 
       // VAT
       if (data.payment.vatAmount > 0) {
         doc
           .text(`VAT (${data.payment.vatRate}%)`, 50, tableTop + 50)
-          .text(
-            formatCurrency(data.payment.vatAmount, data.payment.currency),
-            450,
-            tableTop + 50,
-            { align: 'right' }
-          );
+          .text(formatCurrency(data.payment.vatAmount, data.payment.currency), 450, tableTop + 50, {
+            align: "right",
+          });
       }
 
       // Total line
-      doc
-        .moveTo(50, tableTop + 70)
-        .lineTo(550, tableTop + 70)
-        .stroke();
+      doc.moveTo(50, tableTop + 70).lineTo(550, tableTop + 70).stroke();
 
       // Total
       doc
-        .font('Helvetica-Bold')
+        .font("Helvetica-Bold")
         .fontSize(12)
-        .text('TOTAL', 50, tableTop + 80)
-        .text(
-          formatCurrency(data.payment.totalWithVat, data.payment.currency),
-          450,
-          tableTop + 80,
-          { align: 'right' }
-        );
-      doc.font('Helvetica');
+        .text("TOTAL", 50, tableTop + 80)
+        .text(formatCurrency(data.payment.totalWithVat, data.payment.currency), 450, tableTop + 80, {
+          align: "right",
+        });
+      doc.font("Helvetica");
 
       // VAT explanation
       if (data.vatExplanation) {
-        doc
-          .fontSize(9)
-          .text(data.vatExplanation, 50, tableTop + 120, {
-            width: 500,
-            align: 'left'
-          });
+        doc.fontSize(9).text(data.vatExplanation, 50, tableTop + 120, {
+          width: 500,
+          align: "left",
+        });
       }
 
       // Footer
       doc
         .fontSize(8)
-        .text('Thank you for using Fixera!', 50, 700, {
-          align: 'center',
-          width: 500
+        .text("Thank you for using Fixera!", 50, 700, {
+          align: "center",
+          width: 500,
         })
-        .text('This invoice was generated automatically by the Fixera platform.', 50, 715, {
-          align: 'center',
-          width: 500
+        .text("This invoice was generated automatically by the Fixera platform.", 50, 715, {
+          align: "center",
+          width: 500,
         });
 
       // Finalize PDF
       doc.end();
-
     } catch (error) {
       reject(error);
     }
@@ -240,12 +260,24 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
  * Generate invoice for a booking
  * This should be called after payment is captured
  */
-export async function generateBookingInvoice(booking: any): Promise<{ invoiceNumber: string; pdfBuffer: Buffer }> {
-  const invoiceNumber = generateInvoiceNumber();
+export async function generateBookingInvoice(
+  booking: InvoiceBooking
+): Promise<{ invoiceNumber: string; pdfBuffer: Buffer }> {
+  const invoiceNumber = await generateInvoiceNumber();
   const invoiceDate = new Date();
 
   const customer = booking.customer;
   const professional = booking.professional;
+  const customerCountry = customer.location?.country || "BE";
+
+  const fallbackReverseChargeHeuristic =
+    (booking.payment.vatRate ?? 0) === 0 &&
+    (booking.payment.vatAmount ?? 0) === 0 &&
+    isEUCountry(customerCountry);
+  const reverseCharge =
+    booking.payment.reverseCharge !== undefined
+      ? booking.payment.reverseCharge
+      : fallbackReverseChargeHeuristic;
 
   const invoiceData: InvoiceData = {
     invoiceNumber,
@@ -271,23 +303,24 @@ export async function generateBookingInvoice(booking: any): Promise<{ invoiceNum
     },
 
     payment: {
-      netAmount: booking.payment.netAmount,
-      vatAmount: booking.payment.vatAmount,
-      vatRate: booking.payment.vatRate,
-      totalWithVat: booking.payment.totalWithVat,
-      currency: booking.payment.currency,
+      netAmount: booking.payment.netAmount ?? 0,
+      vatAmount: booking.payment.vatAmount ?? 0,
+      vatRate: booking.payment.vatRate ?? 0,
+      totalWithVat: booking.payment.totalWithVat ?? 0,
+      currency: booking.payment.currency || "EUR",
     },
 
-    serviceDescription: booking.quote?.description || booking.rfqDetails?.description || 'Property service',
+    serviceDescription:
+      booking.quote?.description || booking.rfqDetails?.description || "Property service",
 
     vatExplanation: getVATExplanation(
       {
-        vatRate: booking.payment.vatRate,
-        vatAmount: booking.payment.vatAmount,
-        total: booking.payment.totalWithVat,
-        reverseCharge: booking.payment.vatRate === 0 && booking.payment.vatAmount === 0,
+        vatRate: booking.payment.vatRate ?? 0,
+        vatAmount: booking.payment.vatAmount ?? 0,
+        total: booking.payment.totalWithVat ?? 0,
+        reverseCharge,
       },
-      customer.location?.country || 'BE'
+      customerCountry
     ),
   };
 
@@ -295,6 +328,7 @@ export async function generateBookingInvoice(booking: any): Promise<{ invoiceNum
 
   return {
     invoiceNumber,
-    pdfBuffer
+    pdfBuffer,
   };
 }
+
