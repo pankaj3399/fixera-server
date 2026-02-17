@@ -1,5 +1,6 @@
+import 'dotenv/config';
+
 import express, { Express, Request, Response} from 'express';
-import dotenv from 'dotenv';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import errorHandler from './handlers/error';
@@ -17,8 +18,6 @@ import searchRouter from './routes/Search';
 import bookingRouter from './routes/Booking';
 import stripeRouter from './routes/Stripe';
 import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
-
-dotenv.config();
 
 const app: Express = express();
 let idExpirySchedulerHandle: { stop: () => void } | null = null;
@@ -60,6 +59,7 @@ app.use('/api/service-categories', serviceCategoryRouter);
 app.use('/api/professionals', professionalRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/bookings', bookingRouter);
+console.log('[DEBUG] stripeRouter type:', typeof stripeRouter, '| stack:', stripeRouter?.stack?.length);
 app.use('/api/stripe', stripeRouter);
 app.use('/api/professional', professionalPaymentRouter);
 
