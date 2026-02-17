@@ -221,11 +221,11 @@ const UserSchema = new Schema({
     },
     pendingIdChanges: {
         type: [{
-            field: { type: String, required: true },
-            oldValue: { type: String, required: true },
-            newValue: { type: String, required: true }
+            field: { type: String, required: false },
+            oldValue: { type: String, required: false },
+            newValue: { type: String, required: false }
         }],
-        default: undefined
+        default: []
     },
     // Professional approval fields
     professionalStatus: {
@@ -488,9 +488,6 @@ UserSchema.pre("save", function (next) {
         this.set("companyAddress", undefined);
     }
 
-    if (this.role === "professional") {
-        this.set("availability", undefined);
-    }
 
     // Clear fields that employees don't need - they only need:
     // basic auth fields, employee.*, blockedDates, blockedRanges
