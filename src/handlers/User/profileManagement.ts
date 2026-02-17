@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
 import { getCountryCode } from '../../utils/geocoding';
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
+import { NO_PREVIOUS_VALUE, normalizePendingIdChanges } from "../../utils/pendingIdChanges";
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 const maskEmail = (email: string): string => {
@@ -142,7 +143,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
       if (!user.pendingIdChanges) user.pendingIdChanges = [];
       user.pendingIdChanges.push({
         field: 'idProofDocument',
-        oldValue: previousIdProofUrl || previousIdProofFileName || '',
+        oldValue: previousIdProofUrl || previousIdProofFileName || NO_PREVIOUS_VALUE,
         newValue: uploadResult.key
       });
       user.rejectionReason = undefined;
@@ -910,7 +911,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     if (normalizedIdCountryOfIssue !== undefined && normalizedIdCountryOfIssue !== (user.idCountryOfIssue || '')) {
       changes.push({
         field: 'idCountryOfIssue',
-        oldValue: user.idCountryOfIssue || '',
+        oldValue: user.idCountryOfIssue || NO_PREVIOUS_VALUE,
         newValue: normalizedIdCountryOfIssue
       });
     }
@@ -930,7 +931,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
       if (oldDate !== newDate) {
         changes.push({
           field: 'idExpirationDate',
-          oldValue: oldDate,
+          oldValue: oldDate || NO_PREVIOUS_VALUE,
           newValue: newDate
         });
       }
@@ -950,10 +951,10 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     }
 
     // Store pending changes for admin review
-    if (!user.pendingIdChanges) {
-      user.pendingIdChanges = [];
-    }
-    user.pendingIdChanges.push(...changes);
+    // Clean any existing entries with empty oldValue to avoid Mongoose validation errors
+    const existingChanges = normalizePendingIdChanges(user.pendingIdChanges) || [];
+    user.pendingIdChanges = normalizePendingIdChanges([...existingChanges, ...changes]);
+    user.markModified('pendingIdChanges');
 
     // Trigger re-verification only if already approved
     const wasApproved = user.professionalStatus === 'approved';
@@ -967,7 +968,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     // Any ID info update should allow future expiry reminders for the new data
     user.idExpiryEmailSentAt = undefined;
 
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
 
     const changedFields = changes.map((change) => change.field);
     console.log(`🔄 ID Info: Updated for userId=${String(user._id)}. Fields: ${changedFields.join(', ')}`);
@@ -988,9 +989,12 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
   } catch (error: any) {
     console.error('Update ID info error:', error);
+    if (error?.name === 'ValidationError') {
+      console.error('Validation details:', JSON.stringify(error.errors, null, 2));
+    }
     return res.status(500).json({
       success: false,
-      msg: "Failed to update ID information"
+      msg: "Internal server error"
     });
   }
 };

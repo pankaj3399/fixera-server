@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import { sendProfessionalApprovalEmail, sendProfessionalIdChangeApprovalEmail, sendProfessionalIdChangeRejectionEmail, sendProfessionalRejectionEmail, sendProfessionalSuspensionEmail, sendProfessionalReactivationEmail } from "../../utils/emailService";
 import { deleteFromS3, parseS3KeyFromUrl } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
+import { normalizePendingOldValue } from "../../utils/pendingIdChanges";
 
 const getS3KeyFromValue = (value?: string): string | null => {
   if (!value) return null;
@@ -581,11 +582,12 @@ export const reviewIdChanges = async (req: Request, res: Response, next: NextFun
       // Reject: revert the changes
       for (const change of professional.pendingIdChanges) {
         if (change.field === 'idCountryOfIssue') {
-          professional.idCountryOfIssue = change.oldValue || undefined;
+          professional.idCountryOfIssue = normalizePendingOldValue(change.oldValue);
         } else if (change.field === 'idExpirationDate') {
-          professional.idExpirationDate = change.oldValue ? new Date(change.oldValue) : undefined;
+          const oldDateValue = normalizePendingOldValue(change.oldValue);
+          professional.idExpirationDate = oldDateValue ? new Date(oldDateValue) : undefined;
         } else if (change.field === 'idProofDocument') {
-          const oldValue = change.oldValue?.trim();
+          const oldValue = normalizePendingOldValue(change.oldValue);
           const newValue = change.newValue?.trim();
 
           if (oldValue && oldValue.startsWith('http')) {

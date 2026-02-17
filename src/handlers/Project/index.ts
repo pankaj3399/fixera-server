@@ -5,7 +5,19 @@ import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
-import { buildProjectScheduleProposals, buildProjectScheduleWindow, getResourcePolicy, toZonedTime, fromZonedTime, type ResourcePolicy } from "../../utils/scheduleEngine";
+import {
+  buildProjectScheduleProposals,
+  buildProjectScheduleWindow,
+  DAY_KEYS,
+  fromZonedTime,
+  getResourcePolicy,
+  getWorkingRangeUtc,
+  normalizeRangeEndInclusive,
+  PARTIAL_BLOCK_THRESHOLD_HOURS,
+  startOfDayZoned,
+  toZonedTime,
+  type ResourcePolicy
+} from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 // import { seedServiceCategories } from '../../scripts/seedProject';
@@ -80,19 +92,10 @@ const buildNonWorkingDates = (
   availability: Record<string, any>
 ) => {
   const nonWorking: string[] = [];
-  const dayNames = [
-    "sunday",
-    "monday",
-    "tuesday",
-    "wednesday",
-    "thursday",
-    "friday",
-    "saturday",
-  ];
   const cursor = new Date(rangeStart);
   while (cursor <= rangeEnd) {
     const zoned = toZonedTime(cursor, timeZone);
-    const dayAvailability = availability[dayNames[zoned.getUTCDay()]];
+    const dayAvailability = availability[DAY_KEYS[zoned.getUTCDay()]];
     if (!dayAvailability || dayAvailability.available === false) {
       nonWorking.push(toLocalMidnightUtc(cursor, timeZone).toISOString());
     }
@@ -443,6 +446,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         }
       }
     }
+    const validatedTeamMemberIdStrings = validatedTeamMemberIds.map((id) => String(id));
 
     const professional = await User.findById(project.professionalId).select(
       "companyAvailability companyBlockedDates companyBlockedRanges blockedDates blockedRanges businessInfo.timezone"
@@ -500,8 +504,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       dateBlockedMembers.get(dateKey)!.add(memberId);
     };
 
-    // Helper to expand a date range and mark member as blocked for each day
-    // Uses professional's timezone to determine which calendar days are affected
+    // Helper to expand a date range and mark a member blocked only when the
+    // blocked overlap with that working day is at least the threshold hours.
     const expandRangeAndMarkBlocked = (startIso: string, endIso: string, memberId: string) => {
       const start = new Date(startIso);
       const end = new Date(endIso);
@@ -512,9 +516,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         return;
       }
 
+      const rangeEndInclusive = normalizeRangeEndInclusive(end, timeZone);
+
       // Convert to professional's timezone to get correct calendar days
       const startZoned = toZonedTime(start, timeZone);
-      const endZoned = toZonedTime(end, timeZone);
+      const endZoned = toZonedTime(rangeEndInclusive, timeZone);
 
       // Get calendar days in the professional's timezone
       const startDay = new Date(Date.UTC(startZoned.getUTCFullYear(), startZoned.getUTCMonth(), startZoned.getUTCDate()));
@@ -522,7 +528,40 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
       const cursor = new Date(startDay);
       while (cursor <= endDay) {
-        markMemberBlocked(cursor.toISOString(), memberId);
+        const dayStartZoned = startOfDayZoned(cursor);
+        const nextDayZoned = new Date(dayStartZoned.getTime());
+        nextDayZoned.setUTCDate(nextDayZoned.getUTCDate() + 1);
+
+        const dayStartUtc = fromZonedTime(dayStartZoned, timeZone);
+        const dayEndUtc = fromZonedTime(nextDayZoned, timeZone);
+        if (rangeEndInclusive <= dayStartUtc || start >= dayEndUtc) {
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+          continue;
+        }
+
+        const workingRange = getWorkingRangeUtc(availability, cursor, timeZone);
+        if (!workingRange) {
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+          continue;
+        }
+
+        const overlapStart = Math.max(
+          start.getTime(),
+          dayStartUtc.getTime(),
+          workingRange.startUtc.getTime()
+        );
+        const overlapEnd = Math.min(
+          rangeEndInclusive.getTime(),
+          dayEndUtc.getTime(),
+          workingRange.endUtc.getTime()
+        );
+
+        if (overlapEnd > overlapStart) {
+          const overlapHours = (overlapEnd - overlapStart) / (1000 * 60 * 60);
+          if (overlapHours >= PARTIAL_BLOCK_THRESHOLD_HOURS) {
+            markMemberBlocked(cursor.toISOString(), memberId);
+          }
+        }
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
     };
@@ -548,7 +587,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         const blockedRange = toBlockedRange(range);
         if (!blockedRange) return;
         blockedCategories.company.ranges.push(blockedRange);
-        allBlockedRanges.push(blockedRange); // Company ranges always fully blocked
+        allBlockedRanges.push(blockedRange);
+        // Company ranges apply to every resource in the team.
+        validatedTeamMemberIdStrings.forEach((memberId) => {
+          expandRangeAndMarkBlocked(blockedRange.startDate, blockedRange.endDate, memberId);
+        });
       });
     }
 
@@ -822,9 +865,6 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const useMultiResourceMode = validatedTeamMemberIds.length > 0;
     const requiredOverlap =
       minResources <= 1 ? 100 : resourcePolicy.minOverlapPercentage;
-    const requiresFullOverlap =
-      resourcePolicy.minOverlapPercentage === 100 || minResources >= totalResources;
-
     // Get execution duration from project or subprojects for window-based checks
     let executionDays: number | null = null;
 
@@ -867,22 +907,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     }
 
     // Per-day blocking for multi-resource availability:
-    // - If 100% overlap is required, block any day where not all resources are available.
-    // - Otherwise, block only days where all resources are unavailable.
+    // A day is unavailable when fewer than minResources are available.
+    // This must match days-mode scheduling start-date validation.
     if (useMultiResourceMode) {
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
         const blockedCount = blockedMemberIds.size;
         const availableResources = totalResources - blockedCount;
 
-        if (requiresFullOverlap) {
-          if (availableResources < totalResources) {
-            allBlockedDates.add(dateIso);
-            finalBlockedDateSet.add(dateIso);
-          }
-          return;
-        }
-
-        if (availableResources <= 0) {
+        if (availableResources < minResources) {
           allBlockedDates.add(dateIso);
           finalBlockedDateSet.add(dateIso);
         }
