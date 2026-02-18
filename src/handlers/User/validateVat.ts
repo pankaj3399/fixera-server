@@ -157,6 +157,43 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
       }
     }
 
+    // Auto-populate company address for business customers
+    if (autoPopulate && validationResult.valid && user.role === 'customer' && user.customerType === 'business') {
+      if (validationResult.companyName && !user.businessName) {
+        user.businessName = validationResult.companyName;
+      }
+
+      if (!user.companyAddress) {
+        user.companyAddress = {};
+      }
+
+      if (validationResult.companyAddress) {
+        const addressLines = validationResult.companyAddress.split('\n').filter((line: string) => line.trim());
+
+        if (!user.companyAddress.address && addressLines[0]) {
+          user.companyAddress.address = addressLines[0];
+        }
+
+        const lastLine = addressLines[addressLines.length - 1];
+        if (lastLine) {
+          const postalMatch = lastLine.match(/(\d{4,5})/);
+          const cityMatch = lastLine.match(/\d{4,5}\s+(.+)$/);
+
+          if (postalMatch && !user.companyAddress.postalCode) {
+            user.companyAddress.postalCode = postalMatch[1];
+          }
+
+          if (cityMatch && !user.companyAddress.city) {
+            user.companyAddress.city = cityMatch[1].trim();
+          }
+        }
+
+        if (!user.companyAddress.country) {
+          user.companyAddress.country = formattedVAT.substring(0, 2);
+        }
+      }
+    }
+
     await user.save();
     return res.status(200).json({
       success: true,
@@ -167,7 +204,9 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
         companyName: validationResult.companyName,
         companyAddress: validationResult.companyAddress,
         autoPopulated: autoPopulate && validationResult.valid,
-        businessInfo: user.businessInfo
+        businessInfo: user.businessInfo,
+        customerBusinessName: user.businessName,
+        customerCompanyAddress: user.companyAddress
       }
     });
 

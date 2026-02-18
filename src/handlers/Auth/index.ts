@@ -489,6 +489,8 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       professionalOnboardingCompletedAt: user.professionalOnboardingCompletedAt,
       // Customer-specific fields
       customerType: user.customerType,
+      businessName: user.businessName,
+      companyAddress: user.companyAddress,
       location: user.location,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt

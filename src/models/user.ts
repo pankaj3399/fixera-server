@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { normalizePendingIdChanges } from "../utils/pendingIdChanges";
 
 export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee";
 export type CustomerType = "individual" | "business";
@@ -26,9 +27,9 @@ export interface IUser extends Document {
     idExpirationDate?: Date;
     idExpiryEmailSentAt?: Date;
     pendingIdChanges?: {
-        field: string;
-        oldValue: string;
-        newValue: string;
+        field?: string;
+        oldValue?: string;
+        newValue?: string;
     }[];
     professionalId?: string;
     // Professional approval fields
@@ -238,7 +239,7 @@ const UserSchema = new Schema({
             oldValue: { type: String, required: false, default: '' },
             newValue: { type: String, required: false, default: '' }
         }],
-        default: undefined
+        default: []
     },
     // Professional approval fields
     professionalStatus: {
@@ -514,15 +515,23 @@ const UserSchema = new Schema({
 });
 
 UserSchema.pre("save", function (next) {
+    this.set(
+        "pendingIdChanges",
+        normalizePendingIdChanges(
+            this.pendingIdChanges as Array<{
+                field?: string;
+                oldValue?: string | null;
+                newValue?: string;
+            }>
+        )
+    );
+
     const isBusinessCustomer = this.role === "customer" && this.customerType === "business";
     if (!isBusinessCustomer) {
         this.set("businessName", undefined);
         this.set("companyAddress", undefined);
     }
 
-    if (this.role === "professional") {
-        this.set("availability", undefined);
-    }
 
     if (this.role !== "professional") {
         this.set("stripe", undefined);

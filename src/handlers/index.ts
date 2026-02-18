@@ -55,6 +55,10 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         totalSpent: user.totalSpent,
         totalBookings: user.totalBookings,
         employee: user.employee,
+        customerType: user.customerType,
+        businessName: user.businessName,
+        companyAddress: user.companyAddress,
+        location: user.location,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
       }

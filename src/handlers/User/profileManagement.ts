@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
 import { getCountryCode } from '../../utils/geocoding';
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
+import { NO_PREVIOUS_VALUE, normalizePendingIdChanges } from "../../utils/pendingIdChanges";
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 const maskEmail = (email: string): string => {
@@ -142,7 +143,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
       if (!user.pendingIdChanges) user.pendingIdChanges = [];
       user.pendingIdChanges.push({
         field: 'idProofDocument',
-        oldValue: previousIdProofUrl || previousIdProofFileName || '',
+        oldValue: previousIdProofUrl || previousIdProofFileName || NO_PREVIOUS_VALUE,
         newValue: uploadResult.key
       });
       user.rejectionReason = undefined;
@@ -757,7 +758,7 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
 // Update customer profile (address, business name for business customers)
 export const updateCustomerProfile = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { address, city, country, postalCode, businessName, companyAddress } = req.body;
+    const { address, city, country, postalCode, businessName, customerType, companyAddress } = req.body;
     const trimmedAddress = typeof address === 'string' ? address.trim() : undefined;
     const trimmedCity = typeof city === 'string' ? city.trim() : undefined;
     const trimmedCountry = typeof country === 'string' ? country.trim() : undefined;
@@ -788,6 +789,18 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       });
     }
 
+    // Update customer type if provided
+    // Update customer type if provided
+    if (customerType) {
+      if (!['individual', 'business'].includes(customerType)) {
+        return res.status(400).json({
+          success: false,
+          msg: "Invalid customer type. Must be 'individual' or 'business'"
+        });
+      }
+      user.customerType = customerType;
+    }
+
     const hasLocationField = [trimmedAddress, trimmedCity, trimmedCountry, trimmedPostalCode]
       .some((value) => value !== undefined);
 
@@ -808,15 +821,39 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       if (trimmedPostalCode !== undefined) user.location.postalCode = trimmedPostalCode;
     }
 
-    // Business name only for business customers
-    if (trimmedBusinessName !== undefined) {
-      if (user.customerType !== 'business') {
-        return res.status(400).json({
-          success: false,
-          msg: "Business name can only be set for business customers"
-        });
+    // Business name only for business customers or if switching to business
+    if (user.customerType === 'business') {
+      if (trimmedBusinessName !== undefined) {
+        user.businessName = trimmedBusinessName.length > 0 ? trimmedBusinessName : undefined;
       }
-      user.businessName = trimmedBusinessName.length > 0 ? trimmedBusinessName : undefined;
+
+      // Update company address for business customers
+      if (companyAddress && typeof companyAddress === 'object') {
+        if (!user.companyAddress) {
+          user.companyAddress = {};
+        }
+        if (typeof companyAddress.address === 'string') {
+          user.companyAddress.address = companyAddress.address.trim() || undefined;
+        }
+        if (typeof companyAddress.city === 'string') {
+          user.companyAddress.city = companyAddress.city.trim() || undefined;
+        }
+        if (typeof companyAddress.country === 'string') {
+          user.companyAddress.country = companyAddress.country.trim() || undefined;
+        }
+        if (typeof companyAddress.postalCode === 'string') {
+          user.companyAddress.postalCode = companyAddress.postalCode.trim() || undefined;
+        }
+      }
+    } else if (customerType && customerType !== 'business') {
+      // If switching to individual, clear business fields
+      user.businessName = undefined;
+      user.companyAddress = undefined;
+      // We might also want to clear VAT if it was set, but that's handled separately or via another call?
+      // For now, let's keep VAT separate as it has its own verification logic, but frontend should hide it.
+      // Actually, per requirements "in case of business customer also VAT and business name",
+      // implying non-business customers shouldn't have them.
+      // User model pre-save hook handles clearing businessName if not business customer.
     }
 
     // Company address only for business customers
@@ -889,7 +926,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     if (normalizedIdCountryOfIssue !== undefined && normalizedIdCountryOfIssue !== (user.idCountryOfIssue || '')) {
       changes.push({
         field: 'idCountryOfIssue',
-        oldValue: user.idCountryOfIssue || '',
+        oldValue: user.idCountryOfIssue || NO_PREVIOUS_VALUE,
         newValue: normalizedIdCountryOfIssue
       });
     }
@@ -909,7 +946,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
       if (oldDate !== newDate) {
         changes.push({
           field: 'idExpirationDate',
-          oldValue: oldDate,
+          oldValue: oldDate || NO_PREVIOUS_VALUE,
           newValue: newDate
         });
       }
@@ -929,10 +966,10 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     }
 
     // Store pending changes for admin review
-    if (!user.pendingIdChanges) {
-      user.pendingIdChanges = [];
-    }
-    user.pendingIdChanges.push(...changes);
+    // Clean any existing entries with empty oldValue to avoid Mongoose validation errors
+    const existingChanges = normalizePendingIdChanges(user.pendingIdChanges) || [];
+    user.pendingIdChanges = normalizePendingIdChanges([...existingChanges, ...changes]);
+    user.markModified('pendingIdChanges');
 
     // Trigger re-verification only if already approved
     const wasApproved = user.professionalStatus === 'approved';
@@ -946,7 +983,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     // Any ID info update should allow future expiry reminders for the new data
     user.idExpiryEmailSentAt = undefined;
 
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
 
     const changedFields = changes.map((change) => change.field);
     console.log(`🔄 ID Info: Updated for userId=${String(user._id)}. Fields: ${changedFields.join(', ')}`);
@@ -967,9 +1004,12 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
   } catch (error: any) {
     console.error('Update ID info error:', error);
+    if (error?.name === 'ValidationError') {
+      console.error('Validation details:', JSON.stringify(error.errors, null, 2));
+    }
     return res.status(500).json({
       success: false,
-      msg: "Failed to update ID information"
+      msg: "Internal server error"
     });
   }
 };
