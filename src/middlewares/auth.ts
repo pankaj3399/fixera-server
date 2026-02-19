@@ -19,9 +19,9 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
 
     // 3. If no token found, return unauthorized
     if (!token) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         success: false,
-        msg: 'Access denied. No authentication token provided.' 
+        msg: 'Access denied. No authentication token provided.'
       });
     }
 

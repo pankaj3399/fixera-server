@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import Booking, { IBooking, BookingStatus } from "../../models/booking";
+import Payment from "../../models/payment";
 import User from "../../models/user";
 import Project from "../../models/project";
 import mongoose from "mongoose";
@@ -765,6 +766,86 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
   } catch (error: any) {
     console.error('Cancel booking error:', error);
+    next(error);
+  }
+};
+
+// Get payment history for current customer
+export const getMyPayments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user?._id ? req.user._id.toString() : undefined;
+    const { status, page = '1', limit = '20' } = req.query;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Unauthorized" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    if (user.role !== 'customer') {
+      return res.status(403).json({ success: false, msg: "Only customers can view payment history" });
+    }
+
+    const query: Record<string, any> = { customer: userId };
+    if (status && typeof status === 'string' && status !== 'all') {
+      query.status = status;
+    }
+
+    const pageNumber = Math.max(parseInt(page as string, 10) || 1, 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit as string, 10) || 20, 5), 100);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const [payments, totalCount, summaryStats] = await Promise.all([
+      Payment.find(query)
+        .populate('booking', 'status bookingType bookingNumber')
+        .populate('professional', 'name email businessInfo')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+      Payment.countDocuments(query),
+      Payment.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(userId) } },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            total: { $sum: '$totalWithVat' }
+          }
+        }
+      ])
+    ]);
+
+    const summary = {
+      totalPaid: 0,
+      inEscrow: 0,
+      refunded: 0,
+    };
+    summaryStats.forEach((s: any) => {
+      if (s._id === 'completed') summary.totalPaid += s.total || 0;
+      if (s._id === 'authorized') summary.inEscrow += s.total || 0;
+      if (s._id === 'refunded') summary.refunded += s.total || 0;
+      if (s._id === 'partially_refunded') summary.refunded += s.total || 0;
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        payments,
+        summary,
+        pagination: {
+          page: pageNumber,
+          limit: limitNumber,
+          total: totalCount,
+          totalPages: Math.ceil(totalCount / limitNumber)
+        }
+      }
+    });
+  } catch (error: any) {
+    console.error('Get my payments error:', error);
     next(error);
   }
 };

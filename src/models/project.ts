@@ -1,4 +1,4 @@
-import { Schema, model, Document } from "mongoose";
+import { Schema, model, Document, Types } from "mongoose";
 
 // Interfaces for nested schemas
 export interface ICertification {
@@ -152,8 +152,23 @@ export interface IServiceSelection {
 }
 
 export interface IProject extends Document {
+  // Time mode for scheduling
+  timeMode?: "hours" | "days" | "mixed";
+
+  // Project-level preparation, execution and buffer durations
+  preparationDuration?: {
+    value: number;
+    unit: "hours" | "days";
+  };
+  executionDuration?: IExecutionDuration;
+  bufferDuration?: IBuffer;
+
+  // Resource requirements for scheduling
+  minResources?: number;
+  minOverlapPercentage?: number;
+
   // Step 1: Basic Info
-  professionalId: string;
+  professionalId: Schema.Types.ObjectId | string;
   category: string; // Kept for backwards compatibility (primary category)
   service: string; // Kept for backwards compatibility (primary service)
   areaOfWork?: string;
@@ -165,8 +180,6 @@ export interface IProject extends Document {
   intakeMeeting?: IIntakeMeeting;
   renovationPlanning?: IRenovationPlanning;
   resources: string[];
-  minResources?: number;
-  minOverlapPercentage?: number;
   description: string;
   priceModel: string;
   keywords: string[];
@@ -446,8 +459,43 @@ const ServiceSelectionSchema = new Schema<IServiceSelection>({
 // Main Project Schema
 const ProjectSchema = new Schema<IProject>(
   {
+    // Scheduling configuration
+    timeMode: {
+      type: String,
+      enum: ["hours", "days", "mixed"],
+    },
+    preparationDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ["hours", "days"] },
+    },
+    executionDuration: {
+      type: ExecutionDurationSchema,
+    },
+    bufferDuration: {
+      type: BufferSchema,
+    },
+    minResources: {
+      type: Number,
+      min: 1,
+    },
+    minOverlapPercentage: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 70,
+    },
     // Step 1: Basic Info
-    professionalId: { type: String, required: true },
+    professionalId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      set: (value: unknown) => {
+        if (typeof value === "string" && Types.ObjectId.isValid(value)) {
+          return new Types.ObjectId(value);
+        }
+        return value;
+      },
+    },
     category: { type: String, required: true },
     service: { type: String, required: true },
     areaOfWork: { type: String },
@@ -469,8 +517,6 @@ const ProjectSchema = new Schema<IProject>(
     intakeMeeting: IntakeMeetingSchema,
     renovationPlanning: RenovationPlanningSchema,
     resources: [{ type: String }],
-    minResources: { type: Number, min: 1 },
-    minOverlapPercentage: { type: Number, min: 0, max: 100, default: 90 },
     description: { type: String, required: true, maxlength: 1300 },
     priceModel: {
       type: String,

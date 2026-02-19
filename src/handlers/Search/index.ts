@@ -135,7 +135,7 @@ async function searchProfessionals(
     }
 
     // Execute query with pagination
-    console.log('🔍 Professional search filter:', JSON.stringify(filter, null, 2));
+    console.log('[SEARCH] Professional filter:', JSON.stringify(filter, null, 2));
 
     const [professionals, total] = await Promise.all([
       User.find(filter)
@@ -149,7 +149,7 @@ async function searchProfessionals(
       User.countDocuments(filter),
     ]);
 
-    console.log('✅ Found', total, 'professionals, returning', professionals.length);
+    console.log('[SEARCH] Found', total, 'professionals, returning', professionals.length);
 
     // If location filter is present, prioritize exact matches
     const hasAnyAvailability = (availability?: Record<string, any>) =>
@@ -336,7 +336,7 @@ async function searchProjects(
       customerCountryValue,
     ].filter(Boolean);
     // Execute query with pagination and populate professional info
-    console.log('dY"? Project search filter:', JSON.stringify(filter, null, 2));
+    console.log('[SEARCH] Project filter:', JSON.stringify(filter, null, 2));
 
     const baseQuery = Project.find(filter).sort({ createdAt: -1 });
 
@@ -467,7 +467,7 @@ async function searchProjects(
       ]);
     }
 
-    console.log("Found", total, "projects, returning", projects.length);
+    console.log("[SEARCH] Found", total, "projects, returning", projects.length);
 
     if (hasLocationFilter && !usedGeoSearch) {
       filteredResults = projects.filter((project: any) => {

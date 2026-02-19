@@ -190,7 +190,7 @@ export const getCategoryServices = async (req: Request, res: Response) => {
 
 export const createOrUpdateDraft = async (req: Request, res: Response) => {
   try {
-    console.log("📝 SAVE PROJECT REQUEST RECEIVED");
+    console.log("[PROJECT] SAVE PROJECT REQUEST RECEIVED");
     console.log("User ID:", req.user?.id);
     console.log("Request body keys:", Object.keys(req.body));
     console.log("Project ID from request:", req.body.id);
@@ -199,14 +199,14 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
     const projectData = normalizePreparationDuration(req.body);
 
     if (!professionalId) {
-      console.log("❌ No professional ID found");
+      console.log("[PROJECT] No professional ID found");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     let project;
 
     if (projectData.id) {
-      console.log(`🔄 UPDATING existing project: ${projectData.id}`);
+      console.log(`[PROJECT] Updating existing project: ${projectData.id}`);
       console.log("Professional ID:", professionalId);
 
       // First check if project exists
@@ -219,12 +219,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("Existing project title:", existingProject?.title);
 
       if (!existingProject) {
-        console.log("❌ Project not found or not owned by user");
+        console.log("[PROJECT] Project not found or not owned by user");
         return res.status(404).json({ error: "Project not found" });
       }
 
       // Log what fields are being updated
-      console.log("📝 Fields being updated:");
+      console.log("[PROJECT] Fields being updated:");
       console.log("- Title:", projectData.title);
       console.log(
         "- Description length:",
@@ -252,8 +252,8 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         updateData.approvedBy = undefined;
       }
 
-      console.log("🔧 Update query:", { _id: projectData.id, professionalId });
-      console.log("🔧 Update data keys:", Object.keys(updateData));
+      console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
+      console.log("[PROJECT] Update data keys:", Object.keys(updateData));
 
       project = await Project.findOneAndUpdate(
         { _id: projectData.id, professionalId },
@@ -261,12 +261,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         { new: true, runValidators: true }
       );
 
-      console.log("✅ Project updated successfully");
+      console.log("[PROJECT] Project updated successfully");
       console.log("Updated project ID:", project?._id);
       console.log("Updated project title:", project?.title);
       console.log("Updated project status:", project?.status);
     } else {
-      console.log("🆕 CREATING new project");
+      console.log("[PROJECT] Creating new project");
       project = new Project({
         ...projectData,
         professionalId,
@@ -274,16 +274,16 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         autoSaveTimestamp: new Date(),
       });
       await project.save();
-      console.log("✅ New project created with ID:", project._id);
+      console.log("[PROJECT] New project created with ID:", project._id);
     }
 
-    console.log("📤 SENDING RESPONSE - Project save complete");
+    console.log("[PROJECT] Sending response - project save complete");
     console.log("Response project ID:", project?._id);
     console.log("Response status code: 200");
 
     res.json(project);
   } catch (error: any) {
-    console.error("❌ AUTO-SAVE ERROR:", error);
+    console.error("[PROJECT] Auto-save error:", error);
     console.error("Error stack:", error.stack);
     res
       .status(500)
@@ -493,6 +493,12 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     // Track blocked members per date for multi-resource logic
     // Key: date ISO string (normalized to local midnight UTC), Value: Set of member IDs blocked on that date
     const dateBlockedMembers = new Map<string, Set<string>>();
+    // Track which members have FULL-DAY blocks (from blockedDates, not ranges)
+    const memberFullDayBlocked = new Map<string, Set<string>>(); // dateIso -> Set<memberId>
+    // Track actual blocked time ranges per member (for 4-hour threshold calculation)
+    const memberBlockedTimeRanges = new Map<string, Array<{ start: Date; end: Date }>>();
+    const PARTIAL_BLOCK_THRESHOLD = 4; // hours
+    const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
     // Helper to mark a member as blocked on a date
     const markMemberBlocked = (dateIso: string, memberId: string) => {
@@ -504,8 +510,31 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       dateBlockedMembers.get(dateKey)!.add(memberId);
     };
 
+    // Helper to mark a member as having a full-day block on a date
+    const markMemberFullDayBlocked = (dateIso: string, memberId: string) => {
+      const dateKey = normalizeDateKey(dateIso);
+      if (!dateKey) return;
+      if (!memberFullDayBlocked.has(dateKey)) {
+        memberFullDayBlocked.set(dateKey, new Set());
+      }
+      memberFullDayBlocked.get(dateKey)!.add(memberId);
+      markMemberBlocked(dateIso, memberId);
+    };
+
+    // Helper to store a blocked time range for a member
+    const addMemberTimeRange = (startIso: string, endIso: string, memberId: string) => {
+      const start = new Date(startIso);
+      const end = new Date(endIso);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return;
+      if (!memberBlockedTimeRanges.has(memberId)) {
+        memberBlockedTimeRanges.set(memberId, []);
+      }
+      memberBlockedTimeRanges.get(memberId)!.push({ start, end });
+    };
+
     // Helper to expand a date range and mark a member blocked only when the
     // blocked overlap with that working day is at least the threshold hours.
+    // Uses professional's timezone to determine which calendar days are affected
     const expandRangeAndMarkBlocked = (startIso: string, endIso: string, memberId: string) => {
       const start = new Date(startIso);
       const end = new Date(endIso);
@@ -515,6 +544,9 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         console.warn(`[getProjectTeamAvailability] Invalid date range for member ${memberId}: ${startIso} - ${endIso}`);
         return;
       }
+
+      // Store the actual time range for threshold calculation
+      addMemberTimeRange(startIso, endIso, memberId);
 
       const rangeEndInclusive = normalizeRangeEndInclusive(end, timeZone);
 
@@ -564,6 +596,70 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         }
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
+    };
+
+    // Compute blocked hours for a member on a specific day (within working hours)
+    const computeMemberBlockedHoursForDay = (memberId: string, dateIso: string): number => {
+      const ranges = memberBlockedTimeRanges.get(memberId);
+      if (!ranges || ranges.length === 0) return 0;
+
+      const dayUtc = new Date(dateIso);
+      const zonedDay = toZonedTime(dayUtc, timeZone);
+      const dayConfig = availability[DAY_NAMES[zonedDay.getUTCDay()]];
+      if (!dayConfig?.available || !dayConfig?.startTime || !dayConfig?.endTime) return Infinity;
+
+      const dateStr = dateIso.split('T')[0];
+      const workingStartMs = fromZonedTime(
+        new Date(Date.UTC(
+          parseInt(dateStr.slice(0, 4)), parseInt(dateStr.slice(5, 7)) - 1, parseInt(dateStr.slice(8, 10)),
+          parseInt(dayConfig.startTime.split(':')[0]), parseInt(dayConfig.startTime.split(':')[1]), 0
+        )),
+        timeZone
+      ).getTime();
+      const workingEndMs = fromZonedTime(
+        new Date(Date.UTC(
+          parseInt(dateStr.slice(0, 4)), parseInt(dateStr.slice(5, 7)) - 1, parseInt(dateStr.slice(8, 10)),
+          parseInt(dayConfig.endTime.split(':')[0]), parseInt(dayConfig.endTime.split(':')[1]), 0
+        )),
+        timeZone
+      ).getTime();
+
+      if (workingEndMs <= workingStartMs) return Infinity;
+
+      const dayStartMs = dayUtc.getTime();
+      const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+
+      const clamped = ranges
+        .map(range => {
+          const rangeStartMs = Math.max(range.start.getTime(), dayStartMs);
+          const rangeEndMs = Math.min(range.end.getTime(), dayEndMs);
+          if (rangeEndMs <= rangeStartMs) return null;
+          const start = Math.max(rangeStartMs, workingStartMs);
+          const end = Math.min(rangeEndMs, workingEndMs);
+          if (end <= start) return null;
+          return { start, end };
+        })
+        .filter((v): v is { start: number; end: number } => v !== null)
+        .sort((a, b) => a.start - b.start);
+
+      if (clamped.length === 0) return 0;
+
+      let totalMinutes = 0;
+      let currentStart = clamped[0].start;
+      let currentEnd = clamped[0].end;
+
+      for (let i = 1; i < clamped.length; i++) {
+        if (clamped[i].start <= currentEnd) {
+          currentEnd = Math.max(currentEnd, clamped[i].end);
+        } else {
+          totalMinutes += (currentEnd - currentStart) / (1000 * 60);
+          currentStart = clamped[i].start;
+          currentEnd = clamped[i].end;
+        }
+      }
+      totalMinutes += (currentEnd - currentStart) / (1000 * 60);
+
+      return totalMinutes / 60;
     };
 
     // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
@@ -640,7 +736,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           const date = toIsoDate(blocked.date);
           if (!date) return;
           blockedCategories.personal.dates.push(date);
-          markMemberBlocked(date, memberId);
+          markMemberFullDayBlocked(date, memberId);
           // Add to debug info
           if (debugEnabled && teamMemberDebugInfo?.[memberId]) {
             teamMemberDebugInfo[memberId].personalBlockedDates.push(date);
@@ -661,17 +757,6 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         });
       }
     });
-
-    // Convert string IDs to ObjectIds for proper MongoDB matching
-    // Validate IDs before conversion to avoid runtime exceptions
-    if (!mongoose.isValidObjectId(project.professionalId)) {
-      console.error('Invalid professionalId:', project.professionalId);
-      return res.status(400).json({
-        success: false,
-        error: "Invalid professional ID in project"
-      });
-    }
-    const professionalObjectId = new mongoose.Types.ObjectId(project.professionalId);
 
     // Booking filter - must match scheduleEngine.ts buildPerMemberBlockedData for consistency
     // Both endpoints must use the same criteria to determine which bookings block resources
@@ -908,11 +993,29 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // Per-day blocking for multi-resource availability:
     // A day is unavailable when fewer than minResources are available.
+    // Uses the 4-hour threshold: a member is only considered "blocked" on a day
+    // if they have a full-day block OR their blocked ranges within working hours >= 4 hours.
     // This must match days-mode scheduling start-date validation.
     if (useMultiResourceMode) {
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
-        const blockedCount = blockedMemberIds.size;
-        const availableResources = totalResources - blockedCount;
+        const fullDayBlocked = memberFullDayBlocked.get(dateIso);
+
+        // Count actually blocked members using 4-hour threshold
+        let actualBlockedCount = 0;
+        blockedMemberIds.forEach(memberId => {
+          // Full-day blocks always count
+          if (fullDayBlocked?.has(memberId)) {
+            actualBlockedCount++;
+            return;
+          }
+          // Range-based blocks: apply 4-hour threshold
+          const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
+          if (blockedHours >= PARTIAL_BLOCK_THRESHOLD) {
+            actualBlockedCount++;
+          }
+        });
+
+        const availableResources = totalResources - actualBlockedCount;
 
         if (availableResources < minResources) {
           allBlockedDates.add(dateIso);
@@ -920,10 +1023,27 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         }
       });
     } else {
-      // strict mode - any blocked member blocks the date
+      // Single resource mode: also apply 4-hour threshold for range-based blocks
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
-        allBlockedDates.add(dateIso);
-        finalBlockedDateSet.add(dateIso);
+        const fullDayBlocked = memberFullDayBlocked.get(dateIso);
+
+        // Check if any member is actually blocked (full-day or >= 4 hours)
+        let hasActualBlock = false;
+        blockedMemberIds.forEach(memberId => {
+          if (fullDayBlocked?.has(memberId)) {
+            hasActualBlock = true;
+            return;
+          }
+          const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
+          if (blockedHours >= PARTIAL_BLOCK_THRESHOLD) {
+            hasActualBlock = true;
+          }
+        });
+
+        if (hasActualBlock) {
+          allBlockedDates.add(dateIso);
+          finalBlockedDateSet.add(dateIso);
+        }
       });
     }
 
@@ -1213,7 +1333,7 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
 
 export const submitProject = async (req: Request, res: Response) => {
   try {
-    console.log("🚀 SUBMIT PROJECT REQUEST RECEIVED");
+    console.log("[PROJECT] SUBMIT PROJECT REQUEST RECEIVED");
     const { id } = req.params;
     const professionalId = req.user?.id;
 
@@ -1221,7 +1341,7 @@ export const submitProject = async (req: Request, res: Response) => {
     console.log("Professional ID:", professionalId);
 
     if (!professionalId) {
-      console.log("❌ No professional ID found");
+      console.log("[PROJECT] No professional ID found");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
@@ -1234,7 +1354,7 @@ export const submitProject = async (req: Request, res: Response) => {
     console.log("Project status:", project?.status);
 
     if (!project) {
-      console.log("❌ Project not found");
+      console.log("[PROJECT] Project not found");
       return res.status(404).json({ error: "Project not found" });
     }
 
@@ -1242,13 +1362,13 @@ export const submitProject = async (req: Request, res: Response) => {
     if (
       !["draft", "rejected", "pending", "published"].includes(project.status)
     ) {
-      console.log("❌ Invalid status for submission:", project.status);
+      console.log("[PROJECT] Invalid status for submission:", project.status);
       return res
         .status(400)
         .json({ error: "Project cannot be submitted in current status" });
     }
 
-    console.log("✅ Project validation passed, running quality checks...");
+    console.log("[PROJECT] Project validation passed, running quality checks...");
 
     const qualityChecks = [];
 
@@ -1308,12 +1428,12 @@ export const submitProject = async (req: Request, res: Response) => {
     const message = isResubmission
       ? "Project resubmitted for approval"
       : "Project submitted for approval";
-    console.log("✅ Project submitted successfully");
+    console.log("[PROJECT] Project submitted successfully");
     console.log("Message:", message);
 
     res.json({ message, project });
   } catch (error: any) {
-    console.error("❌ SUBMIT PROJECT ERROR:", error);
+    console.error("[PROJECT] Submit project error:", error);
     console.error("Error stack:", error.stack);
     res
       .status(500)

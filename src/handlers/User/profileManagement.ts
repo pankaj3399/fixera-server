@@ -495,11 +495,15 @@ export const submitForVerification = async (req: Request, res: Response, next: N
       });
     }
 
-    // Check if already pending (prevent multiple submissions)
+    // If already pending, return success (e.g., after ID info change already triggered re-verification)
     if (user.professionalStatus === 'pending') {
-      return res.status(400).json({
-        success: false,
-        msg: "Your profile is already pending verification. You will be notified within 48 hours."
+      return res.status(200).json({
+        success: true,
+        msg: "Your profile is already pending verification. You will be notified within 48 hours.",
+        data: {
+          professionalStatus: user.professionalStatus,
+          expectedReviewTime: "48 hours"
+        }
       });
     }
 
@@ -852,6 +856,17 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       // User model pre-save hook handles clearing businessName if not business customer.
     }
 
+    // Company address only for business customers
+    if (companyAddress && typeof companyAddress === 'object' && user.customerType === 'business') {
+      if (!user.companyAddress) {
+        user.companyAddress = {};
+      }
+      if (typeof companyAddress.address === 'string') user.companyAddress.address = companyAddress.address.trim();
+      if (typeof companyAddress.city === 'string') user.companyAddress.city = companyAddress.city.trim();
+      if (typeof companyAddress.country === 'string') user.companyAddress.country = companyAddress.country.trim();
+      if (typeof companyAddress.postalCode === 'string') user.companyAddress.postalCode = companyAddress.postalCode.trim();
+    }
+
     await user.save();
 
     console.log(`🏠 Customer Profile: Updated for ${String(user._id)}`);
@@ -927,7 +942,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
         });
       }
       newDate = parsedExpirationDate.toISOString().split('T')[0];
-      const oldDate = user.idExpirationDate ? user.idExpirationDate.toISOString().split('T')[0] : '';
+      const oldDate = user.idExpirationDate ? new Date(user.idExpirationDate).toISOString().split('T')[0] : '';
       if (oldDate !== newDate) {
         changes.push({
           field: 'idExpirationDate',

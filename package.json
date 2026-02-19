@@ -30,12 +30,14 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "express-rate-limit": "^7.5.0",
+    "express-rate-limit": "^8.2.1",
     "google-libphonenumber": "^3.2.44",
     "jsonwebtoken": "^9.0.2",
     "luxon": "^3.5.0",
     "mongoose": "^8.17.1",
     "multer": "^2.0.2",
+    "pdfkit": "^0.17.2",
+    "stripe": "^20.0.0",
     "twilio": "^5.8.0"
   },
   "devDependencies": {
@@ -47,6 +49,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/luxon": "^3.4.2",
     "@types/multer": "^2.0.0",
+    "@types/pdfkit": "^0.17.3",
     "nodemon": "^3.1.10",
     "tsx": "^4.20.4",
     "typescript": "^5.9.2"

@@ -7,6 +7,8 @@ type BookingBlockedRange = {
   endDate: string;
   reason?: string;
   bookingId?: string;
+  bookingNumber?: string;
+  customerName?: string;
   location?: {
     address?: string;
     city?: string;
@@ -46,13 +48,16 @@ export const buildBookingBlockedRanges = async (
     ],
   };
 
-  const bookings = await Booking.find(bookingFilter).select(
-    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location"
-  );
+  const bookings = await Booking.find(bookingFilter)
+    .select(
+      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer"
+    )
+    .populate("customer", "name");
 
   const ranges: BookingBlockedRange[] = [];
 
   bookings.forEach((booking) => {
+    const customerName = (booking.customer as any)?.name;
     // Legacy field fallbacks are kept for older bookings until data is normalized.
     const scheduledExecutionEndDate =
       booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
@@ -72,6 +77,8 @@ export const buildBookingBlockedRanges = async (
           endDate: endDateISO,
           reason: "booking",
           bookingId: String(booking._id),
+          bookingNumber: booking.bookingNumber,
+          customerName,
           location: booking.location,
         });
       } else {
@@ -92,6 +99,8 @@ export const buildBookingBlockedRanges = async (
           endDate: bufferEndISO,
           reason: "booking-buffer",
           bookingId: String(booking._id),
+          bookingNumber: booking.bookingNumber,
+          customerName,
           location: booking.location,
         });
       } else {

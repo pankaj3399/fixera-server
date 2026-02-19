@@ -65,22 +65,11 @@ export const validateVAT = async (req: Request, res: Response, next: NextFunctio
 // New endpoint for VAT validation with auto-population
 export const validateAndPopulateVAT = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const token = req.cookies?.['auth-token'];
-
-    if (!token) {
+    const userId = req.user?.id;
+    if (!userId) {
       return res.status(401).json({
         success: false,
         msg: "Authentication required"
-      });
-    }
-
-    let decoded: { id: string } | null = null;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
-    } catch (err) {
-      return res.status(401).json({
-        success: false,
-        msg: "Invalid authentication token"
       });
     }
 
@@ -96,7 +85,7 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
     console.log(`💼 PHASE 2: Validating and updating VAT for user - VAT: ${vatNumber}, Auto-populate: ${autoPopulate}`);
 
     await connecToDatabase();
-    const user = await User.findById(decoded.id);
+    const user = await User.findById(userId);
 
     if (!user) {
       return res.status(404).json({
@@ -231,29 +220,18 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
 export const updateUserVAT = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const token = req.cookies?.['auth-token'];
-
-    if (!token) {
+    const userId = req.user?.id;
+    if (!userId) {
       return res.status(401).json({
         success: false,
         msg: "Authentication required"
       });
     }
 
-    let decoded: { id: string } | null = null;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
-    } catch (err) {
-      return res.status(401).json({
-        success: false,
-        msg: "Invalid authentication token"
-      });
-    }
-
     const { vatNumber } = req.body;
 
     await connecToDatabase();
-    const user = await User.findById(decoded.id);
+    const user = await User.findById(userId);
 
     if (!user) {
       return res.status(404).json({
