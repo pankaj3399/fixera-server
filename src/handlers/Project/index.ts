@@ -346,7 +346,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     const project = await Project.findOne({
       _id: id,
       status: "published",
-    }).populate('professionalId', 'name businessInfo.companyName businessInfo.timezone email phone');
+    }).populate('professionalId', 'name businessInfo.companyName businessInfo.timezone email phone companyAvailability companyBlockedRanges');
 
     if (!project) {
       return res.status(404).json({
