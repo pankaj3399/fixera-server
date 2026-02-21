@@ -18,7 +18,7 @@ export const getActiveServiceCategories = async (
       isActive: true,
       activeCountries: country,
     })
-      .select("category service areaOfWork pricingModel certificationRequired icon")
+      .select("category service areaOfWork pricingModelName certificationRequired icon")
       .sort({ category: 1, service: 1 });
 
     // Group by category

@@ -271,13 +271,15 @@ function convertToServiceConfig(row: any): any {
   let pricingModelType: 'Fixed price' | 'Price per unit' = 'Fixed price';
   let pricingModelUnit = '';
 
-  if (rawPricingModel.toLowerCase().includes('per') || rawPricingModel.toLowerCase().includes('m2') || rawPricingModel.toLowerCase().includes('hour') || rawPricingModel.toLowerCase().includes('day') || rawPricingModel.toLowerCase().includes('meter')) {
+  const normalizedPricingModel = rawPricingModel.replace('m²', 'm2').toLowerCase();
+
+  if (normalizedPricingModel.includes('per') || normalizedPricingModel.includes('m2') || normalizedPricingModel.includes('hour') || normalizedPricingModel.includes('day') || normalizedPricingModel.includes('meter')) {
     pricingModelType = 'Price per unit';
-    if (rawPricingModel.toLowerCase().includes('m2') || rawPricingModel.toLowerCase().includes('m²')) pricingModelUnit = 'm²';
-    else if (rawPricingModel.toLowerCase().includes('hour')) pricingModelUnit = 'hour';
-    else if (rawPricingModel.toLowerCase().includes('day')) pricingModelUnit = 'day';
-    else if (rawPricingModel.toLowerCase().includes('meter')) pricingModelUnit = 'meter';
-    else if (rawPricingModel.toLowerCase().includes('room')) pricingModelUnit = 'room';
+    if (normalizedPricingModel.includes('m2')) pricingModelUnit = 'm2';
+    else if (normalizedPricingModel.includes('hour')) pricingModelUnit = 'hour';
+    else if (normalizedPricingModel.includes('day')) pricingModelUnit = 'day';
+    else if (normalizedPricingModel.includes('meter')) pricingModelUnit = 'meter';
+    else if (normalizedPricingModel.includes('room')) pricingModelUnit = 'room';
     else pricingModelUnit = 'unit';
   }
 

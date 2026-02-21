@@ -7,7 +7,8 @@ interface TimeWindow {
   end: Date;
 }
 
-type ScheduleProposals = Pick<EngineScheduleProposals, "mode"> & {
+type ScheduleProposals = {
+  mode: "hours" | "days" | "mixed";
   earliestBookableDate: Date;
   earliestProposal?: TimeWindow;
   shortestThroughputProposal?: TimeWindow;
@@ -384,9 +385,9 @@ export const getScheduleProposalsForProject = async (
 
     const earliestBookableDate = await getEarliestBookableDate(project, teamMembers);
 
-    if (!project.executionDuration) {
+    if (!project.executionDuration || mode === "mixed") {
       return {
-        mode: mode === "mixed" ? "days" : mode,
+        mode,
         earliestBookableDate,
       };
     }
@@ -664,7 +665,7 @@ export const getScheduleProposalsForProject = async (
     }
 
     return {
-      mode: mode === "mixed" ? "days" : mode,
+      mode,
       earliestBookableDate,
       earliestProposal,
       shortestThroughputProposal,

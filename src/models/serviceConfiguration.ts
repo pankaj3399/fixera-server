@@ -44,7 +44,7 @@ export interface IServiceConfiguration extends Document {
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
     pricingModelName: string; // e.g., "Total price", "Total price or m² of material"
     pricingModelType: 'Fixed price' | 'Price per unit';
-    pricingModelUnit?: string; // e.g., "m2", "hour", "day", "meter", "room"
+    pricingModelUnit?: string; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -140,6 +140,17 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     activeCountries: { type: [String], default: ['BE'] }
 }, {
     timestamps: true
+});
+
+ServiceConfigurationSchema.pre('validate', function(next) {
+    if (this.pricingModelType === 'Fixed price') {
+        this.pricingModelUnit = undefined;
+    } else if (this.pricingModelType === 'Price per unit') {
+        if (!this.pricingModelUnit) {
+            this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
+        }
+    }
+    next();
 });
 
 // Indexes for efficient querying
