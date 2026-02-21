@@ -50,7 +50,7 @@ export const getActiveServiceCategories = async (
           description: `Professional ${config.service.toLowerCase()} services`,
           isActive: true,
           countries: [country],
-          pricingModel: config.pricingModel,
+          pricingModel: config.pricingModelName,
           certificationRequired: config.certificationRequired,
           icon: config.icon,
         });

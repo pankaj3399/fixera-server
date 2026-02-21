@@ -371,7 +371,7 @@ export const getScheduleProposalsForProject = async (
     const project = await Project.findById(projectId);
     if (!project) return null;
 
-    const mode: "hours" | "days" =
+    const mode: "hours" | "days" | "mixed" =
       project.timeMode || project.executionDuration?.unit || "days";
 
     const teamMembers = await fetchProjectTeamMembers(project);
@@ -386,7 +386,7 @@ export const getScheduleProposalsForProject = async (
 
     if (!project.executionDuration) {
       return {
-        mode,
+        mode: mode === "mixed" ? "days" : mode,
         earliestBookableDate,
       };
     }
@@ -664,7 +664,7 @@ export const getScheduleProposalsForProject = async (
     }
 
     return {
-      mode,
+      mode: mode === "mixed" ? "days" : mode,
       earliestBookableDate,
       earliestProposal,
       shortestThroughputProposal,

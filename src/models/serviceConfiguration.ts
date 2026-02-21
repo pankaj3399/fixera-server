@@ -42,7 +42,9 @@ export interface IServiceConfiguration extends Document {
 
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
-    pricingModel: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModelName: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModelType: 'Fixed price' | 'Price per unit';
+    pricingModelUnit?: string; // e.g., "m2", "hour", "day", "meter", "room"
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -115,7 +117,13 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
     // Admin-configurable fields
     areaOfWork: { type: String },
-    pricingModel: { type: String, required: true },
+    pricingModelName: { type: String, required: true },
+    pricingModelType: { 
+        type: String, 
+        required: true,
+        enum: ['Fixed price', 'Price per unit']
+    },
+    pricingModelUnit: { type: String },
     icon: { type: String },
     certificationRequired: { type: Boolean, default: false },
     requiredCertifications: [{ type: String, default: [] }],
