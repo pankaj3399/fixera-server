@@ -19,6 +19,7 @@ import professionalPaymentRouter from './routes/ProfessionalPayment';
 import searchRouter from './routes/Search';
 import bookingRouter from './routes/Booking';
 import stripeRouter from './routes/Stripe';
+import chatRouter from './routes/Chat';
 import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
 
 const app: Express = express();
@@ -63,6 +64,7 @@ app.use('/api/search', searchRouter);
 app.use('/api/bookings', bookingRouter);
 app.use('/api/stripe', stripeRouter);
 app.use('/api/professional', professionalPaymentRouter);
+app.use('/api/chat', chatRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);
