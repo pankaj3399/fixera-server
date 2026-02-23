@@ -182,6 +182,8 @@ export interface IProject extends Document {
   resources: string[];
   description: string;
   priceModel: string;
+  pricingModelType?: string;
+  pricingModelUnit?: string;
   keywords: string[];
   title: string;
   media: IMedia;
@@ -522,6 +524,8 @@ const ProjectSchema = new Schema<IProject>(
       type: String,
       required: true,
     },
+    pricingModelType: { type: String },
+    pricingModelUnit: { type: String },
     keywords: [{ type: String }],
     title: { type: String, required: true, minlength: 30, maxlength: 90 },
     media: { type: MediaSchema, required: true },

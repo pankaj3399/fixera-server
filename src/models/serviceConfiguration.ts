@@ -42,7 +42,9 @@ export interface IServiceConfiguration extends Document {
 
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
-    pricingModel: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModelName: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModelType: 'Fixed price' | 'Price per unit';
+    pricingModelUnit?: string; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -115,7 +117,13 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
     // Admin-configurable fields
     areaOfWork: { type: String },
-    pricingModel: { type: String, required: true },
+    pricingModelName: { type: String, required: true },
+    pricingModelType: { 
+        type: String, 
+        required: true,
+        enum: ['Fixed price', 'Price per unit']
+    },
+    pricingModelUnit: { type: String },
     icon: { type: String },
     certificationRequired: { type: Boolean, default: false },
     requiredCertifications: [{ type: String, default: [] }],
@@ -131,7 +139,29 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     isActive: { type: Boolean, default: true },
     activeCountries: { type: [String], default: ['BE'] }
 }, {
-    timestamps: true
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
+});
+
+// Virtual for backward compatibility
+ServiceConfigurationSchema.virtual('pricingModel')
+    .get(function() {
+        return this.pricingModelName;
+    })
+    .set(function(val) {
+        this.pricingModelName = val;
+    });
+
+ServiceConfigurationSchema.pre('validate', function(next) {
+    if (this.pricingModelType === 'Fixed price') {
+        this.pricingModelUnit = undefined;
+    } else if (this.pricingModelType === 'Price per unit') {
+        if (!this.pricingModelUnit) {
+            this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
+        }
+    }
+    next();
 });
 
 // Indexes for efficient querying
