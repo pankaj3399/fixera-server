@@ -20,6 +20,7 @@ import {
 } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
+import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 const toIsoDate = (value?: Date | string | null) => {
@@ -240,16 +241,25 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         updatedAt: new Date(),
       };
 
-      // If a published/on_hold project is edited, move it back to pending for re-approval
-      const shouldMoveToPending = ["published", "on_hold"].includes(
+      // Never let frontend data overwrite change-tracking fields
+      delete updateData.previousSnapshot;
+      delete updateData.pendingChanges;
+      delete updateData.reapprovalType;
+      delete updateData.isResubmission;
+
+      // If editing a published/on_hold project, take a snapshot for smart reapproval
+      // but do NOT change status to pending — defer to submit time
+      const isPublishedEdit = ["published", "on_hold"].includes(
         (existingProject.status as any) || ""
       );
-      if (shouldMoveToPending) {
-        updateData.status = "pending";
-        updateData.submittedAt = new Date();
-        updateData.adminFeedback = undefined;
-        updateData.approvedAt = undefined;
-        updateData.approvedBy = undefined;
+      if (isPublishedEdit) {
+        // Only take snapshot on the first edit (don't overwrite if already tracking)
+        if (!existingProject.previousSnapshot) {
+          updateData.previousSnapshot = existingProject.toObject();
+        }
+        updateData.isResubmission = true;
+        // Keep current status — don't let frontend overwrite it during auto-save
+        delete updateData.status;
       }
 
       console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
@@ -1358,9 +1368,9 @@ export const submitProject = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    // Allow resubmission for draft, rejected, pending, or existing projects
+    // Allow resubmission for draft, rejected, pending, published, or on_hold projects
     if (
-      !["draft", "rejected", "pending", "published"].includes(project.status)
+      !["draft", "rejected", "pending", "published", "on_hold"].includes(project.status)
     ) {
       console.log("[PROJECT] Invalid status for submission:", project.status);
       return res
@@ -1412,11 +1422,67 @@ export const submitProject = async (req: Request, res: Response) => {
       });
     }
 
-    // Update project status and submission details
+    // Smart reapproval logic for resubmissions
+    project.qualityChecks = qualityChecks;
+
+    if (project.isResubmission && project.previousSnapshot) {
+      // Fetch professional's company name for moderation
+      const professional = await User.findById(professionalId).select(
+        "businessInfo"
+      );
+      const companyName =
+        professional?.businessInfo?.companyName || undefined;
+
+      // Compute diff between approved snapshot and current data
+      const currentData = project.toObject();
+      const changes = computeProjectDiff(
+        project.previousSnapshot,
+        currentData,
+        companyName
+      );
+      const reapprovalType = determineReapprovalType(changes);
+
+      console.log(
+        `[PROJECT] Resubmission diff: ${changes.length} changes, type: ${reapprovalType}`
+      );
+
+      // Auto-approve when all automated checks pass (no structural or flagged content changes)
+      if (reapprovalType === "none") {
+        console.log("[PROJECT] Resubmission auto-approved – no admin review needed");
+        project.status = "published";
+        project.previousSnapshot = project.toObject();
+        project.pendingChanges = undefined;
+        project.reapprovalType = undefined;
+        project.isResubmission = false;
+
+        await project.save();
+        return res.json({
+          message: "Changes approved automatically",
+          project,
+        });
+      }
+
+      // Structural changes or moderation failures → send to admin for review
+      project.status = "pending";
+      project.submittedAt = new Date();
+      project.pendingChanges = changes;
+      project.reapprovalType = reapprovalType;
+      project.adminFeedback = undefined;
+      project.approvedAt = undefined;
+      project.approvedBy = undefined;
+
+      await project.save();
+      console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
+      return res.json({
+        message: "Changes submitted for admin review",
+        project,
+      });
+    }
+
+    // First-time submission or rejected re-edit: always go to pending
     const isResubmission = project.status !== "draft";
     project.status = "pending";
     project.submittedAt = new Date();
-    project.qualityChecks = qualityChecks;
 
     // Clear admin feedback on resubmission
     if (isResubmission) {
@@ -1468,6 +1534,10 @@ export const duplicateProject = async (req: Request, res: Response) => {
       submittedAt: undefined,
       approvedAt: undefined,
       approvedBy: undefined,
+      previousSnapshot: undefined,
+      pendingChanges: undefined,
+      reapprovalType: undefined,
+      isResubmission: false,
       autoSaveTimestamp: new Date(),
       createdAt: undefined,
       updatedAt: undefined,
@@ -1581,11 +1651,27 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         .skip((page - 1) * limit)
         .limit(limit),
       Project.countDocuments(filter),
-      // Status counts for header cards
+      // Status counts for header cards – normalize raw DB statuses
       (async () => {
+        const professionalObjectId = new mongoose.Types.ObjectId(professionalId);
         const pipeline = [
-          { $match: { professionalId } },
-          { $group: { _id: "$status", count: { $sum: 1 } } },
+          { $match: { professionalId: professionalObjectId } },
+          {
+            $addFields: {
+              normalizedStatus: {
+                $switch: {
+                  branches: [
+                    { case: { $in: ["$status", ["pending", "pending_approval", "awaiting_approval"]] }, then: "pending" },
+                    { case: { $in: ["$status", ["published", "active", "live"]] }, then: "published" },
+                    { case: { $in: ["$status", ["on_hold", "hold", "suspended", "paused", "pause"]] }, then: "on_hold" },
+                    { case: { $eq: ["$status", "rejected"] }, then: "rejected" },
+                  ],
+                  default: "draft",
+                },
+              },
+            },
+          },
+          { $group: { _id: "$normalizedStatus", count: { $sum: 1 } } },
         ];
         const raw = await (Project as any).aggregate(pipeline);
         const byStatus: Record<string, number> = raw.reduce(
@@ -1596,22 +1682,12 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
           {} as Record<string, number>
         );
 
-        // Derive rejected and cancelled for UI compatibility
-        const rejected = await Project.countDocuments({
-          professionalId,
-          status: "rejected",
-        });
-        const cancelled = await Project.countDocuments({
-          professionalId,
-          status: "closed",
-        });
-
         return {
           drafts: byStatus["draft"] || 0,
           pending: byStatus["pending"] || 0,
           published: byStatus["published"] || 0,
           on_hold: byStatus["on_hold"] || 0,
-          rejected,
+          rejected: byStatus["rejected"] || 0,
         };
       })(),
     ]);

@@ -22,6 +22,7 @@ import {
   deleteProjectByAdmin,
   deactivateProject,
   reactivateProject,
+  getProjectChanges,
 } from "../../handlers/Project/admin";
 
 const router = Router();
@@ -47,6 +48,7 @@ router.route("/:id").delete(authMiddleware, deleteProject);
 router.route("/:id/status").patch(authMiddleware, updateProjectStatus);
 
 // Admin routes
+router.route("/admin/:id/changes").get(authMiddleware, getProjectChanges);
 router.route("/admin/pending").get(authMiddleware, getPendingProjects);
 router.route("/admin/approved").get(authMiddleware, getApprovedProjects);
 router.route("/admin/:id/approve").put(authMiddleware, approveProject);

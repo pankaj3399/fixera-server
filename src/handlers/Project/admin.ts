@@ -133,9 +133,17 @@ export const approveProject = async (req: Request, res: Response) => {
         const project = await Project.findOneAndUpdate(
             { _id: id, status: 'pending' },
             {
-                status: 'published',
-                approvedAt: new Date(),
-                approvedBy: req.user?.id
+                $set: {
+                    status: 'published',
+                    approvedAt: new Date(),
+                    approvedBy: req.user?.id,
+                    isResubmission: false,
+                },
+                $unset: {
+                    previousSnapshot: 1,
+                    pendingChanges: 1,
+                    reapprovalType: 1,
+                },
             },
             { new: true }
         );
@@ -189,8 +197,16 @@ export const rejectProject = async (req: Request, res: Response) => {
         const project = await Project.findOneAndUpdate(
             { _id: id, status: 'pending' },
             {
-                status: 'rejected',
-                adminFeedback: feedback
+                $set: {
+                    status: 'rejected',
+                    adminFeedback: feedback,
+                    isResubmission: false,
+                },
+                $unset: {
+                    previousSnapshot: 1,
+                    pendingChanges: 1,
+                    reapprovalType: 1,
+                },
             },
             { new: true }
         );
@@ -356,6 +372,32 @@ export const reactivateProject = async (req: Request, res: Response) => {
     } catch (error) {
         console.error('Failed to reactivate project:', error);
         res.status(500).json({ error: 'Failed to reactivate project' });
+    }
+};
+
+// Get change details for a project (admin only)
+export const getProjectChanges = async (req: Request, res: Response) => {
+    try {
+        if (!req.user || req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { id } = req.params;
+        const project = await Project.findById(id);
+
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.json({
+            isResubmission: project.isResubmission || false,
+            reapprovalType: project.reapprovalType || null,
+            changes: project.pendingChanges || [],
+            previousSnapshot: project.previousSnapshot || null,
+        });
+    } catch (error) {
+        console.error('Failed to fetch project changes:', error);
+        res.status(500).json({ error: 'Failed to fetch project changes' });
     }
 };
 
