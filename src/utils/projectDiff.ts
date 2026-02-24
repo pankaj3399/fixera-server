@@ -15,8 +15,23 @@ const TRACKED_FIELDS = [
 ];
 
 /**
+ * Recursively sort object keys to produce a deterministic structure.
+ * Arrays are preserved in order; primitives pass through unchanged.
+ */
+function sortKeys(val: any): any {
+  if (val === null || val === undefined || typeof val !== "object") return val;
+  if (Array.isArray(val)) return val.map(sortKeys);
+  const sorted: Record<string, any> = {};
+  for (const key of Object.keys(val).sort()) {
+    if (key === "__v" || key === "_id" || key === "id") continue;
+    sorted[key] = sortKeys(val[key]);
+  }
+  return sorted;
+}
+
+/**
  * Normalize a value for comparison by stripping Mongoose internals
- * and converting to a stable JSON representation.
+ * and converting to a stable, deterministic JSON representation.
  */
 function normalize(value: any): string {
   if (value === undefined || value === null) return "null";
@@ -28,11 +43,7 @@ function normalize(value: any): string {
         : typeof value.toJSON === "function"
         ? value.toJSON()
         : value;
-    return JSON.stringify(plain, (_, v) => {
-      // Strip Mongoose internal fields
-      if (_ === "__v" || _ === "_id" || _ === "id") return undefined;
-      return v;
-    });
+    return JSON.stringify(sortKeys(plain));
   }
   return String(value);
 }
@@ -57,7 +68,9 @@ export function computeProjectDiff(
 
     if (oldNorm === newNorm) continue;
 
-    console.log(`[DIFF] Field "${field}" changed | category: ${getFieldCategory(field)}`);
+    if (process.env.NODE_ENV !== "production") {
+      console.log(`[DIFF] Field "${field}" changed | category: ${getFieldCategory(field)}`);
+    }
 
     const category = getFieldCategory(field);
 

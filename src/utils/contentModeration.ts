@@ -1,5 +1,13 @@
 import leoProfanity from "leo-profanity";
 
+// Load French dictionary in addition to the default English one
+try {
+  const frenchWords = leoProfanity.getDictionary("fr");
+  leoProfanity.add(frenchWords);
+} catch {
+  // French dictionary not available; continue with English only
+}
+
 // Category A: Always require admin review (structural/classification changes)
 export const CATEGORY_A_FIELDS = [
   "category",
@@ -75,9 +83,9 @@ export function moderateText(
 
   // Check for company name in content (professionals shouldn't embed their company name)
   if (companyName && companyName.length > 2) {
-    const lowerText = text.toLowerCase();
-    const lowerCompany = companyName.toLowerCase();
-    if (lowerText.includes(lowerCompany)) {
+    const escapedCompany = companyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const companyRegex = new RegExp(`\\b${escapedCompany}\\b`, "i");
+    if (companyRegex.test(text)) {
       reasons.push(`Contains company name "${companyName}"`);
     }
   }
@@ -97,7 +105,7 @@ export function moderateText(
 export function moderateFieldValue(
   field: string,
   newValue: any,
-  oldValue: any,
+  _oldValue: any, // Reserved for future delta-based moderation
   companyName?: string
 ): ModerationResult {
   // Media always needs manual review if changed
@@ -140,6 +148,32 @@ export function moderateFieldValue(
               );
             }
           }
+        }
+        // Check options array (e.g., multiple choice options)
+        if (Array.isArray(item.options)) {
+          item.options.forEach((opt: unknown, optIdx: number) => {
+            if (typeof opt === "string") {
+              const result = moderateText(opt, companyName);
+              if (!result.passed) {
+                allReasons.push(
+                  ...result.reasons.map((r) => `${field}.options[${optIdx}]: ${r}`)
+                );
+              }
+            }
+          });
+        }
+        // Check professionalAttachments descriptions (string entries)
+        if (Array.isArray(item.professionalAttachments)) {
+          item.professionalAttachments.forEach((att: unknown, attIdx: number) => {
+            if (typeof att === "string" && !att.startsWith("http")) {
+              const result = moderateText(att, companyName);
+              if (!result.passed) {
+                allReasons.push(
+                  ...result.reasons.map((r) => `${field}.professionalAttachments[${attIdx}]: ${r}`)
+                );
+              }
+            }
+          });
         }
       }
     }

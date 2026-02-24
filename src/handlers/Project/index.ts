@@ -1428,7 +1428,7 @@ export const submitProject = async (req: Request, res: Response) => {
     if (project.isResubmission && project.previousSnapshot) {
       // Fetch professional's company name for moderation
       const professional = await User.findById(professionalId).select(
-        "businessInfo"
+        "businessInfo.companyName"
       );
       const companyName =
         professional?.businessInfo?.companyName || undefined;
@@ -1450,7 +1450,7 @@ export const submitProject = async (req: Request, res: Response) => {
       if (reapprovalType === "none") {
         console.log("[PROJECT] Resubmission auto-approved – no admin review needed");
         project.status = "published";
-        project.previousSnapshot = project.toObject();
+        project.previousSnapshot = undefined;
         project.pendingChanges = undefined;
         project.reapprovalType = undefined;
         project.isResubmission = false;
@@ -1458,7 +1458,8 @@ export const submitProject = async (req: Request, res: Response) => {
         await project.save();
         return res.json({
           message: "Changes approved automatically",
-          project,
+          id: project._id,
+          status: project.status,
         });
       }
 
@@ -1475,7 +1476,9 @@ export const submitProject = async (req: Request, res: Response) => {
       console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
       return res.json({
         message: "Changes submitted for admin review",
-        project,
+        id: project._id,
+        status: project.status,
+        submittedAt: project.submittedAt,
       });
     }
 
@@ -1497,7 +1500,7 @@ export const submitProject = async (req: Request, res: Response) => {
     console.log("[PROJECT] Project submitted successfully");
     console.log("Message:", message);
 
-    res.json({ message, project });
+    res.json({ message, id: project._id, status: project.status, submittedAt: project.submittedAt });
   } catch (error: any) {
     console.error("[PROJECT] Submit project error:", error);
     console.error("Error stack:", error.stack);
@@ -1661,9 +1664,10 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
               normalizedStatus: {
                 $switch: {
                   branches: [
-                    { case: { $in: ["$status", ["pending", "pending_approval", "awaiting_approval"]] }, then: "pending" },
-                    { case: { $in: ["$status", ["published", "active", "live"]] }, then: "published" },
-                    { case: { $in: ["$status", ["on_hold", "hold", "suspended", "paused", "pause"]] }, then: "on_hold" },
+                    { case: { $eq: ["$status", "pending"] }, then: "pending" },
+                    { case: { $eq: ["$status", "published"] }, then: "published" },
+                    { case: { $eq: ["$status", "on_hold"] }, then: "on_hold" },
+                    { case: { $eq: ["$status", "suspended"] }, then: "suspended" },
                     { case: { $eq: ["$status", "rejected"] }, then: "rejected" },
                   ],
                   default: "draft",
@@ -1687,6 +1691,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
           pending: byStatus["pending"] || 0,
           published: byStatus["published"] || 0,
           on_hold: byStatus["on_hold"] || 0,
+          suspended: byStatus["suspended"] || 0,
           rejected: byStatus["rejected"] || 0,
         };
       })(),

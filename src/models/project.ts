@@ -594,8 +594,8 @@ const ProjectSchema = new Schema<IProject>(
     previousSnapshot: { type: Schema.Types.Mixed },
     pendingChanges: [
       {
-        field: { type: String },
-        category: { type: String, enum: ["A", "B", "none"] },
+        field: { type: String, required: true },
+        category: { type: String, enum: ["A", "B", "none"], required: true },
         oldValue: { type: Schema.Types.Mixed },
         newValue: { type: Schema.Types.Mixed },
         moderationResult: {
