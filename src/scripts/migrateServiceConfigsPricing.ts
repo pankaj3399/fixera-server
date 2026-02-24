@@ -195,8 +195,10 @@ async function migrateProjects() {
             console.log(`  [PROJECT] "${typedDoc.title?.substring(0, 40)}..." priceModel="${priceModel}" → type=${derived.type}, unit=${derived.unit || 'none'}`)
 
             typedDoc.pricingModelType = derived.type
-            if (derived.unit) {
+            if (derived.unit && derived.type !== PricingModelType.FIXED) {
                 typedDoc.pricingModelUnit = derived.unit
+            } else {
+                typedDoc.pricingModelUnit = undefined
             }
 
             if (!DRY_RUN) {

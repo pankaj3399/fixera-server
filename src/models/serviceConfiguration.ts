@@ -132,7 +132,7 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
     // Admin-configurable fields
     areaOfWork: { type: String },
-    pricingModelName: { type: String, required: true },
+    pricingModelName: { type: String, required: false },
     pricingModelType: { 
         type: String, 
         required: true,
