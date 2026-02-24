@@ -29,7 +29,6 @@ const ChatMessageSchema = new Schema<IChatMessage>(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true,
     },
     senderRole: {
       type: String,
@@ -68,6 +67,9 @@ const ChatMessageSchema = new Schema<IChatMessage>(
   { timestamps: true }
 );
 
+// Note: this validator uses document context (this.images) and only runs for
+// document-level operations (create/save). Mongoose update operations
+// (updateOne/findOneAndUpdate) do not invoke this with document context.
 ChatMessageSchema.path("text").validate(function (value: string | undefined) {
   const hasText = typeof value === "string" && value.trim().length > 0;
   const hasImages = Array.isArray(this.images) && this.images.length > 0;
@@ -75,7 +77,6 @@ ChatMessageSchema.path("text").validate(function (value: string | undefined) {
 }, "Message must include text or at least one image");
 
 ChatMessageSchema.index({ conversationId: 1, _id: -1 });
-ChatMessageSchema.index({ conversationId: 1, createdAt: -1 });
 
 const ChatMessage = model<IChatMessage>("ChatMessage", ChatMessageSchema);
 

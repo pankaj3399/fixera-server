@@ -22,19 +22,16 @@ const ConversationSchema = new Schema<IConversation>(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true,
     },
     professionalId: {
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true,
     },
     bookingId: {
       type: Schema.Types.ObjectId,
       ref: "Booking",
       required: false,
-      index: true,
     },
     initiatedBy: {
       type: Schema.Types.ObjectId,
@@ -50,7 +47,6 @@ const ConversationSchema = new Schema<IConversation>(
     lastMessageAt: {
       type: Date,
       required: false,
-      index: true,
     },
     lastMessagePreview: {
       type: String,
@@ -80,7 +76,13 @@ const ConversationSchema = new Schema<IConversation>(
 
 ConversationSchema.index({ customerId: 1, lastMessageAt: -1 });
 ConversationSchema.index({ professionalId: 1, lastMessageAt: -1 });
-ConversationSchema.index({ customerId: 1, professionalId: 1, bookingId: 1 });
+ConversationSchema.index(
+  { customerId: 1, professionalId: 1, bookingId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { bookingId: { $type: "objectId" } },
+  }
+);
 
 const Conversation = model<IConversation>("Conversation", ConversationSchema);
 
