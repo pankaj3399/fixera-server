@@ -133,9 +133,17 @@ export const approveProject = async (req: Request, res: Response) => {
         const project = await Project.findOneAndUpdate(
             { _id: id, status: 'pending' },
             {
-                status: 'published',
-                approvedAt: new Date(),
-                approvedBy: req.user?.id
+                $set: {
+                    status: 'published',
+                    approvedAt: new Date(),
+                    approvedBy: req.user?.id,
+                    isResubmission: false,
+                },
+                $unset: {
+                    previousSnapshot: 1,
+                    pendingChanges: 1,
+                    reapprovalType: 1,
+                },
             },
             { new: true }
         );
@@ -145,25 +153,19 @@ export const approveProject = async (req: Request, res: Response) => {
         }
 
         // Get professional details for email
-        console.log('🔍 Looking up professional for email notification...');
-        console.log('Professional ID:', project.professionalId);
-
         const professional = await User.findById(project.professionalId);
         console.log('Professional found:', !!professional);
-        console.log('Professional email:', professional?.email);
-        console.log('Professional name:', professional?.name);
 
         if (professional && professional.email) {
-            console.log('📧 Attempting to send approval email...');
             const emailSent = await sendProjectApprovalEmail(
                 professional.email,
                 professional.name || 'Professional',
                 project.title,
                 String(project._id)
             );
-            console.log('📧 Email send result:', emailSent ? '✅ SUCCESS' : '❌ FAILED');
+            console.log('Approval email send result:', emailSent ? 'SUCCESS' : 'FAILED');
         } else {
-            console.log('⚠️ No email sent - professional or email not found');
+            console.log('No email sent - professional or email not found');
         }
 
         res.json({ message: 'Project approved', project });
@@ -189,8 +191,16 @@ export const rejectProject = async (req: Request, res: Response) => {
         const project = await Project.findOneAndUpdate(
             { _id: id, status: 'pending' },
             {
-                status: 'rejected',
-                adminFeedback: feedback
+                $set: {
+                    status: 'rejected',
+                    adminFeedback: feedback,
+                    isResubmission: false,
+                },
+                $unset: {
+                    previousSnapshot: 1,
+                    pendingChanges: 1,
+                    reapprovalType: 1,
+                },
             },
             { new: true }
         );
@@ -200,17 +210,10 @@ export const rejectProject = async (req: Request, res: Response) => {
         }
 
         // Get professional details for email
-        console.log('🔍 Looking up professional for rejection email...');
-        console.log('Professional ID:', project.professionalId);
-
         const professional = await User.findById(project.professionalId);
         console.log('Professional found:', !!professional);
-        console.log('Professional email:', professional?.email);
-        console.log('Professional name:', professional?.name);
 
         if (professional && professional.email) {
-            console.log('📧 Attempting to send rejection email...');
-            console.log('Rejection reason:', feedback);
             const emailSent = await sendProjectRejectionEmail(
                 professional.email,
                 professional.name || 'Professional',
@@ -218,9 +221,9 @@ export const rejectProject = async (req: Request, res: Response) => {
                 feedback,
                 String(project._id)
             );
-            console.log('📧 Email send result:', emailSent ? '✅ SUCCESS' : '❌ FAILED');
+            console.log('Rejection email send result:', emailSent ? 'SUCCESS' : 'FAILED');
         } else {
-            console.log('⚠️ No email sent - professional or email not found');
+            console.log('No email sent - professional or email not found');
         }
 
         res.json({ message: 'Project rejected', project });
@@ -356,6 +359,31 @@ export const reactivateProject = async (req: Request, res: Response) => {
     } catch (error) {
         console.error('Failed to reactivate project:', error);
         res.status(500).json({ error: 'Failed to reactivate project' });
+    }
+};
+
+// Get change details for a project (admin only)
+export const getProjectChanges = async (req: Request, res: Response) => {
+    try {
+        if (!req.user || req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const { id } = req.params;
+        const project = await Project.findById(id);
+
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.json({
+            isResubmission: project.isResubmission || false,
+            reapprovalType: project.reapprovalType || null,
+            changes: project.pendingChanges || [],
+        });
+    } catch (error) {
+        console.error('Failed to fetch project changes:', error);
+        res.status(500).json({ error: 'Failed to fetch project changes' });
     }
 };
 

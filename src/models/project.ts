@@ -138,6 +138,17 @@ export interface IPostBookingQuestion {
   professionalAttachments?: string[]; // URLs of files uploaded by professional
 }
 
+export interface IChangeEntry {
+  field: string;
+  category: "A" | "B" | "none";
+  oldValue: any;
+  newValue: any;
+  moderationResult?: {
+    passed: boolean;
+    reasons?: string[];
+  };
+}
+
 export interface IQualityCheck {
   category: string;
   status: "passed" | "failed" | "warning";
@@ -223,6 +234,12 @@ export interface IProject extends Document {
   submittedAt?: Date;
   approvedAt?: Date;
   approvedBy?: string;
+
+  // Change tracking for smart reapproval
+  previousSnapshot?: Record<string, any>;
+  pendingChanges?: IChangeEntry[];
+  reapprovalType?: "full" | "moderation_failed" | "none";
+  isResubmission?: boolean;
 
   // Auto-save tracking
   autoSaveTimestamp: Date;
@@ -572,6 +589,26 @@ const ProjectSchema = new Schema<IProject>(
     submittedAt: { type: Date },
     approvedAt: { type: Date },
     approvedBy: { type: String },
+
+    // Change tracking for smart reapproval
+    previousSnapshot: { type: Schema.Types.Mixed },
+    pendingChanges: [
+      {
+        field: { type: String, required: true },
+        category: { type: String, enum: ["A", "B", "none"], required: true },
+        oldValue: { type: Schema.Types.Mixed },
+        newValue: { type: Schema.Types.Mixed },
+        moderationResult: {
+          passed: { type: Boolean },
+          reasons: [{ type: String }],
+        },
+      },
+    ],
+    reapprovalType: {
+      type: String,
+      enum: ["full", "moderation_failed", "none"],
+    },
+    isResubmission: { type: Boolean, default: false },
 
     // Auto-save tracking
     autoSaveTimestamp: { type: Date, default: Date.now },
