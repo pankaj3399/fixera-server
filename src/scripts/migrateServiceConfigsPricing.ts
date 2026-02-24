@@ -136,16 +136,7 @@ async function migrateServiceConfigurations() {
                 changed = true
             }
 
-            // 3. Clear legacy pricingModel field from raw document
-            //    Use native collection $unset to bypass the virtual setter
-            if (hasLegacyField && !DRY_RUN) {
-                await mongoose.connection.collection('serviceconfigurations').updateOne(
-                    { _id: typedDoc._id },
-                    { $unset: { pricingModel: '' } }
-                )
-            }
-
-            // 4. Default if nothing exists
+            // 3. Default if nothing exists
             if (!typedDoc.pricingModelName) {
                 console.log(`  [DEFAULT] No pricing info for: ${typedDoc.service} (${typedDoc.category}) — defaulting to "Total price" / Fixed`)
                 typedDoc.pricingModelName = 'Total price'
@@ -153,7 +144,7 @@ async function migrateServiceConfigurations() {
                 changed = true
             }
 
-            // 5. Migrate country → activeCountries
+            // 4. Migrate country → activeCountries
             if (typedDoc.country && (!typedDoc.activeCountries || typedDoc.activeCountries.length === 0)) {
                 console.log(`  [COUNTRY] Migrating country "${typedDoc.country}" → activeCountries`)
                 typedDoc.activeCountries = [typedDoc.country]
@@ -164,13 +155,13 @@ async function migrateServiceConfigurations() {
                 changed = true
             }
 
-            // 6. Ensure isActive defaults to true
+            // 5. Ensure isActive defaults to true
             if (typeof typedDoc.isActive !== 'boolean') {
                 typedDoc.isActive = true
                 changed = true
             }
 
-            // 7. Initialize arrays
+            // 6. Initialize arrays
             if (!typedDoc.projectTypes) { typedDoc.projectTypes = []; changed = true }
             if (!typedDoc.professionalInputFields) { typedDoc.professionalInputFields = []; changed = true }
             if (!typedDoc.requiredCertifications) { typedDoc.requiredCertifications = []; changed = true }
@@ -178,6 +169,14 @@ async function migrateServiceConfigurations() {
             if (changed) {
                 if (!DRY_RUN) {
                     await typedDoc.save()
+                    // Clear legacy pricingModel field from raw document only after save succeeds
+                    // Use native collection $unset to bypass the virtual setter
+                    if (hasLegacyField) {
+                        await mongoose.connection.collection('serviceconfigurations').updateOne(
+                            { _id: typedDoc._id },
+                            { $unset: { pricingModel: '' } }
+                        )
+                    }
                 }
                 updated++
             }
@@ -218,11 +217,7 @@ async function migrateProjects() {
             console.log(`  [PROJECT] "${typedDoc.title?.substring(0, 40)}..." priceModel="${priceModel}" → type=${derived.type}, unit=${derived.unit || 'none'}`)
 
             typedDoc.pricingModelType = derived.type
-            if (derived.unit && derived.type !== PricingModelType.FIXED) {
-                typedDoc.pricingModelUnit = derived.unit
-            } else {
-                typedDoc.pricingModelUnit = undefined
-            }
+            typedDoc.pricingModelUnit = derived.unit ? derived.unit : undefined
 
             if (!DRY_RUN) {
                 await typedDoc.save({ validateBeforeSave: false })

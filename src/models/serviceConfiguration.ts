@@ -58,7 +58,7 @@ export interface IServiceConfiguration extends Document {
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
     pricingModelName?: string; // e.g., "Total price", "Total price or m² of material"
     pricingModel?: string; // Virtual for backward compatibility (maps to pricingModelName)
-    pricingModelType: 'Fixed price' | 'Price per unit';
+    pricingModelType: PricingModelType;
     pricingModelUnit?: PricingModelUnit; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
@@ -136,7 +136,7 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     pricingModelType: { 
         type: String, 
         required: true,
-        enum: ['Fixed price', 'Price per unit']
+        enum: Object.values(PricingModelType)
     },
     pricingModelUnit: { type: String, enum: Object.values(PricingModelUnit) },
     icon: { type: String },
@@ -186,13 +186,20 @@ const validateUpdate = function (this: any, next: any) {
 
     const pricingModelType = set.pricingModelType;
     const pricingModelUnit = set.pricingModelUnit;
+    const hasPricingModelType = 'pricingModelType' in set;
 
-    if (pricingModelType === PricingModelType.FIXED) {
+    const unsetPricingModelUnit = () => {
         // Remove from $set so Mongoose doesn't re-add it
         delete set.pricingModelUnit;
         // Use $unset to actually remove the field in MongoDB
         update.$unset = update.$unset || {};
         update.$unset.pricingModelUnit = '';
+    };
+
+    if (hasPricingModelType && (pricingModelType === null || pricingModelType === undefined)) {
+        unsetPricingModelUnit();
+    } else if (pricingModelType === PricingModelType.FIXED) {
+        unsetPricingModelUnit();
     } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
         // Unit may come from the existing document; skip hard validation here
     }

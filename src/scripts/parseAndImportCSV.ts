@@ -1,5 +1,8 @@
 import mongoose from "mongoose";
-import ServiceConfiguration from "../models/serviceConfiguration";
+import ServiceConfiguration, {
+  PricingModelType,
+  PricingModelUnit,
+} from "../models/serviceConfiguration";
 import { config } from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
@@ -268,19 +271,19 @@ function convertToServiceConfig(row: any): any {
   });
 
   const rawPricingModel = row["Pricing Model"]?.trim() || "Total price";
-  let pricingModelType: 'Fixed price' | 'Price per unit' = 'Fixed price';
-  let pricingModelUnit = '';
+  let pricingModelType: PricingModelType = PricingModelType.FIXED;
+  let pricingModelUnit: PricingModelUnit | undefined;
 
   const normalizedPricingModel = rawPricingModel.replace('m²', 'm2').toLowerCase();
 
   if (normalizedPricingModel.includes('per') || normalizedPricingModel.includes('m2') || normalizedPricingModel.includes('hour') || normalizedPricingModel.includes('day') || normalizedPricingModel.includes('meter')) {
-    pricingModelType = 'Price per unit';
-    if (normalizedPricingModel.includes('m2')) pricingModelUnit = 'm2';
-    else if (normalizedPricingModel.includes('hour')) pricingModelUnit = 'hour';
-    else if (normalizedPricingModel.includes('day')) pricingModelUnit = 'day';
-    else if (normalizedPricingModel.includes('meter')) pricingModelUnit = 'meter';
-    else if (normalizedPricingModel.includes('room')) pricingModelUnit = 'room';
-    else pricingModelUnit = 'unit';
+    pricingModelType = PricingModelType.UNIT;
+    if (normalizedPricingModel.includes('m2')) pricingModelUnit = PricingModelUnit.M2;
+    else if (normalizedPricingModel.includes('hour')) pricingModelUnit = PricingModelUnit.HOUR;
+    else if (normalizedPricingModel.includes('day')) pricingModelUnit = PricingModelUnit.DAY;
+    else if (normalizedPricingModel.includes('meter')) pricingModelUnit = PricingModelUnit.METER;
+    else if (normalizedPricingModel.includes('room')) pricingModelUnit = PricingModelUnit.ROOM;
+    else pricingModelUnit = PricingModelUnit.UNIT;
   }
 
   return {
