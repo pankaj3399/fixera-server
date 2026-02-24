@@ -1,0 +1,200 @@
+import mongoose from 'mongoose'
+import { config } from 'dotenv'
+import ServiceConfiguration from '../models/serviceConfiguration'
+import Project from '../models/project'
+import { PricingModelType, PricingModelUnit } from '../models/serviceConfiguration'
+
+config()
+
+/**
+ * Migration: Service Configuration Pricing Model
+ * 
+ * This script handles the migration from the legacy pricing model to the new
+ * structured pricing model with pricingModelName, pricingModelType, and pricingModelUnit.
+ * 
+ * What it does:
+ * 1. Migrates legacy `pricingModel` field → `pricingModelName`
+ * 2. Derives `pricingModelType` (Fixed price | Price per unit) from the pricing name
+ * 3. Derives `pricingModelUnit` (m2, hour, day, meter, room, unit) for unit-based pricing
+ * 4. Migrates legacy `country` field → `activeCountries` array
+ * 5. Backfills default values for missing fields (isActive, arrays)
+ * 6. Adds pricingModelType/Unit to existing Project documents based on their priceModel
+ * 
+ * Usage:
+ *   DRY_RUN=true  npx ts-node src/scripts/migrateServiceConfigsPricing.ts   # preview changes
+ *   DRY_RUN=false npx ts-node src/scripts/migrateServiceConfigsPricing.ts   # apply changes
+ */
+
+const DRY_RUN = process.env.DRY_RUN !== 'false'
+
+function derivePricingType(name: string): { type: PricingModelType, unit?: PricingModelUnit } {
+    const normalized = name.toLowerCase().replace('m²', 'm2')
+
+    if (
+        normalized.includes('per') ||
+        normalized.includes('m2') ||
+        normalized.includes('hour') ||
+        normalized.includes('day') ||
+        normalized.includes('meter') ||
+        normalized.includes('room')
+    ) {
+        let unit: PricingModelUnit = PricingModelUnit.UNIT
+        if (normalized.includes('m2')) unit = PricingModelUnit.M2
+        else if (normalized.includes('hour')) unit = PricingModelUnit.HOUR
+        else if (normalized.includes('day')) unit = PricingModelUnit.DAY
+        else if (normalized.includes('meter')) unit = PricingModelUnit.METER
+        else if (normalized.includes('room')) unit = PricingModelUnit.ROOM
+
+        return { type: PricingModelType.UNIT, unit }
+    }
+
+    return { type: PricingModelType.FIXED }
+}
+
+async function migrateServiceConfigurations() {
+    let updated = 0
+    let inspected = 0
+
+    console.log('\n=== Migrating ServiceConfiguration documents ===\n')
+    const cursor = ServiceConfiguration.find({}).cursor()
+
+    for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
+        inspected++
+        let changed = false
+        const typedDoc = doc as any
+
+        // 1. Migrate pricingModel → pricingModelName (legacy field)
+        const hasLegacyField = !!typedDoc.pricingModel && !typedDoc.pricingModelName
+        if (hasLegacyField) {
+            console.log(`  [LEGACY] Migrating pricingModel → pricingModelName for: ${typedDoc.service} (${typedDoc.category})`)
+            typedDoc.pricingModelName = typedDoc.pricingModel
+            changed = true
+        }
+
+        // 2. Derive pricingModelType and pricingModelUnit if missing
+        if (typedDoc.pricingModelName && (!typedDoc.pricingModelType || (typedDoc.pricingModelType === PricingModelType.UNIT && !typedDoc.pricingModelUnit))) {
+            const derived = derivePricingType(typedDoc.pricingModelName)
+            console.log(`  [DERIVE] ${typedDoc.service}: "${typedDoc.pricingModelName}" → type=${derived.type}, unit=${derived.unit || 'none'}`)
+            typedDoc.pricingModelType = derived.type
+            if (derived.unit) {
+                typedDoc.pricingModelUnit = derived.unit
+            } else {
+                typedDoc.pricingModelUnit = undefined
+            }
+            changed = true
+        }
+
+        // 3. Clear legacy pricingModel field from raw document
+        if (hasLegacyField) {
+            typedDoc.set('pricingModel', undefined, { strict: false })
+            changed = true
+        }
+
+        // 4. Default if nothing exists
+        if (!typedDoc.pricingModelName) {
+            console.log(`  [DEFAULT] No pricing info for: ${typedDoc.service} (${typedDoc.category}) — defaulting to "Total price" / Fixed`)
+            typedDoc.pricingModelName = 'Total price'
+            typedDoc.pricingModelType = PricingModelType.FIXED
+            changed = true
+        }
+
+        // 5. Migrate country → activeCountries
+        if (typedDoc.country && (!typedDoc.activeCountries || typedDoc.activeCountries.length === 0)) {
+            console.log(`  [COUNTRY] Migrating country "${typedDoc.country}" → activeCountries`)
+            typedDoc.activeCountries = [typedDoc.country]
+            typedDoc.set('country', undefined, { strict: false })
+            changed = true
+        } else if (!typedDoc.activeCountries || typedDoc.activeCountries.length === 0) {
+            typedDoc.activeCountries = ['BE']
+            changed = true
+        }
+
+        // 6. Ensure isActive defaults to true
+        if (typeof typedDoc.isActive !== 'boolean') {
+            typedDoc.isActive = true
+            changed = true
+        }
+
+        // 7. Initialize arrays
+        if (!typedDoc.projectTypes) { typedDoc.projectTypes = []; changed = true }
+        if (!typedDoc.professionalInputFields) { typedDoc.professionalInputFields = []; changed = true }
+        if (!typedDoc.requiredCertifications) { typedDoc.requiredCertifications = []; changed = true }
+
+        if (changed) {
+            if (!DRY_RUN) {
+                await typedDoc.save()
+            }
+            updated++
+        }
+    }
+
+    return { inspected, updated }
+}
+
+async function migrateProjects() {
+    let updated = 0
+    let inspected = 0
+
+    console.log('\n=== Migrating Project documents (adding pricingModelType/Unit) ===\n')
+
+    // Find projects that have priceModel but no pricingModelType
+    const cursor = Project.find({
+        priceModel: { $exists: true },
+        pricingModelType: { $exists: false }
+    }).cursor()
+
+    for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
+        inspected++
+        const typedDoc = doc as any
+        const priceModel = typedDoc.priceModel
+
+        if (!priceModel) continue
+
+        const derived = derivePricingType(priceModel)
+        console.log(`  [PROJECT] "${typedDoc.title?.substring(0, 40)}..." priceModel="${priceModel}" → type=${derived.type}, unit=${derived.unit || 'none'}`)
+
+        typedDoc.pricingModelType = derived.type
+        if (derived.unit) {
+            typedDoc.pricingModelUnit = derived.unit
+        }
+
+        if (!DRY_RUN) {
+            await typedDoc.save({ validateBeforeSave: false })
+        }
+        updated++
+    }
+
+    return { inspected, updated }
+}
+
+async function migrate() {
+    const rawMongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/fixera'
+    const redactedURI = rawMongoURI.replace(/\/\/.*:.*@/, '//****:****@')
+
+    console.log(`Mode: ${DRY_RUN ? '🔍 DRY RUN (no writes)' : '⚡ LIVE (writing changes)'}`)
+    console.log(`Connecting to ${redactedURI}...\n`)
+
+    await mongoose.connect(rawMongoURI)
+    console.log('Connected to MongoDB')
+
+    const scResult = await migrateServiceConfigurations()
+    const projResult = await migrateProjects()
+
+    console.log('\n========== Migration Summary ==========')
+    console.log(`Mode: ${DRY_RUN ? 'DRY RUN' : 'LIVE'}`)
+    console.log(`\nServiceConfigurations:`)
+    console.log(`  Inspected: ${scResult.inspected}`)
+    console.log(`  Updated:   ${scResult.updated}`)
+    console.log(`\nProjects:`)
+    console.log(`  Inspected: ${projResult.inspected}`)
+    console.log(`  Updated:   ${projResult.updated}`)
+    console.log('========================================\n')
+
+    await mongoose.disconnect()
+    console.log('Disconnected from MongoDB')
+}
+
+migrate().catch((err) => {
+    console.error('Migration failed:', err)
+    process.exit(1)
+})

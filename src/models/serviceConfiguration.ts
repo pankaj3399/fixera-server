@@ -1,5 +1,19 @@
 import { Schema, model, Document } from "mongoose";
 
+export enum PricingModelType {
+    FIXED = 'Fixed price',
+    UNIT = 'Price per unit'
+}
+
+export enum PricingModelUnit {
+    M2 = 'm2',
+    HOUR = 'hour',
+    DAY = 'day',
+    METER = 'meter',
+    ROOM = 'room',
+    UNIT = 'unit'
+}
+
 // Dynamic field types that professionals need to fill in
 export interface IDynamicField {
     fieldName: string; // e.g., "range m2 living area", "Building Type", "kW system power"
@@ -43,8 +57,9 @@ export interface IServiceConfiguration extends Document {
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
     pricingModelName: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModel: string; // Virtual for backward compatibility (maps to pricingModelName)
     pricingModelType: 'Fixed price' | 'Price per unit';
-    pricingModelUnit?: string; // conditionally required if 'Price per unit'
+    pricingModelUnit?: PricingModelUnit; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -139,19 +154,53 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     isActive: { type: Boolean, default: true },
     activeCountries: { type: [String], default: ['BE'] }
 }, {
-    timestamps: true
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
 });
 
+// Virtual for backward compatibility
+ServiceConfigurationSchema.virtual('pricingModel')
+    .get(function() {
+        return this.pricingModelName;
+    })
+    .set(function(val: string) {
+        this.pricingModelName = val;
+    });
+
 ServiceConfigurationSchema.pre('validate', function(next) {
-    if (this.pricingModelType === 'Fixed price') {
+    if (this.pricingModelType === PricingModelType.FIXED) {
         this.pricingModelUnit = undefined;
-    } else if (this.pricingModelType === 'Price per unit') {
+    } else if (this.pricingModelType === PricingModelType.UNIT) {
         if (!this.pricingModelUnit) {
             this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
         }
     }
     next();
 });
+
+// Validate pricing fields on update operations
+const validateUpdate = function (this: any, next: any) {
+    const update = this.getUpdate();
+    const set = update.$set || update;
+
+    const pricingModelType = set.pricingModelType;
+    const pricingModelUnit = set.pricingModelUnit;
+
+    if (pricingModelType === PricingModelType.FIXED) {
+        set.pricingModelUnit = undefined;
+        if (update.$set) update.$set.pricingModelUnit = undefined;
+    } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
+        // Unit may come from the existing document; skip hard validation here
+    }
+
+    this.setUpdate(update);
+    next();
+};
+
+ServiceConfigurationSchema.pre('findOneAndUpdate', validateUpdate);
+ServiceConfigurationSchema.pre('updateOne', validateUpdate);
+ServiceConfigurationSchema.pre('updateMany', validateUpdate);
 
 // Indexes for efficient querying
 ServiceConfigurationSchema.index({ category: 1, service: 1, areaOfWork: 1 });

@@ -385,7 +385,7 @@ export const getScheduleProposalsForProject = async (
 
     const earliestBookableDate = await getEarliestBookableDate(project, teamMembers);
 
-    if (!project.executionDuration || mode === "mixed") {
+    if (!project.executionDuration) {
       return {
         mode,
         earliestBookableDate,

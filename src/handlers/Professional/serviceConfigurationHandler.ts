@@ -37,9 +37,9 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
             });
         }
 
-        // Return the name as an array for backward compatibility with frontend
+        // Parse pricingModel to array - split by " or "
         const pricingModels = configuration.pricingModelName ?
-            [configuration.pricingModelName] :
+            configuration.pricingModelName.split(' or ').map((m: string) => m.trim()) :
             [];
 
         res.status(200).json({

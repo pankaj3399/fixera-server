@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { PricingModelType, PricingModelUnit } from "./serviceConfiguration";
 
 // Interfaces for nested schemas
 export interface ICertification {
@@ -182,6 +183,8 @@ export interface IProject extends Document {
   resources: string[];
   description: string;
   priceModel: string;
+  pricingModelType?: PricingModelType;
+  pricingModelUnit?: PricingModelUnit;
   keywords: string[];
   title: string;
   media: IMedia;
@@ -521,6 +524,14 @@ const ProjectSchema = new Schema<IProject>(
     priceModel: {
       type: String,
       required: true,
+    },
+    pricingModelType: { 
+      type: String,
+      enum: Object.values(PricingModelType)
+    },
+    pricingModelUnit: { 
+      type: String,
+      enum: Object.values(PricingModelUnit)
     },
     keywords: [{ type: String }],
     title: { type: String, required: true, minlength: 30, maxlength: 90 },

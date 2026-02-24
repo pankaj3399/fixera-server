@@ -6,7 +6,7 @@ import User from "../models/user";
 import { DEFAULT_AVAILABILITY, resolveAvailability } from "./availabilityHelpers";
 import { DateTime } from "luxon";
 
-type DurationUnit = "hours" | "days";
+type DurationUnit = "hours" | "days" | "mixed";
 
 type Duration = {
   value: number;
