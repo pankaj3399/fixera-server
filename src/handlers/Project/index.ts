@@ -1475,7 +1475,8 @@ export const submitProject = async (req: Request, res: Response) => {
       // Structural changes or moderation failures → send to admin for review
       project.status = "pending";
       project.submittedAt = new Date();
-      project.pendingChanges = changes;
+      // Only store Category A/B changes — "none" fields don't need admin review
+      project.pendingChanges = changes.filter((c) => c.category !== "none");
       project.reapprovalType = reapprovalType;
       project.adminFeedback = undefined;
       project.approvedAt = undefined;
