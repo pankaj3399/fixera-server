@@ -621,6 +621,33 @@ ProjectSchema.pre('validate', function (next) {
   next();
 });
 
+// Validate pricing fields on update operations (mirrors ServiceConfiguration)
+const validateProjectUpdate = function (this: any, next: any) {
+  const update = this.getUpdate();
+  const set = update.$set || update;
+
+  const pricingModelType = set.pricingModelType;
+  const pricingModelUnit = set.pricingModelUnit;
+
+  if (!pricingModelType) {
+    // If type is being cleared, clear unit too
+    if ('pricingModelType' in set) {
+      set.pricingModelUnit = undefined;
+    }
+  } else if (pricingModelType === PricingModelType.FIXED) {
+    set.pricingModelUnit = undefined;
+  } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
+    // Unit may come from the existing document; skip hard validation here
+  }
+
+  this.setUpdate(update);
+  next();
+};
+
+ProjectSchema.pre('findOneAndUpdate', validateProjectUpdate);
+ProjectSchema.pre('updateOne', validateProjectUpdate);
+ProjectSchema.pre('updateMany', validateProjectUpdate);
+
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {
   this.autoSaveTimestamp = new Date();

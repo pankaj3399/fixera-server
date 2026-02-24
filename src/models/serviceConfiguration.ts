@@ -56,8 +56,8 @@ export interface IServiceConfiguration extends Document {
 
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
-    pricingModelName: string; // e.g., "Total price", "Total price or m² of material"
-    pricingModel: string; // Virtual for backward compatibility (maps to pricingModelName)
+    pricingModelName?: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModel?: string; // Virtual for backward compatibility (maps to pricingModelName)
     pricingModelType: 'Fixed price' | 'Price per unit';
     pricingModelUnit?: PricingModelUnit; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")

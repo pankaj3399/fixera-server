@@ -108,7 +108,14 @@ async function migrateServiceConfigurations() {
                 changed = true
             }
 
-            // 2. Derive pricingModelType and pricingModelUnit if missing
+            // 2a. Clear stale pricingModelUnit if type is already FIXED
+            if (typedDoc.pricingModelType === PricingModelType.FIXED && typedDoc.pricingModelUnit) {
+                console.log(`  [CLEAN] Clearing stale pricingModelUnit="${typedDoc.pricingModelUnit}" for FIXED service: ${typedDoc.service} (${typedDoc.category})`)
+                typedDoc.pricingModelUnit = undefined
+                changed = true
+            }
+
+            // 2b. Derive pricingModelType and pricingModelUnit if missing
             if (typedDoc.pricingModelName && (!typedDoc.pricingModelType || (typedDoc.pricingModelType === PricingModelType.UNIT && !typedDoc.pricingModelUnit))) {
                 const derived = derivePricingType(typedDoc.pricingModelName)
                 console.log(`  [DERIVE] ${typedDoc.service}: "${typedDoc.pricingModelName}" → type=${derived.type}, unit=${derived.unit || 'none'}`)
@@ -177,10 +184,15 @@ async function migrateProjects() {
 
     console.log('\n=== Migrating Project documents (adding pricingModelType/Unit) ===\n')
 
-    // Find projects that have priceModel but no pricingModelType
+    // Find projects that need pricing backfill:
+    //  - have priceModel but no pricingModelType, OR
+    //  - have pricingModelType=UNIT but missing pricingModelUnit
     const cursor = Project.find({
         priceModel: { $exists: true },
-        pricingModelType: { $exists: false }
+        $or: [
+            { pricingModelType: { $exists: false } },
+            { pricingModelType: PricingModelType.UNIT, pricingModelUnit: { $exists: false } }
+        ]
     }).cursor()
 
     for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
