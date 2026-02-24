@@ -1409,6 +1409,15 @@ export const submitProject = async (req: Request, res: Response) => {
       });
     }
 
+    if (!project.resources || project.resources.length === 0) {
+      qualityChecks.push({
+        category: "resources",
+        status: "failed" as const,
+        message: "At least one team resource is required for scheduling",
+        checkedAt: new Date(),
+      });
+    }
+
     const failedChecks = qualityChecks.filter(
       (check) => check.status === "failed"
     );
