@@ -605,6 +605,9 @@ ProjectSchema.index({ "distance.location": "2dsphere" });
 
 // Validate pricingModelType/Unit consistency (mirrors ServiceConfiguration logic)
 ProjectSchema.pre('validate', function (next) {
+  // Short-circuit if pricingModelType is not set (both fields are optional on Project)
+  if (!this.pricingModelType) return next();
+
   if (this.pricingModelType === PricingModelType.FIXED) {
     this.pricingModelUnit = undefined;
   } else if (this.pricingModelType === PricingModelType.UNIT) {

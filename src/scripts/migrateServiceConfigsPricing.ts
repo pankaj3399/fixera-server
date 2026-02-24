@@ -29,24 +29,28 @@ const DRY_RUN = process.env.DRY_RUN !== 'false'
 
 /**
  * Classify a single pricing component (no " or " conjunctions).
+ * Uses word-boundary regex matching to avoid false positives
+ * (e.g. "today" should not match "day").
  */
 function classifySingleComponent(text: string): { type: PricingModelType, unit?: PricingModelUnit } {
     const normalized = text.toLowerCase().replace('m²', 'm2').trim()
 
+    const matchesWord = (word: string) => new RegExp(`\\b${word}\\b`).test(normalized)
+
     if (
-        normalized.includes('per') ||
-        normalized.includes('m2') ||
-        normalized.includes('hour') ||
-        normalized.includes('day') ||
-        normalized.includes('meter') ||
-        normalized.includes('room')
+        matchesWord('per') ||
+        matchesWord('m2') ||
+        matchesWord('hour') ||
+        matchesWord('day') ||
+        matchesWord('meter') ||
+        matchesWord('room')
     ) {
         let unit: PricingModelUnit = PricingModelUnit.UNIT
-        if (normalized.includes('m2')) unit = PricingModelUnit.M2
-        else if (normalized.includes('hour')) unit = PricingModelUnit.HOUR
-        else if (normalized.includes('day')) unit = PricingModelUnit.DAY
-        else if (normalized.includes('meter')) unit = PricingModelUnit.METER
-        else if (normalized.includes('room')) unit = PricingModelUnit.ROOM
+        if (matchesWord('m2')) unit = PricingModelUnit.M2
+        else if (matchesWord('hour')) unit = PricingModelUnit.HOUR
+        else if (matchesWord('day')) unit = PricingModelUnit.DAY
+        else if (matchesWord('meter')) unit = PricingModelUnit.METER
+        else if (matchesWord('room')) unit = PricingModelUnit.ROOM
 
         return { type: PricingModelType.UNIT, unit }
     }
@@ -217,21 +221,23 @@ async function migrate() {
     await mongoose.connect(rawMongoURI)
     console.log('Connected to MongoDB')
 
-    const scResult = await migrateServiceConfigurations()
-    const projResult = await migrateProjects()
+    try {
+        const scResult = await migrateServiceConfigurations()
+        const projResult = await migrateProjects()
 
-    console.log('\n========== Migration Summary ==========')
-    console.log(`Mode: ${DRY_RUN ? 'DRY RUN' : 'LIVE'}`)
-    console.log(`\nServiceConfigurations:`)
-    console.log(`  Inspected: ${scResult.inspected}`)
-    console.log(`  Updated:   ${scResult.updated}`)
-    console.log(`\nProjects:`)
-    console.log(`  Inspected: ${projResult.inspected}`)
-    console.log(`  Updated:   ${projResult.updated}`)
-    console.log('========================================\n')
-
-    await mongoose.disconnect()
-    console.log('Disconnected from MongoDB')
+        console.log('\n========== Migration Summary ==========')
+        console.log(`Mode: ${DRY_RUN ? 'DRY RUN' : 'LIVE'}`)
+        console.log(`\nServiceConfigurations:`)
+        console.log(`  Inspected: ${scResult.inspected}`)
+        console.log(`  Updated:   ${scResult.updated}`)
+        console.log(`\nProjects:`)
+        console.log(`  Inspected: ${projResult.inspected}`)
+        console.log(`  Updated:   ${projResult.updated}`)
+        console.log('========================================\n')
+    } finally {
+        await mongoose.disconnect()
+        console.log('Disconnected from MongoDB')
+    }
 }
 
 migrate().catch((err) => {
