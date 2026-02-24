@@ -27,6 +27,14 @@ config()
 
 const DRY_RUN = process.env.DRY_RUN !== 'false'
 
+// Precompiled word-boundary regexes for pricing classification
+const RE_PER   = /\bper\b/
+const RE_M2    = /\bm2\b/
+const RE_HOUR  = /\bhour\b/
+const RE_DAY   = /\bday\b/
+const RE_METER = /\bmeter\b/
+const RE_ROOM  = /\broom\b/
+
 /**
  * Classify a single pricing component (no " or " conjunctions).
  * Uses word-boundary regex matching to avoid false positives
@@ -35,22 +43,20 @@ const DRY_RUN = process.env.DRY_RUN !== 'false'
 function classifySingleComponent(text: string): { type: PricingModelType, unit?: PricingModelUnit } {
     const normalized = text.toLowerCase().replace('m²', 'm2').trim()
 
-    const matchesWord = (word: string) => new RegExp(`\\b${word}\\b`).test(normalized)
-
     if (
-        matchesWord('per') ||
-        matchesWord('m2') ||
-        matchesWord('hour') ||
-        matchesWord('day') ||
-        matchesWord('meter') ||
-        matchesWord('room')
+        RE_PER.test(normalized) ||
+        RE_M2.test(normalized) ||
+        RE_HOUR.test(normalized) ||
+        RE_DAY.test(normalized) ||
+        RE_METER.test(normalized) ||
+        RE_ROOM.test(normalized)
     ) {
         let unit: PricingModelUnit = PricingModelUnit.UNIT
-        if (matchesWord('m2')) unit = PricingModelUnit.M2
-        else if (matchesWord('hour')) unit = PricingModelUnit.HOUR
-        else if (matchesWord('day')) unit = PricingModelUnit.DAY
-        else if (matchesWord('meter')) unit = PricingModelUnit.METER
-        else if (matchesWord('room')) unit = PricingModelUnit.ROOM
+        if (RE_M2.test(normalized)) unit = PricingModelUnit.M2
+        else if (RE_HOUR.test(normalized)) unit = PricingModelUnit.HOUR
+        else if (RE_DAY.test(normalized)) unit = PricingModelUnit.DAY
+        else if (RE_METER.test(normalized)) unit = PricingModelUnit.METER
+        else if (RE_ROOM.test(normalized)) unit = PricingModelUnit.ROOM
 
         return { type: PricingModelType.UNIT, unit }
     }
@@ -101,10 +107,12 @@ async function migrateServiceConfigurations() {
             let changed = false
 
             // 1. Migrate pricingModel → pricingModelName (legacy field)
-            const hasLegacyField = !!typedDoc.pricingModel && !typedDoc.pricingModelName
+            //    Read from _doc to bypass the virtual getter which returns pricingModelName
+            const rawPricingModel = typedDoc._doc?.pricingModel
+            const hasLegacyField = !!rawPricingModel && !typedDoc.pricingModelName
             if (hasLegacyField) {
                 console.log(`  [LEGACY] Migrating pricingModel → pricingModelName for: ${typedDoc.service} (${typedDoc.category})`)
-                typedDoc.pricingModelName = typedDoc.pricingModel
+                typedDoc.pricingModelName = rawPricingModel
                 changed = true
             }
 
@@ -129,9 +137,12 @@ async function migrateServiceConfigurations() {
             }
 
             // 3. Clear legacy pricingModel field from raw document
-            if (hasLegacyField) {
-                typedDoc.set('pricingModel', undefined, { strict: false })
-                changed = true
+            //    Use native collection $unset to bypass the virtual setter
+            if (hasLegacyField && !DRY_RUN) {
+                await mongoose.connection.collection('serviceconfigurations').updateOne(
+                    { _id: typedDoc._id },
+                    { $unset: { pricingModel: '' } }
+                )
             }
 
             // 4. Default if nothing exists

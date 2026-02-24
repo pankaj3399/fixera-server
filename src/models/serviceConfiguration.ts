@@ -188,7 +188,11 @@ const validateUpdate = function (this: any, next: any) {
     const pricingModelUnit = set.pricingModelUnit;
 
     if (pricingModelType === PricingModelType.FIXED) {
-        set.pricingModelUnit = undefined;
+        // Remove from $set so Mongoose doesn't re-add it
+        delete set.pricingModelUnit;
+        // Use $unset to actually remove the field in MongoDB
+        update.$unset = update.$unset || {};
+        update.$unset.pricingModelUnit = '';
     } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
         // Unit may come from the existing document; skip hard validation here
     }

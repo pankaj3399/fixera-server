@@ -629,13 +629,21 @@ const validateProjectUpdate = function (this: any, next: any) {
   const pricingModelType = set.pricingModelType;
   const pricingModelUnit = set.pricingModelUnit;
 
+  const unsetPricingModelUnit = () => {
+    // Remove from $set so Mongoose doesn't re-add it
+    delete set.pricingModelUnit;
+    // Use $unset to actually remove the field in MongoDB
+    update.$unset = update.$unset || {};
+    update.$unset.pricingModelUnit = '';
+  };
+
   if (!pricingModelType) {
-    // If type is being cleared, clear unit too
+    // If type is being explicitly cleared, clear unit too
     if ('pricingModelType' in set) {
-      set.pricingModelUnit = undefined;
+      unsetPricingModelUnit();
     }
   } else if (pricingModelType === PricingModelType.FIXED) {
-    set.pricingModelUnit = undefined;
+    unsetPricingModelUnit();
   } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
     // Unit may come from the existing document; skip hard validation here
   }
