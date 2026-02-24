@@ -5,84 +5,99 @@ import ServiceConfiguration from '../models/serviceConfiguration'
 config()
 
 async function migrate() {
-    const mongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/fixera'
-    console.log(`Connecting to ${mongoURI}...`)
-    await mongoose.connect(mongoURI)
+    const rawMongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/fixera'
+    
+    // Redact URI for logging
+    const redactedURI = rawMongoURI.replace(/\/\/.*:.*@/, '//****:****@')
+    console.log(`Connecting to ${redactedURI}...`)
+    
+    await mongoose.connect(rawMongoURI)
     console.log('Connected to MongoDB')
 
     let updated = 0
     let inspected = 0
 
-    const allConfigs = await ServiceConfiguration.find({}) as any[]
-    console.log(`Found ${allConfigs.length} service configurations to inspect.`)
+    console.log('Inspecting service configurations...')
+    const cursor = ServiceConfiguration.find({}).cursor();
 
-    for (const doc of allConfigs) {
+    for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
         inspected++
         let changed = false
+        const typedDoc = doc as any
 
-        // 1. Migrate pricingModel to pricingModelName/Type/Unit
-        if (doc.pricingModel && !doc.pricingModelName) {
-            console.log(`Migrating pricing for: ${doc.service} (${doc.category})`)
-            doc.pricingModelName = doc.pricingModel
-            
-            const name = doc.pricingModelName.toLowerCase().replace('m²', 'm2')
+        // 1. Migrate pricingModel to pricingModelName/Type/Unit OR Normalize existing pricingModelName
+        const hasLegacyField = !!typedDoc.pricingModel;
+        const hasNewNameField = !!typedDoc.pricingModelName;
+
+        if (hasLegacyField && !hasNewNameField) {
+            console.log(`Migrating legacy pricing for: ${typedDoc.service} (${typedDoc.category})`)
+            typedDoc.pricingModelName = typedDoc.pricingModel
+            changed = true
+        }
+
+        // Always run normalization if name exists but type/unit are missing or need update
+        if (typedDoc.pricingModelName && (!typedDoc.pricingModelType || (typedDoc.pricingModelType === 'Price per unit' && !typedDoc.pricingModelUnit))) {
+            const name = typedDoc.pricingModelName.toLowerCase().replace('m²', 'm2')
             
             if (name.includes('per') || name.includes('m2') || name.includes('hour') || name.includes('day') || name.includes('meter') || name.includes('room')) {
-                doc.pricingModelType = 'Price per unit'
-                if (name.includes('m2')) doc.pricingModelUnit = 'm2'
-                else if (name.includes('hour')) doc.pricingModelUnit = 'hour'
-                else if (name.includes('day')) doc.pricingModelUnit = 'day'
-                else if (name.includes('meter')) doc.pricingModelUnit = 'meter'
-                else if (name.includes('room')) doc.pricingModelUnit = 'room'
-                else doc.pricingModelUnit = 'unit'
+                typedDoc.pricingModelType = 'Price per unit'
+                if (name.includes('m2')) typedDoc.pricingModelUnit = 'm2'
+                else if (name.includes('hour')) typedDoc.pricingModelUnit = 'hour'
+                else if (name.includes('day')) typedDoc.pricingModelUnit = 'day'
+                else if (name.includes('meter')) typedDoc.pricingModelUnit = 'meter'
+                else if (name.includes('room')) typedDoc.pricingModelUnit = 'room'
+                else typedDoc.pricingModelUnit = 'unit'
             } else {
-                doc.pricingModelType = 'Fixed price'
-                doc.pricingModelUnit = undefined
+                typedDoc.pricingModelType = 'Fixed price'
+                typedDoc.pricingModelUnit = undefined
             }
-            
-            // Delete legacy field if possible (though Mongoose might re-add it if not in schema, 
-            // but we are using any[] and doc.save() which follows schema)
-            doc.set('pricingModel', undefined, { strict: false })
             changed = true
-        } else if (!doc.pricingModelName) {
+        }
+
+        if (hasLegacyField) {
+            typedDoc.set('pricingModel', undefined, { strict: false })
+            changed = true
+        }
+
+        if (!typedDoc.pricingModelName) {
             // Default if nothing exists
-            doc.pricingModelName = 'Total price'
-            doc.pricingModelType = 'Fixed price'
+            typedDoc.pricingModelName = 'Total price'
+            typedDoc.pricingModelType = 'Fixed price'
             changed = true
         }
 
         // 2. Migrate country to activeCountries
-        if (doc.country && (!doc.activeCountries || doc.activeCountries.length === 0)) {
-            doc.activeCountries = [doc.country]
-            doc.set('country', undefined, { strict: false })
+        if (typedDoc.country && (!typedDoc.activeCountries || typedDoc.activeCountries.length === 0)) {
+            typedDoc.activeCountries = [typedDoc.country]
+            typedDoc.set('country', undefined, { strict: false })
             changed = true
-        } else if (!doc.activeCountries || doc.activeCountries.length === 0) {
-            doc.activeCountries = ['BE']
+        } else if (!typedDoc.activeCountries || typedDoc.activeCountries.length === 0) {
+            typedDoc.activeCountries = ['BE']
             changed = true
         }
 
         // 3. Ensure isActive defaults to true
-        if (typeof doc.isActive !== 'boolean') {
-            doc.isActive = true
+        if (typeof typedDoc.isActive !== 'boolean') {
+            typedDoc.isActive = true
             changed = true
         }
 
         // 4. Initialize arrays
-        if (!doc.projectTypes) {
-            doc.projectTypes = []
+        if (!typedDoc.projectTypes) {
+            typedDoc.projectTypes = []
             changed = true
         }
-        if (!doc.professionalInputFields) {
-            doc.professionalInputFields = []
+        if (!typedDoc.professionalInputFields) {
+            typedDoc.professionalInputFields = []
             changed = true
         }
-        if (!doc.requiredCertifications) {
-            doc.requiredCertifications = []
+        if (!typedDoc.requiredCertifications) {
+            typedDoc.requiredCertifications = []
             changed = true
         }
 
         if (changed) {
-            await doc.save()
+            await typedDoc.save()
             updated++
         }
     }

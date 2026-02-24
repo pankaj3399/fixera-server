@@ -1,4 +1,18 @@
-import { Schema, model, Document } from "mongoose";
+import { Schema, model, Document, Error } from "mongoose";
+
+export enum PricingModelType {
+    FIXED = 'Fixed price',
+    UNIT = 'Price per unit'
+}
+
+export enum PricingModelUnit {
+    M2 = 'm2',
+    HOUR = 'hour',
+    DAY = 'day',
+    METER = 'meter',
+    ROOM = 'room',
+    UNIT = 'unit'
+}
 
 // Dynamic field types that professionals need to fill in
 export interface IDynamicField {
@@ -43,8 +57,9 @@ export interface IServiceConfiguration extends Document {
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
     pricingModelName: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModel: string; // Added for backward compatibility (matches virtual)
     pricingModelType: 'Fixed price' | 'Price per unit';
-    pricingModelUnit?: string; // conditionally required if 'Price per unit'
+    pricingModelUnit?: PricingModelUnit; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -154,15 +169,44 @@ ServiceConfigurationSchema.virtual('pricingModel')
     });
 
 ServiceConfigurationSchema.pre('validate', function(next) {
-    if (this.pricingModelType === 'Fixed price') {
+    if (this.pricingModelType === PricingModelType.FIXED) {
         this.pricingModelUnit = undefined;
-    } else if (this.pricingModelType === 'Price per unit') {
+    } else if (this.pricingModelType === PricingModelType.UNIT) {
         if (!this.pricingModelUnit) {
             this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
         }
     }
     next();
 });
+
+const validateUpdate = function (this: any, next: any) {
+    const update = this.getUpdate();
+    const set = update.$set || update;
+
+    // Handle pricingModelType change or pricingModelUnit change in update
+    const pricingModelType = set.pricingModelType;
+    const pricingModelUnit = set.pricingModelUnit;
+
+    // Note: If pricingModelType is being updated to Fixed price, clear unit
+    if (pricingModelType === PricingModelType.FIXED) {
+        set.pricingModelUnit = undefined;
+        if (update.$set) update.$set.pricingModelUnit = undefined;
+    } 
+    // If pricingModelType is being updated to Price per unit, ensure unit exists
+    else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
+        // We might not have the full document state here, but we can check if it's in the payload
+        // This is a bit tricky with Mongoose updates as we don't always have the current state
+        // Throw error if unit is explicitly set to null/undefined or missing in a way that breaks rules
+    }
+
+    this.setUpdate(update);
+    next();
+};
+
+ServiceConfigurationSchema.pre('findOneAndUpdate', validateUpdate);
+ServiceConfigurationSchema.pre('updateOne', validateUpdate);
+ServiceConfigurationSchema.pre('updateMany', validateUpdate);
+
 
 // Indexes for efficient querying
 ServiceConfigurationSchema.index({ category: 1, service: 1, areaOfWork: 1 });

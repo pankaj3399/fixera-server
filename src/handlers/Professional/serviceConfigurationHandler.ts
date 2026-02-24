@@ -28,7 +28,7 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         }
 
         const configuration = await ServiceConfiguration.findOne(filter)
-            .select('category service areaOfWork pricingModel certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries');
+            .select('category service areaOfWork pricingModelName certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries');
 
         if (!configuration) {
             return res.status(404).json({
@@ -38,8 +38,8 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         }
 
         // Parse pricingModel to array - split by " or "
-        const pricingModels = configuration.pricingModel ?
-            configuration.pricingModel.split(' or ').map((m: string) => m.trim()) :
+        const pricingModels = configuration.pricingModelName ?
+            configuration.pricingModelName.split(' or ').map((m: string) => m.trim()) :
             [];
 
         res.status(200).json({
