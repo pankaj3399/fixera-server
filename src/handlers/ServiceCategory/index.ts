@@ -18,7 +18,7 @@ export const getActiveServiceCategories = async (
       isActive: true,
       activeCountries: country,
     })
-      .select("category service areaOfWork pricingModel certificationRequired icon")
+      .select("category service areaOfWork pricingModelName pricingModelType pricingModelUnit certificationRequired icon")
       .sort({ category: 1, service: 1 });
 
     // Group by category
@@ -50,7 +50,10 @@ export const getActiveServiceCategories = async (
           description: `Professional ${config.service.toLowerCase()} services`,
           isActive: true,
           countries: [country],
-          pricingModel: config.pricingModel,
+          pricingModel: config.pricingModelName, // For backward compatibility
+          pricingModelName: config.pricingModelName,
+          pricingModelType: config.pricingModelType,
+          pricingModelUnit: config.pricingModelUnit,
           certificationRequired: config.certificationRequired,
           icon: config.icon,
         });

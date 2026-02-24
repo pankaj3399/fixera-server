@@ -267,6 +267,29 @@ function convertToServiceConfig(row: any): any {
     };
   });
 
+  const rawPricingModel = row["Pricing Model"]?.trim() || "Total price";
+  let pricingModelType: "Fixed price" | "Price per unit" = "Fixed price";
+  let pricingModelUnit: "m2" | "hour" | "day" | "meter" | "room" | "unit" | undefined = undefined;
+
+  const normalizedPricingModel = rawPricingModel.replace("m²", "m2").toLowerCase();
+  const isUnitBased =
+    /\bper\b/.test(normalizedPricingModel) ||
+    /\bm2\b/.test(normalizedPricingModel) ||
+    /\bhour\b/.test(normalizedPricingModel) ||
+    /\bday\b/.test(normalizedPricingModel) ||
+    /\bmeter\b/.test(normalizedPricingModel) ||
+    /\broom\b/.test(normalizedPricingModel);
+
+  if (isUnitBased) {
+    pricingModelType = "Price per unit";
+    if (/\bm2\b/.test(normalizedPricingModel)) pricingModelUnit = "m2";
+    else if (/\bhour\b/.test(normalizedPricingModel)) pricingModelUnit = "hour";
+    else if (/\bday\b/.test(normalizedPricingModel)) pricingModelUnit = "day";
+    else if (/\bmeter\b/.test(normalizedPricingModel)) pricingModelUnit = "meter";
+    else if (/\broom\b/.test(normalizedPricingModel)) pricingModelUnit = "room";
+    else pricingModelUnit = "unit";
+  }
+
   return {
     category: row["Category"]?.trim(),
     service: row["Service"]?.trim(),
@@ -274,7 +297,9 @@ function convertToServiceConfig(row: any): any {
       row["Area of Work"]?.trim() === "Not applicable"
         ? undefined
         : row["Area of Work"]?.trim(),
-    pricingModel: row["Pricing Model"]?.trim() || "Total price",
+    pricingModelName: rawPricingModel,
+    pricingModelType,
+    pricingModelUnit,
     certificationRequired: row["Certification"]?.toLowerCase() === "yes",
     projectTypes: typesRaw,
     includedItems,

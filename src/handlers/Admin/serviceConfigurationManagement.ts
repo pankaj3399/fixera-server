@@ -1,5 +1,67 @@
 import { Request, Response } from 'express';
 import ServiceConfiguration from '../../models/serviceConfiguration';
+import { PricingModelType, PricingModelUnit } from '../../models/serviceConfiguration';
+
+const RE_PER = /\bper\b/;
+const RE_M2 = /\bm2\b/;
+const RE_HOUR = /\bhour\b/;
+const RE_DAY = /\bday\b/;
+const RE_METER = /\bmeter\b/;
+const RE_ROOM = /\broom\b/;
+
+const derivePricingFields = (rawPricingModel: string) => {
+    const normalized = rawPricingModel.toLowerCase().replace('m²', 'm2').trim();
+
+    const isUnit =
+        RE_PER.test(normalized) ||
+        RE_M2.test(normalized) ||
+        RE_HOUR.test(normalized) ||
+        RE_DAY.test(normalized) ||
+        RE_METER.test(normalized) ||
+        RE_ROOM.test(normalized);
+
+    if (!isUnit) {
+        return {
+            pricingModelType: PricingModelType.FIXED as 'Fixed price' | 'Price per unit',
+            pricingModelUnit: undefined as PricingModelUnit | undefined
+        };
+    }
+
+    let unit: PricingModelUnit = PricingModelUnit.UNIT;
+    if (RE_M2.test(normalized)) unit = PricingModelUnit.M2;
+    else if (RE_HOUR.test(normalized)) unit = PricingModelUnit.HOUR;
+    else if (RE_DAY.test(normalized)) unit = PricingModelUnit.DAY;
+    else if (RE_METER.test(normalized)) unit = PricingModelUnit.METER;
+    else if (RE_ROOM.test(normalized)) unit = PricingModelUnit.ROOM;
+
+    return {
+        pricingModelType: PricingModelType.UNIT as 'Fixed price' | 'Price per unit',
+        pricingModelUnit: unit
+    };
+};
+
+const normalizePricingPayload = (input: any) => {
+    const output = { ...input };
+    const legacyPricingModel = typeof output.pricingModel === 'string' ? output.pricingModel.trim() : '';
+
+    if (!output.pricingModelName && legacyPricingModel) {
+        output.pricingModelName = legacyPricingModel;
+    }
+
+    if (!output.pricingModelType && output.pricingModelName) {
+        const derived = derivePricingFields(output.pricingModelName);
+        output.pricingModelType = derived.pricingModelType;
+        if (!output.pricingModelUnit) {
+            output.pricingModelUnit = derived.pricingModelUnit;
+        }
+    }
+
+    if (output.pricingModelType === PricingModelType.FIXED) {
+        delete output.pricingModelUnit;
+    }
+
+    return output;
+};
 
 /**
  * Get all service configurations with optional filters
@@ -67,7 +129,7 @@ export const getServiceConfigurationById = async (req: Request, res: Response) =
  */
 export const createServiceConfiguration = async (req: Request, res: Response) => {
     try {
-        const configurationData = req.body;
+        const configurationData = normalizePricingPayload(req.body);
 
         // Check if configuration already exists
         const existing = await ServiceConfiguration.findOne({
@@ -106,7 +168,7 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
 export const updateServiceConfiguration = async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
-        const updateData = req.body;
+        const updateData = normalizePricingPayload(req.body);
 
         const configuration = await ServiceConfiguration.findByIdAndUpdate(
             id,

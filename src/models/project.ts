@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { PricingModelType, PricingModelUnit } from "./serviceConfiguration";
 
 // Interfaces for nested schemas
 export interface ICertification {
@@ -182,6 +183,8 @@ export interface IProject extends Document {
   resources: string[];
   description: string;
   priceModel: string;
+  pricingModelType?: PricingModelType;
+  pricingModelUnit?: PricingModelUnit;
   keywords: string[];
   title: string;
   media: IMedia;
@@ -522,6 +525,14 @@ const ProjectSchema = new Schema<IProject>(
       type: String,
       required: true,
     },
+    pricingModelType: { 
+      type: String,
+      enum: Object.values(PricingModelType)
+    },
+    pricingModelUnit: { 
+      type: String,
+      enum: Object.values(PricingModelUnit)
+    },
     keywords: [{ type: String }],
     title: { type: String, required: true, minlength: 30, maxlength: 90 },
     media: { type: MediaSchema, required: true },
@@ -591,6 +602,59 @@ ProjectSchema.index({ title: 'text', description: 'text' });
 ProjectSchema.index({ category: 1, service: 1 });
 ProjectSchema.index({ status: 1 });
 ProjectSchema.index({ "distance.location": "2dsphere" });
+
+// Validate pricingModelType/Unit consistency (mirrors ServiceConfiguration logic)
+ProjectSchema.pre('validate', function (next) {
+  // Short-circuit if pricingModelType is not set (both fields are optional on Project)
+  if (!this.pricingModelType) {
+    this.pricingModelUnit = undefined;
+    return next();
+  }
+
+  if (this.pricingModelType === PricingModelType.FIXED) {
+    this.pricingModelUnit = undefined;
+  } else if (this.pricingModelType === PricingModelType.UNIT) {
+    if (!this.pricingModelUnit) {
+      this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
+    }
+  }
+  next();
+});
+
+// Validate pricing fields on update operations (mirrors ServiceConfiguration)
+const validateProjectUpdate = function (this: any, next: any) {
+  const update = this.getUpdate();
+  const set = update.$set || update;
+
+  const pricingModelType = set.pricingModelType;
+  const pricingModelUnit = set.pricingModelUnit;
+
+  const unsetPricingModelUnit = () => {
+    // Remove from $set so Mongoose doesn't re-add it
+    delete set.pricingModelUnit;
+    // Use $unset to actually remove the field in MongoDB
+    update.$unset = update.$unset || {};
+    update.$unset.pricingModelUnit = '';
+  };
+
+  if (!pricingModelType) {
+    // If type is being explicitly cleared, clear unit too
+    if ('pricingModelType' in set) {
+      unsetPricingModelUnit();
+    }
+  } else if (pricingModelType === PricingModelType.FIXED) {
+    unsetPricingModelUnit();
+  } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
+    // Unit may come from the existing document; skip hard validation here
+  }
+
+  this.setUpdate(update);
+  next();
+};
+
+ProjectSchema.pre('findOneAndUpdate', validateProjectUpdate);
+ProjectSchema.pre('updateOne', validateProjectUpdate);
+ProjectSchema.pre('updateMany', validateProjectUpdate);
 
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {

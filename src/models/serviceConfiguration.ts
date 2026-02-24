@@ -1,5 +1,19 @@
 import { Schema, model, Document } from "mongoose";
 
+export enum PricingModelType {
+    FIXED = 'Fixed price',
+    UNIT = 'Price per unit'
+}
+
+export enum PricingModelUnit {
+    M2 = 'm2',
+    HOUR = 'hour',
+    DAY = 'day',
+    METER = 'meter',
+    ROOM = 'room',
+    UNIT = 'unit'
+}
+
 // Dynamic field types that professionals need to fill in
 export interface IDynamicField {
     fieldName: string; // e.g., "range m2 living area", "Building Type", "kW system power"
@@ -42,7 +56,10 @@ export interface IServiceConfiguration extends Document {
 
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
-    pricingModel: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModelName?: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModel?: string; // Virtual for backward compatibility (maps to pricingModelName)
+    pricingModelType: 'Fixed price' | 'Price per unit';
+    pricingModelUnit?: PricingModelUnit; // conditionally required if 'Price per unit'
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -115,7 +132,13 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
     // Admin-configurable fields
     areaOfWork: { type: String },
-    pricingModel: { type: String, required: true },
+    pricingModelName: { type: String, required: false },
+    pricingModelType: { 
+        type: String, 
+        required: true,
+        enum: ['Fixed price', 'Price per unit']
+    },
+    pricingModelUnit: { type: String, enum: Object.values(PricingModelUnit) },
     icon: { type: String },
     certificationRequired: { type: Boolean, default: false },
     requiredCertifications: [{ type: String, default: [] }],
@@ -131,8 +154,82 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     isActive: { type: Boolean, default: true },
     activeCountries: { type: [String], default: ['BE'] }
 }, {
-    timestamps: true
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
 });
+
+// Virtual for backward compatibility
+ServiceConfigurationSchema.virtual('pricingModel')
+    .get(function() {
+        return this.pricingModelName;
+    })
+    .set(function(val: string) {
+        this.pricingModelName = val;
+    });
+
+ServiceConfigurationSchema.pre('validate', function(next) {
+    if (this.pricingModelType === PricingModelType.FIXED) {
+        this.pricingModelUnit = undefined;
+    } else if (this.pricingModelType === PricingModelType.UNIT) {
+        if (!this.pricingModelUnit) {
+            this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
+        }
+    }
+    next();
+});
+
+// Validate pricing fields on update operations
+const validateUpdate = function (this: any, next: any) {
+    const update = this.getUpdate();
+    const set = update.$set || update;
+
+    if (typeof set.pricingModel === 'string' && !set.pricingModelName) {
+        set.pricingModelName = set.pricingModel;
+    }
+
+    if (!set.pricingModelType && typeof set.pricingModelName === 'string') {
+        const normalized = set.pricingModelName.toLowerCase().replace('m²', 'm2').trim();
+        const isUnit =
+            /\bper\b/.test(normalized) ||
+            /\bm2\b/.test(normalized) ||
+            /\bhour\b/.test(normalized) ||
+            /\bday\b/.test(normalized) ||
+            /\bmeter\b/.test(normalized) ||
+            /\broom\b/.test(normalized);
+
+        set.pricingModelType = isUnit ? PricingModelType.UNIT : PricingModelType.FIXED;
+
+        if (isUnit && !set.pricingModelUnit) {
+            if (/\bm2\b/.test(normalized)) set.pricingModelUnit = PricingModelUnit.M2;
+            else if (/\bhour\b/.test(normalized)) set.pricingModelUnit = PricingModelUnit.HOUR;
+            else if (/\bday\b/.test(normalized)) set.pricingModelUnit = PricingModelUnit.DAY;
+            else if (/\bmeter\b/.test(normalized)) set.pricingModelUnit = PricingModelUnit.METER;
+            else if (/\broom\b/.test(normalized)) set.pricingModelUnit = PricingModelUnit.ROOM;
+            else set.pricingModelUnit = PricingModelUnit.UNIT;
+        }
+    }
+
+    const pricingModelType = set.pricingModelType;
+    const pricingModelUnit = set.pricingModelUnit;
+
+    if (pricingModelType === PricingModelType.FIXED) {
+        // Remove from $set so Mongoose doesn't re-add it
+        delete set.pricingModelUnit;
+        // Use $unset to actually remove the field in MongoDB
+        update.$unset = update.$unset || {};
+        update.$unset.pricingModelUnit = '';
+    } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
+        // Unit may come from the existing document; skip hard validation here
+    }
+
+    this.setUpdate(update);
+    next();
+};
+
+ServiceConfigurationSchema.pre('findOneAndUpdate', validateUpdate);
+ServiceConfigurationSchema.pre('updateOne', validateUpdate);
+ServiceConfigurationSchema.pre('updateMany', validateUpdate);
 
 // Indexes for efficient querying
 ServiceConfigurationSchema.index({ category: 1, service: 1, areaOfWork: 1 });

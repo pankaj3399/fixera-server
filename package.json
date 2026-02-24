@@ -11,7 +11,8 @@
     "seed:admin": "node src/scripts/seedAdmin.js",
     "seed:admin:ts": "npx tsx src/scripts/seedAdmin.ts",
     "seed:csv": "npx tsx src/scripts/parseAndImportCSV.ts",
-    "migrate:merge-solar": "npx tsx src/scripts/mergeDuplicateSolarServices.ts"
+    "migrate:merge-solar": "npx tsx src/scripts/mergeDuplicateSolarServices.ts",
+    "migrate:service-config-pricing": "npx tsx src/scripts/migrateServiceConfigsPricing.ts"
   },
   "repository": {
     "type": "git",
