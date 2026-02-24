@@ -603,6 +603,18 @@ ProjectSchema.index({ category: 1, service: 1 });
 ProjectSchema.index({ status: 1 });
 ProjectSchema.index({ "distance.location": "2dsphere" });
 
+// Validate pricingModelType/Unit consistency (mirrors ServiceConfiguration logic)
+ProjectSchema.pre('validate', function (next) {
+  if (this.pricingModelType === PricingModelType.FIXED) {
+    this.pricingModelUnit = undefined;
+  } else if (this.pricingModelType === PricingModelType.UNIT) {
+    if (!this.pricingModelUnit) {
+      this.invalidate('pricingModelUnit', 'pricingModelUnit is required when pricingModelType is "Price per unit"');
+    }
+  }
+  next();
+});
+
 // Pre-save middleware for auto-save timestamp
 ProjectSchema.pre("save", function (next) {
   this.autoSaveTimestamp = new Date();

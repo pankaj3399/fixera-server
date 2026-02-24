@@ -138,7 +138,7 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
         required: true,
         enum: ['Fixed price', 'Price per unit']
     },
-    pricingModelUnit: { type: String },
+    pricingModelUnit: { type: String, enum: Object.values(PricingModelUnit) },
     icon: { type: String },
     certificationRequired: { type: Boolean, default: false },
     requiredCertifications: [{ type: String, default: [] }],
@@ -189,7 +189,6 @@ const validateUpdate = function (this: any, next: any) {
 
     if (pricingModelType === PricingModelType.FIXED) {
         set.pricingModelUnit = undefined;
-        if (update.$set) update.$set.pricingModelUnit = undefined;
     } else if (pricingModelType === PricingModelType.UNIT && !pricingModelUnit) {
         // Unit may come from the existing document; skip hard validation here
     }

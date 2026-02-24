@@ -6,7 +6,10 @@ import User from "../models/user";
 import { DEFAULT_AVAILABILITY, resolveAvailability } from "./availabilityHelpers";
 import { DateTime } from "luxon";
 
-type DurationUnit = "hours" | "days" | "mixed";
+type DurationUnit = "hours" | "days";
+
+/** Project-level time mode that may include "mixed" (subprojects with different units). */
+export type TimeMode = DurationUnit | "mixed";
 
 type Duration = {
   value: number;
@@ -20,7 +23,7 @@ type ProposalWindow = {
 };
 
 export type ScheduleProposals = {
-  mode: DurationUnit;
+  mode: TimeMode;
   earliestBookableDate: string;
   earliestProposal?: ProposalWindow;
   shortestThroughputProposal?: ProposalWindow;

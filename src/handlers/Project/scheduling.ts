@@ -1,6 +1,6 @@
 import Project, { IProject } from "../../models/project";
 import User, { IUser } from "../../models/user";
-import type { ScheduleProposals as EngineScheduleProposals } from "../../utils/scheduleEngine";
+import type { ScheduleProposals as EngineScheduleProposals, TimeMode } from "../../utils/scheduleEngine";
 
 interface TimeWindow {
   start: Date;
@@ -8,7 +8,7 @@ interface TimeWindow {
 }
 
 type ScheduleProposals = {
-  mode: "hours" | "days" | "mixed";
+  mode: TimeMode;
   earliestBookableDate: Date;
   earliestProposal?: TimeWindow;
   shortestThroughputProposal?: TimeWindow;
@@ -372,8 +372,12 @@ export const getScheduleProposalsForProject = async (
     const project = await Project.findById(projectId);
     if (!project) return null;
 
-    const mode: "hours" | "days" | "mixed" =
+    const rawMode: TimeMode =
       project.timeMode || project.executionDuration?.unit || "days";
+    // "mixed" mode means subprojects have different time units (hours + days).
+    // For top-level scheduling we treat mixed as days-based (day granularity).
+    const effectiveMode: "hours" | "days" = rawMode === "mixed" ? "days" : rawMode;
+    const mode = rawMode; // preserve original mode for the response
 
     const teamMembers = await fetchProjectTeamMembers(project);
     if (!teamMembers.length) {
@@ -414,7 +418,7 @@ export const getScheduleProposalsForProject = async (
 
     // Build day-by-day availability for a search horizon.
     const searchStart =
-      mode === "hours"
+      effectiveMode === "hours"
         ? new Date(earliestBookableDate)
         : startOfDay(earliestBookableDate);
     const availabilityByDay: WindowAvailability[] = [];
@@ -435,7 +439,7 @@ export const getScheduleProposalsForProject = async (
     // Get the minimum overlap percentage from project settings (default 70%)
     const minOverlapPercentage = project.minOverlapPercentage ?? 70;
 
-    if (mode === "hours") {
+    if (effectiveMode === "hours") {
       // Hours mode: All resources must be available for the entire project duration.
       // We look for the earliest window where ALL minResources are continuously available.
       const requiredDurationHours = totalHours;
