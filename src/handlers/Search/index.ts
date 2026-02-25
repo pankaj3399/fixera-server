@@ -216,8 +216,7 @@ async function searchProjects(
   try {
     // Build the filter object
     const filter: any = {
-      // Include published and pending projects for now
-      status: { $in: ["published", "pending"] },
+      status: "published",
     };
 
     // Search query - search in title, description, category, and service

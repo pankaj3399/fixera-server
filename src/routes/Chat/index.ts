@@ -13,15 +13,17 @@ import { upload } from "../../utils/s3Upload";
 
 const router = express.Router();
 
+const userKeyGenerator = (req: express.Request) => {
+  const userId = req.user?._id;
+  return userId ? String(userId) : "unknown";
+};
+
 const chatSendLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    const userId = req.user?._id;
-    return userId ? String(userId) : req.ip ?? "unknown";
-  },
+  keyGenerator: userKeyGenerator,
   message: { success: false, msg: "Too many messages, please try again later" },
 });
 
@@ -30,10 +32,7 @@ const chatUploadLimiter = rateLimit({
   limit: 15,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    const userId = req.user?._id;
-    return userId ? String(userId) : req.ip ?? "unknown";
-  },
+  keyGenerator: userKeyGenerator,
   message: { success: false, msg: "Too many uploads, please try again later" },
 });
 
