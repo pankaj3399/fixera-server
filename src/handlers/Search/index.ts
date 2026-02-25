@@ -301,11 +301,6 @@ async function searchProjects(
       return id && Types.ObjectId.isValid(id) ? id : null;
     };
 
-    const getRawProfessionalId = (project: any) =>
-      project.professionalId?._id?.toString?.() ||
-      project.professionalId?.toString?.() ||
-      project.professionalId;
-
     const escapeRegExp = (value: string) =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -516,19 +511,10 @@ async function searchProjects(
     const totalCount = filteredResults ? baseResults.length : total;
     const finalResults = filteredResults ? baseResults.slice(skip, skip + limit) : baseResults;
 
-    // Batch-load professionals for all published projects to avoid N+1 queries
-    const publishedProjects = finalResults.filter((p: any) => p?.status === "published");
-    const invalidProfessionalIds = new Set<string>();
+    // Batch-load professionals to avoid N+1 queries
     const professionalIdSet = new Set(
-      publishedProjects
-        .map((p: any) => {
-          const raw = getRawProfessionalId(p);
-          const id = toObjectIdString(p.professionalId);
-          if (!id && raw) {
-            invalidProfessionalIds.add(String(raw));
-          }
-          return id;
-        })
+      finalResults
+        .map((p: any) => toObjectIdString(p.professionalId))
         .filter(Boolean)
     );
     const professionalIds = Array.from(professionalIdSet);
@@ -550,13 +536,8 @@ async function searchProjects(
 
     const resultsWithAvailability = await Promise.all(
       finalResults.map(async (project: any) => {
-        if (project?.status !== "published") {
-          return project;
-        }
-
         try {
           // Get professional from pre-loaded map
-          const rawProfessionalId = getRawProfessionalId(project);
           const profId = toObjectIdString(project.professionalId);
           const professional = profId ? professionalMap.get(profId) : null;
 
@@ -564,7 +545,7 @@ async function searchProjects(
             if (shouldLogAvailability) {
               console.warn("[SEARCH] Missing professional for availability", {
                 projectId: project?._id?.toString?.() || project?._id,
-                professionalId: rawProfessionalId,
+                professionalId: project.professionalId,
               });
             }
             return project;
@@ -660,13 +641,6 @@ async function searchProjects(
         }
       })
     );
-
-    if (shouldLogAvailability && invalidProfessionalIds.size > 0) {
-      console.warn("[SEARCH] Invalid professionalId values detected", {
-        count: invalidProfessionalIds.size,
-        ids: Array.from(invalidProfessionalIds).slice(0, 5),
-      });
-    }
 
     res.json({
       results: resultsWithAvailability,

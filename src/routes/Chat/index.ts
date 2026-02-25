@@ -1,5 +1,5 @@
 import express from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   createOrGetConversation,
   listMyConversations,
@@ -15,7 +15,7 @@ const router = express.Router();
 
 const userKeyGenerator = (req: express.Request) => {
   const userId = req.user?._id;
-  return userId ? String(userId) : "unknown";
+  return userId ? String(userId) : ipKeyGenerator(req.ip ?? "unknown");
 };
 
 const chatSendLimiter = rateLimit({
