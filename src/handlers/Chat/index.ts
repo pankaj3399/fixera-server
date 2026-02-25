@@ -4,7 +4,7 @@ import Booking from "../../models/booking";
 import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import User from "../../models/user";
-import { generateFileName, uploadToS3, validateImageFile } from "../../utils/s3Upload";
+import { generateFileName, uploadToS3, validateImageFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
@@ -278,9 +278,29 @@ export const getConversationMessages = async (
     .sort({ _id: -1 })
     .limit(limit);
 
-  const messages = [...messagesDesc].reverse();
+  const messagesRaw = [...messagesDesc].reverse();
   const hasMore = messagesDesc.length === limit;
-  const nextCursor = hasMore && messages.length > 0 ? String(messages[0]._id) : null;
+  const nextCursor = hasMore && messagesRaw.length > 0 ? String(messagesRaw[0]._id) : null;
+
+  // Replace private S3 URLs with presigned URLs so the browser can load them
+  const messages = await Promise.all(
+    messagesRaw.map(async (msg) => {
+      const msgObj = msg.toObject ? msg.toObject() : msg;
+      if (!Array.isArray(msgObj.images) || msgObj.images.length === 0) return msgObj;
+      const signedImages = await Promise.all(
+        msgObj.images.map(async (url: string) => {
+          const key = parseS3KeyFromUrl(url);
+          if (!key || !key.startsWith("chat/")) return url;
+          try {
+            return await getPresignedUrl(key, 3600);
+          } catch {
+            return url;
+          }
+        })
+      );
+      return { ...msgObj, images: signedImages };
+    })
+  );
 
   return res.status(200).json({
     success: true,
