@@ -4,7 +4,8 @@ import Booking from "../../models/booking";
 import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import User from "../../models/user";
-import { generateFileName, uploadToS3, validateImageFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
+import { generateFileName, uploadToS3, validateImageFile, validateFile, validateVideoFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
+import type { IChatAttachment } from "../../models/chatMessage";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
@@ -40,20 +41,30 @@ const isConversationParticipant = (conversation: any, userId: string) => {
   return customerId === userId || professionalId === userId;
 };
 
-const buildMessagePreview = (text: string, images: string[]) => {
+const buildMessagePreview = (text: string, images: string[], attachments?: IChatAttachment[]) => {
   if (text.trim()) {
     return text.trim().slice(0, 200);
   }
 
-  if (images.length === 0) {
+  const atts = attachments || [];
+  const totalMedia = images.length + atts.length;
+
+  if (totalMedia === 0) {
     return "";
   }
 
-  if (images.length === 1) {
+  if (images.length > 0 && atts.length === 0) {
+    return images.length === 1 ? "[Image]" : `[${images.length} images]`;
+  }
+
+  if (atts.length === 1 && images.length === 0) {
+    const att = atts[0];
+    if (att.fileType === "video") return "[Video]";
+    if (att.fileType === "document") return `[${att.fileName || "PDF"}]`;
     return "[Image]";
   }
 
-  return `[${images.length} images]`;
+  return `[${totalMedia} attachments]`;
 };
 
 const ALLOWED_S3_HOSTNAME = /^[\w-]+\.s3[\w.-]*\.amazonaws\.com$/;
@@ -282,23 +293,42 @@ export const getConversationMessages = async (
   const hasMore = messagesDesc.length === limit;
   const nextCursor = hasMore && messagesRaw.length > 0 ? String(messagesRaw[0]._id) : null;
 
-  // Replace private S3 URLs with presigned URLs so the browser can load them
+  // Replace private S3 URLs with presigned URLs so the browser can load them.
+  // Only sign keys that belong to this conversation (chat/{conversationId}/…).
+  const expectedKeyPrefix = `chat/${conversationId}/`;
+  const signS3Url = async (url: string): Promise<string> => {
+    const key = parseS3KeyFromUrl(url);
+    if (!key || !key.startsWith(expectedKeyPrefix)) return url;
+    try {
+      return await getPresignedUrl(key, 3600);
+    } catch {
+      return url;
+    }
+  };
+
   const messages = await Promise.all(
     messagesRaw.map(async (msg) => {
       const msgObj = msg.toObject ? msg.toObject() : msg;
-      if (!Array.isArray(msgObj.images) || msgObj.images.length === 0) return msgObj;
-      const signedImages = await Promise.all(
-        msgObj.images.map(async (url: string) => {
-          const key = parseS3KeyFromUrl(url);
-          if (!key || !key.startsWith("chat/")) return url;
-          try {
-            return await getPresignedUrl(key, 3600);
-          } catch {
-            return url;
-          }
-        })
-      );
-      return { ...msgObj, images: signedImages };
+
+      const hasImages = Array.isArray(msgObj.images) && msgObj.images.length > 0;
+      const hasAttachments = Array.isArray(msgObj.attachments) && msgObj.attachments.length > 0;
+
+      if (!hasImages && !hasAttachments) return msgObj;
+
+      const signedImages = hasImages
+        ? await Promise.all(msgObj.images.map(signS3Url))
+        : msgObj.images;
+
+      const signedAttachments = hasAttachments
+        ? await Promise.all(
+            msgObj.attachments.map(async (att: any) => ({
+              ...att,
+              url: await signS3Url(att.url),
+            }))
+          )
+        : msgObj.attachments;
+
+      return { ...msgObj, images: signedImages, attachments: signedAttachments };
     })
   );
 
@@ -329,6 +359,23 @@ export const sendMessage = async (req: Request, res: Response) => {
       )
     : [];
 
+  if (Array.isArray(req.body.attachments) && req.body.attachments.length > 5) {
+    return res.status(400).json({ success: false, msg: "A message can include at most 5 attachments" });
+  }
+
+  const attachments: IChatAttachment[] = Array.isArray(req.body.attachments)
+    ? req.body.attachments.filter((att: any) => {
+        return (
+          att &&
+          typeof att.url === "string" &&
+          isValidS3ImageUrl(att.url) &&
+          typeof att.fileName === "string" &&
+          ["image", "document", "video"].includes(att.fileType) &&
+          typeof att.mimeType === "string"
+        );
+      })
+    : [];
+
   if (!userId) {
     return res.status(401).json({ success: false, msg: "Authentication required" });
   }
@@ -337,10 +384,10 @@ export const sendMessage = async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, msg: "Invalid conversationId" });
   }
 
-  if (text.length === 0 && images.length === 0) {
+  if (text.length === 0 && images.length === 0 && attachments.length === 0) {
     return res.status(400).json({
       success: false,
-      msg: "Message must contain text or at least one image",
+      msg: "Message must contain text or at least one image/attachment",
     });
   }
 
@@ -386,10 +433,11 @@ export const sendMessage = async (req: Request, res: Response) => {
     senderRole,
     text,
     images,
+    attachments,
     readBy: [{ userId: toObjectId(userId), readAt: new Date() }],
   });
 
-  const preview = buildMessagePreview(text, images);
+  const preview = buildMessagePreview(text, images, attachments);
   const isCustomerSender = customerId === userId;
 
   const updateSet: Record<string, unknown> = {
@@ -453,42 +501,170 @@ export const markConversationRead = async (
   return res.status(200).json({ success: true, msg: "Conversation marked as read" });
 };
 
-export const uploadChatImage = async (req: Request, res: Response) => {
+const getFileType = (mimetype: string): "image" | "document" | "video" => {
+  if (mimetype.startsWith("image/")) return "image";
+  if (mimetype.startsWith("video/")) return "video";
+  return "document";
+};
+
+class UploadError {
+  constructor(public status: number, public msg: string) {}
+}
+
+const authorizeAndUploadChat = async (
+  req: Request,
+  file: Express.Multer.File,
+  validator: (file: Express.Multer.File) => { valid: boolean; error?: string },
+) => {
   const userId = getRequestUserId(req);
-  const file = req.file;
   const conversationId = typeof req.body.conversationId === "string" ? req.body.conversationId : undefined;
 
   if (!userId) {
-    return res.status(401).json({ success: false, msg: "Authentication required" });
+    throw new UploadError(401, "Authentication required");
   }
 
-  if (!file) {
-    return res.status(400).json({ success: false, msg: "No image uploaded" });
-  }
-
-  const imageValidation = validateImageFile(file);
-  if (!imageValidation.valid) {
-    return res.status(400).json({ success: false, msg: imageValidation.error || "Invalid image" });
+  const validation = validator(file);
+  if (!validation.valid) {
+    throw new UploadError(400, validation.error || "Invalid file");
   }
 
   if (conversationId) {
     if (!mongoose.Types.ObjectId.isValid(conversationId)) {
-      return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+      throw new UploadError(400, "Invalid conversationId");
     }
 
     const conversation = await Conversation.findById(conversationId).select("customerId professionalId");
     if (!conversation) {
-      return res.status(404).json({ success: false, msg: "Conversation not found" });
+      throw new UploadError(404, "Conversation not found");
     }
 
     if (!isConversationParticipant(conversation, userId)) {
-      return res.status(403).json({ success: false, msg: "Not allowed to upload for this conversation" });
+      throw new UploadError(403, "Not allowed to upload for this conversation");
     }
   }
 
   const folder = conversationId || "temp";
   const fileName = generateFileName(file.originalname, userId, `chat/${folder}`);
-  const result = await uploadToS3(file, fileName);
+  return await uploadToS3(file, fileName);
+};
 
-  return res.status(200).json({ success: true, data: result });
+export const uploadChatImage = async (req: Request, res: Response) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, msg: "No image uploaded" });
+  }
+
+  try {
+    const result = await authorizeAndUploadChat(req, req.file, validateImageFile);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    if (error instanceof UploadError) {
+      return res.status(error.status).json({ success: false, msg: error.msg });
+    }
+    throw error;
+  }
+};
+
+export const uploadChatFile = async (req: Request, res: Response) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, msg: "No file uploaded" });
+  }
+
+  const fileType = getFileType(req.file.mimetype);
+  const validator = fileType === "image"
+    ? validateImageFile
+    : fileType === "video"
+    ? validateVideoFile
+    : validateFile;
+
+  try {
+    const result = await authorizeAndUploadChat(req, req.file, validator);
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...result,
+        fileName: req.file.originalname,
+        fileType,
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+      },
+    });
+  } catch (error) {
+    if (error instanceof UploadError) {
+      return res.status(error.status).json({ success: false, msg: error.msg });
+    }
+    throw error;
+  }
+};
+
+export const getConversationInfo = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { conversationId } = req.params;
+
+  if (!userId) {
+    return res.status(401).json({ success: false, msg: "Authentication required" });
+  }
+
+  if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+    return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+  }
+
+  const conversation = await Conversation.findById(conversationId)
+    .populate("customerId", "name email businessInfo profileImage createdAt")
+    .populate("professionalId", "name email businessInfo profileImage createdAt")
+    .populate("bookingId", "bookingNumber status bookingType");
+
+  if (!conversation) {
+    return res.status(404).json({ success: false, msg: "Conversation not found" });
+  }
+
+  if (!isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed to access this conversation" });
+  }
+
+  const customerId = getIdString(conversation.customerId);
+  const professionalId = getIdString(conversation.professionalId);
+
+  const bookingStats = await Booking.aggregate([
+    {
+      $match: {
+        customer: toObjectId(customerId),
+        professional: toObjectId(professionalId),
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        totalBookings: { $sum: 1 },
+        completedBookings: {
+          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+        },
+        avgCustomerRating: {
+          $avg: "$customerReview.rating",
+        },
+        avgProfessionalRating: {
+          $avg: "$professionalReview.rating",
+        },
+      },
+    },
+  ]);
+
+  const stats = bookingStats[0] || {
+    totalBookings: 0,
+    completedBookings: 0,
+    avgCustomerRating: 0,
+    avgProfessionalRating: 0,
+  };
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      conversation,
+      stats: {
+        totalBookings: stats.totalBookings,
+        completedBookings: stats.completedBookings,
+        avgCustomerRating: Math.round((stats.avgCustomerRating || 0) * 10) / 10,
+        avgProfessionalRating: Math.round((stats.avgProfessionalRating || 0) * 10) / 10,
+      },
+    },
+  });
 };
