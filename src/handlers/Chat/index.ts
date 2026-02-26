@@ -293,10 +293,12 @@ export const getConversationMessages = async (
   const hasMore = messagesDesc.length === limit;
   const nextCursor = hasMore && messagesRaw.length > 0 ? String(messagesRaw[0]._id) : null;
 
-  // Replace private S3 URLs with presigned URLs so the browser can load them
+  // Replace private S3 URLs with presigned URLs so the browser can load them.
+  // Only sign keys that belong to this conversation (chat/{conversationId}/…).
+  const expectedKeyPrefix = `chat/${conversationId}/`;
   const signS3Url = async (url: string): Promise<string> => {
     const key = parseS3KeyFromUrl(url);
-    if (!key || !key.startsWith("chat/")) return url;
+    if (!key || !key.startsWith(expectedKeyPrefix)) return url;
     try {
       return await getPresignedUrl(key, 3600);
     } catch {
