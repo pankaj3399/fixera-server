@@ -27,6 +27,11 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       selectedExtraOptions,
       paymentAtCheckout,
     } = req.body;
+    const paymentAtCheckoutRequested =
+      paymentAtCheckout === true ||
+      paymentAtCheckout === 1 ||
+      paymentAtCheckout === "1" ||
+      paymentAtCheckout === "true";
 
     // Validate required fields
     if (!bookingType || (bookingType !== 'professional' && bookingType !== 'project')) {
@@ -47,6 +52,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       return res.status(400).json({
         success: false,
         msg: "Project ID is required for project bookings"
+      });
+    }
+
+    if (bookingType === "professional" && paymentAtCheckoutRequested) {
+      return res.status(400).json({
+        success: false,
+        msg: "paymentAtCheckout is not allowed for professional bookings",
       });
     }
 
@@ -147,6 +159,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.professional = project.professionalId;
 
       let fallbackTeamMembers: mongoose.Types.ObjectId[] | null = null;
+      let normalizedProjectResourceIds: string[] = [];
       // Validate and normalize resource IDs, filtering out invalid entries and duplicates
       if (project.resources && Array.isArray(project.resources) && project.resources.length > 0) {
         const seenIds = new Set<string>();
@@ -166,12 +179,24 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           if (seenIds.has(idStr)) continue;
 
           seenIds.add(idStr);
+          normalizedProjectResourceIds.push(idStr);
           validTeamMembers.push(new mongoose.Types.ObjectId(idStr));
         }
 
         if (validTeamMembers.length > 0) {
           fallbackTeamMembers = validTeamMembers;
         }
+      }
+
+      if (
+        !Array.isArray(project.resources) ||
+        project.resources.length === 0 ||
+        normalizedProjectResourceIds.length === 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          msg: "Project has no valid team resources configured",
+        });
       }
 
       const rawStartDate =
@@ -260,7 +285,17 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         bookingData.assignedTeamMembers = fallbackTeamMembers;
       }
 
-      const wantsPaymentAtCheckout = paymentAtCheckout === true;
+      if (
+        !Array.isArray(bookingData.assignedTeamMembers) ||
+        bookingData.assignedTeamMembers.length === 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          msg: "Unable to create booking because no team resources are available",
+        });
+      }
+
+      const wantsPaymentAtCheckout = paymentAtCheckoutRequested;
       if (wantsPaymentAtCheckout) {
         if (
           typeof subprojectIndex !== "number" ||
@@ -293,22 +328,25 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
 
         let computedCheckoutAmount = baseUnitAmount;
+        const usageQuantityRaw =
+          typeof estimatedUsage === "number"
+            ? estimatedUsage
+            : typeof estimatedUsage === "string"
+              ? Number.parseFloat(estimatedUsage)
+              : Number.NaN;
+        const normalizedUsageQuantity =
+          pricingType === "unit" && Number.isFinite(usageQuantityRaw)
+            ? usageQuantityRaw
+            : 1;
         if (pricingType === "unit") {
-          const parsedUsage =
-            typeof estimatedUsage === "number"
-              ? estimatedUsage
-              : typeof estimatedUsage === "string"
-                ? Number.parseFloat(estimatedUsage)
-                : Number.NaN;
-
-          if (!Number.isFinite(parsedUsage) || parsedUsage <= 0) {
+          if (!Number.isFinite(normalizedUsageQuantity) || normalizedUsageQuantity <= 0) {
             return res.status(400).json({
               success: false,
               msg: "Estimated usage is required for unit-priced checkout payments",
             });
           }
 
-          computedCheckoutAmount = baseUnitAmount * parsedUsage;
+          computedCheckoutAmount = baseUnitAmount * normalizedUsageQuantity;
         }
 
         const normalizedExtraOptionIndexes = Array.isArray(selectedExtraOptions)
@@ -333,13 +371,34 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
             )
           : [];
 
+        let extraOptionsTotal = 0;
+        const selectedOptionsPrices: Array<{
+          index: number;
+          name: string;
+          unitPrice: number;
+          quantity: number;
+          totalPrice: number;
+        }> = [];
         for (const optionIndex of normalizedExtraOptionIndexes) {
           const option = project.extraOptions?.[optionIndex];
           if (option && typeof option.price === "number") {
+            extraOptionsTotal += option.price;
+            selectedOptionsPrices.push({
+              index: optionIndex,
+              name: option.name || `Option ${optionIndex}`,
+              unitPrice: option.price,
+              quantity: 1,
+              totalPrice: option.price,
+            });
             computedCheckoutAmount += option.price;
           }
         }
 
+        const basePackageSubtotal = Math.round(
+          (baseUnitAmount * normalizedUsageQuantity + Number.EPSILON) * 100
+        ) / 100;
+        const discountsTotal = 0;
+        const taxesTotal = 0;
         const roundedCheckoutAmount =
           Math.round((computedCheckoutAmount + Number.EPSILON) * 100) / 100;
         if (!(roundedCheckoutAmount > 0)) {
@@ -353,6 +412,56 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           amount: roundedCheckoutAmount,
           currency: "EUR",
           description: `Auto-generated checkout quote for ${project.title}`,
+          breakdown: [
+            {
+              item: `checkout_snapshot:selected_package_index:${subprojectIndex}`,
+              quantity: 1,
+              unitPrice: 0,
+              totalPrice: 0,
+            },
+            {
+              item: `checkout_snapshot:selected_package_type:${pricingType}`,
+              quantity: 1,
+              unitPrice: 0,
+              totalPrice: 0,
+            },
+            {
+              item: "Package Base",
+              quantity: normalizedUsageQuantity,
+              unitPrice: baseUnitAmount,
+              totalPrice: basePackageSubtotal,
+            },
+            ...selectedOptionsPrices.map((option) => ({
+              item: `Extra Option #${option.index}: ${option.name}`,
+              quantity: option.quantity,
+              unitPrice: option.unitPrice,
+              totalPrice: option.totalPrice,
+            })),
+            {
+              item: "checkout_snapshot:selected_options_total",
+              quantity: selectedOptionsPrices.length,
+              unitPrice: selectedOptionsPrices.length > 0 ? extraOptionsTotal : 0,
+              totalPrice: extraOptionsTotal,
+            },
+            {
+              item: "checkout_snapshot:discounts_total",
+              quantity: 1,
+              unitPrice: discountsTotal,
+              totalPrice: discountsTotal,
+            },
+            {
+              item: "checkout_snapshot:taxes_total",
+              quantity: 1,
+              unitPrice: taxesTotal,
+              totalPrice: taxesTotal,
+            },
+            {
+              item: "checkout_snapshot:computed_total",
+              quantity: 1,
+              unitPrice: roundedCheckoutAmount,
+              totalPrice: roundedCheckoutAmount,
+            },
+          ],
           submittedAt: new Date(),
         };
         bookingData.status = "quote_accepted";
