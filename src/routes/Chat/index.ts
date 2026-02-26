@@ -7,6 +7,8 @@ import {
   sendMessage,
   markConversationRead,
   uploadChatImage,
+  uploadChatFile,
+  getConversationInfo,
 } from "../../handlers/Chat";
 import { protect } from "../../middlewares/auth";
 import { upload } from "../../utils/s3Upload";
@@ -41,8 +43,10 @@ router.use(protect);
 router.post("/conversations", createOrGetConversation);
 router.get("/conversations", listMyConversations);
 router.get("/conversations/:conversationId/messages", getConversationMessages);
+router.get("/conversations/:conversationId/info", getConversationInfo);
 router.post("/conversations/:conversationId/messages", chatSendLimiter, sendMessage);
 router.patch("/conversations/:conversationId/read", markConversationRead);
 router.post("/upload-image", chatUploadLimiter, upload.single("image"), uploadChatImage);
+router.post("/upload-file", chatUploadLimiter, upload.single("file"), uploadChatFile);
 
 export default router;
