@@ -357,6 +357,10 @@ export const sendMessage = async (req: Request, res: Response) => {
       )
     : [];
 
+  if (Array.isArray(req.body.attachments) && req.body.attachments.length > 5) {
+    return res.status(400).json({ success: false, msg: "A message can include at most 5 attachments" });
+  }
+
   const attachments: IChatAttachment[] = Array.isArray(req.body.attachments)
     ? req.body.attachments.filter((att: any) => {
         return (
@@ -367,7 +371,7 @@ export const sendMessage = async (req: Request, res: Response) => {
           ["image", "document", "video"].includes(att.fileType) &&
           typeof att.mimeType === "string"
         );
-      }).slice(0, 5)
+      })
     : [];
 
   if (!userId) {
@@ -495,109 +499,99 @@ export const markConversationRead = async (
   return res.status(200).json({ success: true, msg: "Conversation marked as read" });
 };
 
-export const uploadChatImage = async (req: Request, res: Response) => {
-  const userId = getRequestUserId(req);
-  const file = req.file;
-  const conversationId = typeof req.body.conversationId === "string" ? req.body.conversationId : undefined;
-
-  if (!userId) {
-    return res.status(401).json({ success: false, msg: "Authentication required" });
-  }
-
-  if (!file) {
-    return res.status(400).json({ success: false, msg: "No image uploaded" });
-  }
-
-  const imageValidation = validateImageFile(file);
-  if (!imageValidation.valid) {
-    return res.status(400).json({ success: false, msg: imageValidation.error || "Invalid image" });
-  }
-
-  if (conversationId) {
-    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
-      return res.status(400).json({ success: false, msg: "Invalid conversationId" });
-    }
-
-    const conversation = await Conversation.findById(conversationId).select("customerId professionalId");
-    if (!conversation) {
-      return res.status(404).json({ success: false, msg: "Conversation not found" });
-    }
-
-    if (!isConversationParticipant(conversation, userId)) {
-      return res.status(403).json({ success: false, msg: "Not allowed to upload for this conversation" });
-    }
-  }
-
-  const folder = conversationId || "temp";
-  const fileName = generateFileName(file.originalname, userId, `chat/${folder}`);
-  const result = await uploadToS3(file, fileName);
-
-  return res.status(200).json({ success: true, data: result });
-};
-
 const getFileType = (mimetype: string): "image" | "document" | "video" => {
   if (mimetype.startsWith("image/")) return "image";
   if (mimetype.startsWith("video/")) return "video";
   return "document";
 };
 
-export const uploadChatFile = async (req: Request, res: Response) => {
+class UploadError {
+  constructor(public status: number, public msg: string) {}
+}
+
+const authorizeAndUploadChat = async (
+  req: Request,
+  file: Express.Multer.File,
+  validator: (file: Express.Multer.File) => { valid: boolean; error?: string },
+) => {
   const userId = getRequestUserId(req);
-  const file = req.file;
   const conversationId = typeof req.body.conversationId === "string" ? req.body.conversationId : undefined;
 
   if (!userId) {
-    return res.status(401).json({ success: false, msg: "Authentication required" });
+    throw new UploadError(401, "Authentication required");
   }
 
-  if (!file) {
-    return res.status(400).json({ success: false, msg: "No file uploaded" });
-  }
-
-  const fileType = getFileType(file.mimetype);
-  let validation: { valid: boolean; error?: string };
-
-  if (fileType === "image") {
-    validation = validateImageFile(file);
-  } else if (fileType === "video") {
-    validation = validateVideoFile(file);
-  } else {
-    validation = validateFile(file);
-  }
-
+  const validation = validator(file);
   if (!validation.valid) {
-    return res.status(400).json({ success: false, msg: validation.error || "Invalid file" });
+    throw new UploadError(400, validation.error || "Invalid file");
   }
 
   if (conversationId) {
     if (!mongoose.Types.ObjectId.isValid(conversationId)) {
-      return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+      throw new UploadError(400, "Invalid conversationId");
     }
 
     const conversation = await Conversation.findById(conversationId).select("customerId professionalId");
     if (!conversation) {
-      return res.status(404).json({ success: false, msg: "Conversation not found" });
+      throw new UploadError(404, "Conversation not found");
     }
 
     if (!isConversationParticipant(conversation, userId)) {
-      return res.status(403).json({ success: false, msg: "Not allowed to upload for this conversation" });
+      throw new UploadError(403, "Not allowed to upload for this conversation");
     }
   }
 
   const folder = conversationId || "temp";
   const fileName = generateFileName(file.originalname, userId, `chat/${folder}`);
-  const result = await uploadToS3(file, fileName);
+  return await uploadToS3(file, fileName);
+};
 
-  return res.status(200).json({
-    success: true,
-    data: {
-      ...result,
-      fileName: file.originalname,
-      fileType,
-      mimeType: file.mimetype,
-      fileSize: file.size,
-    },
-  });
+export const uploadChatImage = async (req: Request, res: Response) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, msg: "No image uploaded" });
+  }
+
+  try {
+    const result = await authorizeAndUploadChat(req, req.file, validateImageFile);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    if (error instanceof UploadError) {
+      return res.status(error.status).json({ success: false, msg: error.msg });
+    }
+    throw error;
+  }
+};
+
+export const uploadChatFile = async (req: Request, res: Response) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, msg: "No file uploaded" });
+  }
+
+  const fileType = getFileType(req.file.mimetype);
+  const validator = fileType === "image"
+    ? validateImageFile
+    : fileType === "video"
+    ? validateVideoFile
+    : validateFile;
+
+  try {
+    const result = await authorizeAndUploadChat(req, req.file, validator);
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...result,
+        fileName: req.file.originalname,
+        fileType,
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+      },
+    });
+  } catch (error) {
+    if (error instanceof UploadError) {
+      return res.status(error.status).json({ success: false, msg: error.msg });
+    }
+    throw error;
+  }
 };
 
 export const getConversationInfo = async (req: Request, res: Response) => {
