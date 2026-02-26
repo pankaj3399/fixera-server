@@ -388,7 +388,21 @@ const ProfessionalInputValueSchema = new Schema({
 // Subproject Schema
 const SubprojectSchema = new Schema<ISubproject>({
   name: { type: String, required: true, maxlength: 100 },
-  description: { type: String, required: true, minlength: 10, maxlength: 300 },
+  description: {
+    type: String,
+    required: true,
+    maxlength: 300,
+    validate: {
+      validator: function(this: any, value: string) {
+        // Only enforce minlength 10 on new creations
+        if (this && this.isNew) {
+          return value != null && value.length >= 10;
+        }
+        return true;
+      },
+      message: "Description must be at least 10 characters.",
+    },
+  },
   projectType: [{ type: String }],
   customProjectType: { type: String, maxlength: 100 },
   professionalInputs: [ProfessionalInputValueSchema],
