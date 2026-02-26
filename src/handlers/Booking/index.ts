@@ -22,7 +22,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       preferredStartTime,
       selectedSubprojectIndex,
       urgency,
-      customerBlocks
+      customerBlocks,
+      estimatedUsage,
+      selectedExtraOptions,
+      paymentAtCheckout,
     } = req.body;
 
     // Validate required fields
@@ -256,6 +259,104 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       if (!bookingData.assignedTeamMembers && fallbackTeamMembers) {
         bookingData.assignedTeamMembers = fallbackTeamMembers;
       }
+
+      const wantsPaymentAtCheckout = paymentAtCheckout === true;
+      if (wantsPaymentAtCheckout) {
+        if (
+          typeof subprojectIndex !== "number" ||
+          !Array.isArray(project.subprojects) ||
+          subprojectIndex < 0 ||
+          subprojectIndex >= project.subprojects.length
+        ) {
+          return res.status(400).json({
+            success: false,
+            msg: "A valid package selection is required for checkout payment",
+          });
+        }
+
+        const selectedSubproject = project.subprojects[subprojectIndex] as any;
+        const pricingType = selectedSubproject?.pricing?.type;
+        const baseUnitAmount = Number(selectedSubproject?.pricing?.amount);
+
+        if (pricingType === "rfq") {
+          return res.status(400).json({
+            success: false,
+            msg: "RFQ packages cannot be paid at checkout",
+          });
+        }
+
+        if (!Number.isFinite(baseUnitAmount) || baseUnitAmount < 0) {
+          return res.status(400).json({
+            success: false,
+            msg: "Selected package does not have a valid checkout price",
+          });
+        }
+
+        let computedCheckoutAmount = baseUnitAmount;
+        if (pricingType === "unit") {
+          const parsedUsage =
+            typeof estimatedUsage === "number"
+              ? estimatedUsage
+              : typeof estimatedUsage === "string"
+                ? Number.parseFloat(estimatedUsage)
+                : Number.NaN;
+
+          if (!Number.isFinite(parsedUsage) || parsedUsage <= 0) {
+            return res.status(400).json({
+              success: false,
+              msg: "Estimated usage is required for unit-priced checkout payments",
+            });
+          }
+
+          computedCheckoutAmount = baseUnitAmount * parsedUsage;
+        }
+
+        const normalizedExtraOptionIndexes = Array.isArray(selectedExtraOptions)
+          ? Array.from(
+              new Set(
+                selectedExtraOptions
+                  .map((value: unknown) =>
+                    typeof value === "number"
+                      ? value
+                      : typeof value === "string"
+                        ? Number.parseInt(value, 10)
+                        : Number.NaN
+                  )
+                  .filter(
+                    (index: number) =>
+                      Number.isInteger(index) &&
+                      index >= 0 &&
+                      Array.isArray(project.extraOptions) &&
+                      index < project.extraOptions.length
+                  )
+              )
+            )
+          : [];
+
+        for (const optionIndex of normalizedExtraOptionIndexes) {
+          const option = project.extraOptions?.[optionIndex];
+          if (option && typeof option.price === "number") {
+            computedCheckoutAmount += option.price;
+          }
+        }
+
+        const roundedCheckoutAmount =
+          Math.round((computedCheckoutAmount + Number.EPSILON) * 100) / 100;
+        if (!(roundedCheckoutAmount > 0)) {
+          return res.status(400).json({
+            success: false,
+            msg: "Checkout payment requires a positive total amount",
+          });
+        }
+
+        bookingData.quote = {
+          amount: roundedCheckoutAmount,
+          currency: "EUR",
+          description: `Auto-generated checkout quote for ${project.title}`,
+          submittedAt: new Date(),
+        };
+        bookingData.status = "quote_accepted";
+      }
     }
 
     const booking = await Booking.create(bookingData);
@@ -269,7 +370,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
 
     return res.status(201).json({
       success: true,
-      msg: "Booking request created successfully",
+      msg:
+        booking.status === "quote_accepted"
+          ? "Booking created. Proceed to payment."
+          : "Booking request created successfully",
       booking
     });
 
