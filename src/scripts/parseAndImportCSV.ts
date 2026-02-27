@@ -134,6 +134,7 @@ function parseDynamicField(fieldText: string): {
             isRequired: fieldName === "designRevisions" ? false : true,
             min: fieldName === "designRevisions" ? 0 : 1,
             max: fieldName === "designRevisions" ? 10 : undefined,
+            isSingleNumber: fieldName === "designRevisions" ? true : false,
           },
         };
       }

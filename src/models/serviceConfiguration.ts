@@ -11,6 +11,7 @@ export interface IDynamicField {
     options?: string[]; // For dropdown fields
     min?: number; // For number and range fields
     max?: number; // For number and range fields
+    isSingleNumber?: boolean;
 }
 
 // Items that can be included in the service
@@ -83,7 +84,8 @@ const DynamicFieldSchema = new Schema<IDynamicField>({
     isRequired: { type: Boolean, default: true },
     options: [{ type: String }],
     min: { type: Number },
-    max: { type: Number }
+    max: { type: Number },
+    isSingleNumber: { type: Boolean, default: false }
 }, { _id: false });
 
 // Included Item Schema
