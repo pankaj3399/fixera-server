@@ -112,6 +112,7 @@ export interface IExtraOption {
 export interface ITermCondition {
   name: string;
   description: string;
+  type?: "condition" | "warning";
   additionalCost?: number;
   isCustom: boolean;
 }
@@ -387,7 +388,21 @@ const ProfessionalInputValueSchema = new Schema({
 // Subproject Schema
 const SubprojectSchema = new Schema<ISubproject>({
   name: { type: String, required: true, maxlength: 100 },
-  description: { type: String, required: true, maxlength: 300 },
+  description: {
+    type: String,
+    required: true,
+    maxlength: 100,
+    validate: {
+      validator: function(this: any, value: string) {
+        // Only enforce minlength 10 on new creations
+        if (this && this.isNew) {
+          return value != null && value.length >= 10;
+        }
+        return true;
+      },
+      message: "Description must be at least 10 characters.",
+    },
+  },
   projectType: [{ type: String }],
   customProjectType: { type: String, maxlength: 100 },
   professionalInputs: [ProfessionalInputValueSchema],
@@ -417,6 +432,7 @@ const ExtraOptionSchema = new Schema<IExtraOption>({
 const TermConditionSchema = new Schema<ITermCondition>({
   name: { type: String, required: true, maxlength: 100 },
   description: { type: String, required: true, maxlength: 500 },
+  type: { type: String, enum: ["condition", "warning"], default: "condition" },
   additionalCost: { type: Number, min: 0 },
   isCustom: { type: Boolean, default: false },
 });
