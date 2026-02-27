@@ -28,7 +28,7 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         }
 
         const configuration = await ServiceConfiguration.findOne(filter)
-            .select('category service areaOfWork pricingModel certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries');
+            .select('category service areaOfWork pricingModel pricingOptions certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries');
 
         if (!configuration) {
             return res.status(404).json({
@@ -37,16 +37,22 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
             });
         }
 
-        // Parse pricingModel to array - split by " or "
-        const pricingModels = configuration.pricingModel ?
-            configuration.pricingModel.split(' or ').map((m: string) => m.trim()) :
-            [];
+        // Build pricingModels for backward compatibility with Step1 dropdown
+        // Prefer structured pricingOptions; fall back to parsing legacy pricingModel string
+        const configObj = configuration.toObject();
+        let pricingModels: string[] = [];
+        if (configObj.pricingOptions && configObj.pricingOptions.length > 0) {
+            pricingModels = configObj.pricingOptions.map((o: any) => o.name);
+        } else if (configObj.pricingModel) {
+            pricingModels = configObj.pricingModel.split(' or ').map((m: string) => m.trim());
+        }
 
         res.status(200).json({
             success: true,
             data: {
-                ...configuration.toObject(),
-                pricingModels // Return as array of original strings from DB
+                ...configObj,
+                pricingModels, // Array of pricing option names for Step1 dropdown
+                pricingOptions: configObj.pricingOptions || [] // Structured options for Step2
             }
         });
     } catch (error: any) {
