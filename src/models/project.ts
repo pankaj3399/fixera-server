@@ -391,7 +391,7 @@ const SubprojectSchema = new Schema<ISubproject>({
   description: {
     type: String,
     required: true,
-    maxlength: 300,
+    maxlength: 100,
     validate: {
       validator: function(this: any, value: string) {
         // Only enforce minlength 10 on new creations
