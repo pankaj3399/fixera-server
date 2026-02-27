@@ -44,7 +44,10 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         if (configObj.pricingOptions && configObj.pricingOptions.length > 0) {
             pricingModels = configObj.pricingOptions.map((o: any) => o.name);
         } else if (configObj.pricingModel) {
-            pricingModels = configObj.pricingModel.split(' or ').map((m: string) => m.trim());
+            pricingModels = configObj.pricingModel
+                .split(/\s+or\s+/i)
+                .map((m: string) => m.trim())
+                .filter(Boolean);
         }
 
         res.status(200).json({
