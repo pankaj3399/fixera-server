@@ -85,9 +85,8 @@ export const createOrGetConversation = async (
 ) => {
   const userId = getRequestUserId(req);
   const userRole = req.user?.role;
-  const { professionalId, bookingId } = req.body as {
+  const { professionalId } = req.body as {
     professionalId?: string;
-    bookingId?: string;
   };
 
   if (!userId) {
@@ -105,10 +104,6 @@ export const createOrGetConversation = async (
     return res.status(400).json({ success: false, msg: "Valid professionalId is required" });
   }
 
-  if (bookingId && !mongoose.Types.ObjectId.isValid(bookingId)) {
-    return res.status(400).json({ success: false, msg: "Invalid bookingId" });
-  }
-
   const professional = await User.findById(professionalId).select("role professionalStatus");
   if (!professional || professional.role !== "professional") {
     return res.status(404).json({ success: false, msg: "Professional not found" });
@@ -121,45 +116,20 @@ export const createOrGetConversation = async (
     });
   }
 
-  if (bookingId) {
-    const booking = await Booking.findById(bookingId).select("customer professional");
-    if (!booking) {
-      return res.status(404).json({ success: false, msg: "Booking not found" });
-    }
-
-    const matchesCustomer = booking.customer?.toString() === userId;
-    const matchesProfessional = booking.professional?.toString() === professionalId;
-
-    if (!matchesCustomer || !matchesProfessional) {
-      return res.status(403).json({
-        success: false,
-        msg: "Booking participants do not match this chat pair",
-      });
-    }
-  }
-
-  const pairQuery = bookingId
-    ? {
-        customerId: toObjectId(userId),
-        professionalId: toObjectId(professionalId),
-        bookingId: toObjectId(bookingId),
-      }
-    : {
-        customerId: toObjectId(userId),
-        professionalId: toObjectId(professionalId),
-        $or: [{ bookingId: { $exists: false } }, { bookingId: null }],
-      };
+  // One conversation per customer-professional pair
+  const pairQuery = {
+    customerId: toObjectId(userId),
+    professionalId: toObjectId(professionalId),
+  };
 
   const populateFields = [
     { path: "customerId", select: "name email businessInfo profileImage" },
     { path: "professionalId", select: "name email businessInfo profileImage" },
-    { path: "bookingId", select: "bookingNumber status bookingType" },
   ];
 
   let conversation = await Conversation.findOne(pairQuery)
     .populate("customerId", "name email businessInfo profileImage")
-    .populate("professionalId", "name email businessInfo profileImage")
-    .populate("bookingId", "bookingNumber status bookingType");
+    .populate("professionalId", "name email businessInfo profileImage");
 
   if (conversation) {
     return res.status(200).json({ success: true, conversation });
@@ -169,7 +139,6 @@ export const createOrGetConversation = async (
     conversation = await Conversation.create({
       customerId: toObjectId(userId),
       professionalId: toObjectId(professionalId),
-      bookingId: bookingId ? toObjectId(bookingId) : undefined,
       initiatedBy: toObjectId(userId),
     });
   } catch (error: any) {
@@ -219,7 +188,6 @@ export const listMyConversations = async (
     Conversation.find(query)
       .populate("customerId", "name email businessInfo profileImage")
       .populate("professionalId", "name email businessInfo profileImage")
-      .populate("bookingId", "bookingNumber status bookingType")
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -265,8 +233,7 @@ export const getConversationMessages = async (
 
   const conversation = await Conversation.findById(conversationId)
     .populate("customerId", "name email businessInfo profileImage")
-    .populate("professionalId", "name email businessInfo profileImage")
-    .populate("bookingId", "bookingNumber status bookingType");
+    .populate("professionalId", "name email businessInfo profileImage");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -610,8 +577,7 @@ export const getConversationInfo = async (req: Request, res: Response) => {
 
   const conversation = await Conversation.findById(conversationId)
     .populate("customerId", "name email businessInfo profileImage createdAt")
-    .populate("professionalId", "name email businessInfo profileImage createdAt")
-    .populate("bookingId", "bookingNumber status bookingType");
+    .populate("professionalId", "name email businessInfo profileImage createdAt");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -638,8 +604,14 @@ export const getConversationInfo = async (req: Request, res: Response) => {
         completedBookings: {
           $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
         },
-        avgCustomerRating: {
-          $avg: "$customerReview.rating",
+        avgCommunication: {
+          $avg: "$customerReview.communicationLevel",
+        },
+        avgValueOfDelivery: {
+          $avg: "$customerReview.valueOfDelivery",
+        },
+        avgQualityOfService: {
+          $avg: "$customerReview.qualityOfService",
         },
         avgProfessionalRating: {
           $avg: "$professionalReview.rating",
@@ -651,9 +623,17 @@ export const getConversationInfo = async (req: Request, res: Response) => {
   const stats = bookingStats[0] || {
     totalBookings: 0,
     completedBookings: 0,
-    avgCustomerRating: 0,
+    avgCommunication: 0,
+    avgValueOfDelivery: 0,
+    avgQualityOfService: 0,
     avgProfessionalRating: 0,
   };
+
+  const avgCom = stats.avgCommunication || 0;
+  const avgVal = stats.avgValueOfDelivery || 0;
+  const avgQual = stats.avgQualityOfService || 0;
+  const hasCustomerRatings = avgCom > 0 || avgVal > 0 || avgQual > 0;
+  const avgCustomerRating = hasCustomerRatings ? (avgCom + avgVal + avgQual) / 3 : 0;
 
   return res.status(200).json({
     success: true,
@@ -662,7 +642,10 @@ export const getConversationInfo = async (req: Request, res: Response) => {
       stats: {
         totalBookings: stats.totalBookings,
         completedBookings: stats.completedBookings,
-        avgCustomerRating: Math.round((stats.avgCustomerRating || 0) * 10) / 10,
+        avgCustomerRating: Math.round(avgCustomerRating * 10) / 10,
+        avgCommunication: Math.round(avgCom * 10) / 10,
+        avgValueOfDelivery: Math.round(avgVal * 10) / 10,
+        avgQualityOfService: Math.round(avgQual * 10) / 10,
         avgProfessionalRating: Math.round((stats.avgProfessionalRating || 0) * 10) / 10,
       },
     },

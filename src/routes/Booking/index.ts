@@ -10,6 +10,7 @@ import {
   cancelBooking
 } from '../../handlers/Booking';
 import { respondToQuoteWithPayment, ensurePaymentIntent, updateBookingStatusWithPayment } from '../../handlers/Booking/payment-integration';
+import { submitCustomerReview, submitProfessionalReview, replyToCustomerReview } from '../../handlers/Booking/reviews';
 import { protect } from '../../middlewares/auth';
 
 const router = express.Router();
@@ -44,5 +45,10 @@ router.put('/:bookingId/status', updateBookingStatusWithPayment);
 
 // Cancel booking
 router.post('/:bookingId/cancel', cancelBooking);
+
+// Reviews
+router.post('/:bookingId/customer-review', submitCustomerReview);
+router.post('/:bookingId/professional-review', submitProfessionalReview);
+router.post('/:bookingId/customer-review/reply', replyToCustomerReview);
 
 export default router;
