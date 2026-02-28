@@ -22,6 +22,13 @@ export interface IIncludedItem {
     dynamicField?: IDynamicField; // Configuration for dynamic field
 }
 
+// Structured pricing option
+export interface IPricingOption {
+    name: string; // e.g., "Total price", "Per m²"
+    pricingType: 'fixed_price' | 'price_per_unit'; // Type of pricing
+    unit?: string; // e.g., "m²", "hour", "room" (only for price_per_unit)
+}
+
 // Extra options/add-ons
 export interface IExtraOption {
     name: string;
@@ -43,7 +50,8 @@ export interface IServiceConfiguration extends Document {
 
     // Admin-configurable fields
     areaOfWork?: string; // e.g., "Strip Foundations", "Raft Foundation"
-    pricingModel: string; // e.g., "Total price", "Total price or m² of material"
+    pricingModel?: string; // Legacy: e.g., "Total price", "Total price or m² of material"
+    pricingOptions: IPricingOption[]; // Structured pricing options
     icon?: string; // Icon identifier (e.g., "Hammer", "Wrench")
     certificationRequired: boolean;
     requiredCertifications?: string[]; // Specific certification types required
@@ -96,6 +104,31 @@ const IncludedItemSchema = new Schema<IIncludedItem>({
     dynamicField: { type: DynamicFieldSchema }
 }, { _id: false });
 
+// Pricing Option Schema
+const PricingOptionSchema = new Schema<IPricingOption>({
+    name: { type: String, required: true },
+    pricingType: {
+        type: String,
+        enum: ['fixed_price', 'price_per_unit'],
+        required: true
+    },
+    unit: {
+        type: String,
+        required: [function(this: IPricingOption) { return this.pricingType === 'price_per_unit'; }, 'Unit is required for price_per_unit pricing type'],
+        validate: {
+            validator: function(this: IPricingOption, value: string) {
+                if (this.pricingType === 'fixed_price' && value && value.trim()) return false;
+                if (this.pricingType === 'price_per_unit' && (!value || !value.trim())) return false;
+                return true;
+            },
+            message: function(this: any) {
+                if (this.pricingType === 'fixed_price') return 'Unit must be empty for fixed_price pricing type';
+                return 'Unit is required for price_per_unit pricing type';
+            }
+        }
+    }
+}, { _id: false });
+
 // Extra Option Schema
 const ExtraOptionSchema = new Schema<IExtraOption>({
     name: { type: String, required: true },
@@ -117,7 +150,8 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
     // Admin-configurable fields
     areaOfWork: { type: String },
-    pricingModel: { type: String, required: true },
+    pricingModel: { type: String }, // Legacy field, no longer required
+    pricingOptions: { type: [PricingOptionSchema], default: [] },
     icon: { type: String },
     certificationRequired: { type: Boolean, default: false },
     requiredCertifications: [{ type: String, default: [] }],

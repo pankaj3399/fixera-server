@@ -21,6 +21,16 @@ export const getActiveServiceCategories = async (
       .select("category service areaOfWork pricingModel certificationRequired icon")
       .sort({ category: 1, service: 1 });
 
+    // Category-level icon mapping
+    const categoryIconMap: Record<string, string> = {
+      "Small tasks": "Wrench",
+      "Interior": "Palette",
+      "Exterior": "Building",
+      "Outdoor work": "TreePine",
+      "Renovation": "Hammer",
+      "Inspections": "Shield",
+    };
+
     // Group by category
     const categoriesMap = new Map<string, any>();
 
@@ -32,6 +42,7 @@ export const getActiveServiceCategories = async (
           name: category,
           slug: category.toLowerCase().replace(/\s+/g, "-"),
           description: `Professional ${category.toLowerCase()} services`,
+          icon: categoryIconMap[category] || "Wrench",
           services: [],
         });
       }
