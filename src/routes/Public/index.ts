@@ -48,6 +48,8 @@ publicRouter
   .get(schedulingRateLimiter, getProjectScheduleWindow);
 
 // Professional profile and reviews (public)
-publicRouter.route("/professionals/:professionalId/reviews").get(getProfessionalReviews);
+publicRouter
+  .route("/professionals/:professionalId/reviews")
+  .get(schedulingRateLimiter, getProfessionalReviews);
 
 export default publicRouter;

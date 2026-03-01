@@ -3,6 +3,8 @@ import Booking from "../../models/booking";
 import User from "../../models/user";
 import mongoose from "mongoose";
 
+const MAX_COMMENT_LENGTH = 1000;
+
 // Customer submits a review for the professional (3 categories + text)
 export const submitCustomerReview = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -19,6 +21,12 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
       if (!val || typeof val !== "number" || val < 1 || val > 5 || !Number.isInteger(val)) {
         return res.status(400).json({ success: false, msg: `${label} must be an integer between 1 and 5` });
       }
+    }
+
+    // Validate comment length
+    const trimmedComment = typeof comment === "string" ? comment.trim() : undefined;
+    if (trimmedComment && trimmedComment.length > MAX_COMMENT_LENGTH) {
+      return res.status(400).json({ success: false, msg: `Comment must be ${MAX_COMMENT_LENGTH} characters or less` });
     }
 
     const booking = await Booking.findById(bookingId);
@@ -42,7 +50,7 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
       communicationLevel,
       valueOfDelivery,
       qualityOfService,
-      comment: comment?.trim() || undefined,
+      comment: trimmedComment || undefined,
       reviewedAt: new Date(),
     };
 
@@ -74,6 +82,12 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
       return res.status(400).json({ success: false, msg: "Rating must be an integer between 1 and 5" });
     }
 
+    // Validate comment length
+    const trimmedComment = typeof comment === "string" ? comment.trim() : undefined;
+    if (trimmedComment && trimmedComment.length > MAX_COMMENT_LENGTH) {
+      return res.status(400).json({ success: false, msg: `Comment must be ${MAX_COMMENT_LENGTH} characters or less` });
+    }
+
     const booking = await Booking.findById(bookingId);
     if (!booking) {
       return res.status(404).json({ success: false, msg: "Booking not found" });
@@ -93,7 +107,7 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
 
     booking.professionalReview = {
       rating,
-      comment: comment?.trim() || undefined,
+      comment: trimmedComment || undefined,
       reviewedAt: new Date(),
     };
 
@@ -174,7 +188,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
       return res.status(400).json({ success: false, msg: "Invalid professional ID" });
     }
 
-    const professional = await User.findById(professionalId).select("name businessInfo profileImage serviceCategories hourlyRate createdAt location professionalStatus");
+    const professional = await User.findById(professionalId).select("name role businessInfo profileImage serviceCategories hourlyRate createdAt location professionalStatus");
     if (!professional || professional.role !== "professional" || professional.professionalStatus !== "approved") {
       return res.status(404).json({ success: false, msg: "Professional not found" });
     }
