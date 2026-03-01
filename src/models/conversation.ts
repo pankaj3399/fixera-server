@@ -4,7 +4,6 @@ export interface IConversation extends Document {
   _id: Types.ObjectId;
   customerId: Types.ObjectId;
   professionalId: Types.ObjectId;
-  bookingId?: Types.ObjectId;
   initiatedBy: Types.ObjectId;
   status: "active" | "archived";
   lastMessageAt?: Date;
@@ -27,11 +26,6 @@ const ConversationSchema = new Schema<IConversation>(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-    },
-    bookingId: {
-      type: Schema.Types.ObjectId,
-      ref: "Booking",
-      required: false,
     },
     initiatedBy: {
       type: Schema.Types.ObjectId,
@@ -77,11 +71,8 @@ const ConversationSchema = new Schema<IConversation>(
 ConversationSchema.index({ customerId: 1, lastMessageAt: -1 });
 ConversationSchema.index({ professionalId: 1, lastMessageAt: -1 });
 ConversationSchema.index(
-  { customerId: 1, professionalId: 1, bookingId: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { bookingId: { $type: "objectId" } },
-  }
+  { customerId: 1, professionalId: 1 },
+  { unique: true }
 );
 
 const Conversation = model<IConversation>("Conversation", ConversationSchema);

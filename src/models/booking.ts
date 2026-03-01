@@ -170,9 +170,15 @@ export interface IBooking extends Document {
 
   // Reviews and ratings (after completion)
   customerReview?: {
-    rating: number; // 1-5
+    communicationLevel: number; // 1-5
+    valueOfDelivery: number; // 1-5
+    qualityOfService: number; // 1-5
     comment?: string;
     reviewedAt: Date;
+    reply?: {
+      comment: string;
+      repliedAt: Date;
+    };
   };
   professionalReview?: {
     rating: number; // 1-5
@@ -515,7 +521,17 @@ const BookingSchema = new Schema({
 
   // Reviews
   customerReview: {
-    rating: {
+    communicationLevel: {
+      type: Number,
+      min: 1,
+      max: 5
+    },
+    valueOfDelivery: {
+      type: Number,
+      min: 1,
+      max: 5
+    },
+    qualityOfService: {
       type: Number,
       min: 1,
       max: 5
@@ -527,6 +543,15 @@ const BookingSchema = new Schema({
     reviewedAt: {
       type: Date,
       default: Date.now
+    },
+    reply: {
+      comment: {
+        type: String,
+        maxlength: 1000
+      },
+      repliedAt: {
+        type: Date
+      }
     }
   },
   professionalReview: {
@@ -648,6 +673,7 @@ BookingSchema.index({ assignedTeamMembers: 1 });
 // Compound index for schedule engine blocked data queries
 BookingSchema.index({ assignedTeamMembers: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
+BookingSchema.index({ professional: 1, status: 1, 'customerReview.communicationLevel': 1 }); // Reviews query
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 

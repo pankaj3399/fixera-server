@@ -9,6 +9,7 @@ import {
   getProjectTeamAvailability,
   getProjectWorkingHours,
 } from "../../handlers/Project";
+import { getProfessionalReviews } from "../../handlers/Booking/reviews";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -45,5 +46,10 @@ publicRouter
 publicRouter
   .route("/projects/:id/schedule-window")
   .get(schedulingRateLimiter, getProjectScheduleWindow);
+
+// Professional profile and reviews (public)
+publicRouter
+  .route("/professionals/:professionalId/reviews")
+  .get(schedulingRateLimiter, getProfessionalReviews);
 
 export default publicRouter;
