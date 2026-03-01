@@ -673,6 +673,7 @@ BookingSchema.index({ assignedTeamMembers: 1 });
 // Compound index for schedule engine blocked data queries
 BookingSchema.index({ assignedTeamMembers: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
+BookingSchema.index({ professional: 1, status: 1, 'customerReview.communicationLevel': 1 }); // Reviews query
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 
