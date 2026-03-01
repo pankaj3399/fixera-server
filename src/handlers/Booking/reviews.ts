@@ -139,8 +139,8 @@ export const replyToCustomerReview = async (req: Request, res: Response, next: N
       return res.status(400).json({ success: false, msg: "Reply comment is required" });
     }
 
-    if (comment.trim().length > 1000) {
-      return res.status(400).json({ success: false, msg: "Reply comment must be 1000 characters or less" });
+    if (comment.trim().length > MAX_COMMENT_LENGTH) {
+      return res.status(400).json({ success: false, msg: `Reply comment must be ${MAX_COMMENT_LENGTH} characters or less` });
     }
 
     const booking = await Booking.findById(bookingId);
