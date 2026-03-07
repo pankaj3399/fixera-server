@@ -1,7 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 import Booking from "../../models/booking";
 import User from "../../models/user";
+import Conversation from "../../models/conversation";
+import ChatMessage from "../../models/chatMessage";
 import mongoose from "mongoose";
+import { moderateText } from "../../utils/contentModeration";
 
 const MAX_COMMENT_LENGTH = 1000;
 
@@ -27,6 +30,14 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
     const trimmedComment = typeof comment === "string" ? comment.trim() : undefined;
     if (trimmedComment && trimmedComment.length > MAX_COMMENT_LENGTH) {
       return res.status(400).json({ success: false, msg: `Comment must be ${MAX_COMMENT_LENGTH} characters or less` });
+    }
+
+    // Profanity filter
+    if (trimmedComment) {
+      const moderation = moderateText(trimmedComment);
+      if (!moderation.passed) {
+        return res.status(400).json({ success: false, msg: "Your review contains inappropriate language. Please revise." });
+      }
     }
 
     const booking = await Booking.findById(bookingId);
@@ -55,6 +66,62 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
     };
 
     await booking.save();
+
+    // Send review notification as system message in chat
+    try {
+      const professionalId = booking.professional?.toString();
+      if (professionalId && userId) {
+        const customer = await User.findById(userId).select("name").lean();
+        const avgRating = Math.round(((communicationLevel + valueOfDelivery + qualityOfService) / 3) * 10) / 10;
+
+        // Find or create conversation
+        let conversation = await Conversation.findOne({
+          customerId: new mongoose.Types.ObjectId(userId),
+          professionalId: new mongoose.Types.ObjectId(professionalId),
+        });
+
+        if (!conversation) {
+          conversation = await Conversation.create({
+            customerId: new mongoose.Types.ObjectId(userId),
+            professionalId: new mongoose.Types.ObjectId(professionalId),
+            initiatedBy: new mongoose.Types.ObjectId(userId),
+          });
+        }
+
+        // senderId uses the customer who triggered the review; senderRole "system"
+        // marks this as a platform-generated message so the UI renders it differently.
+        await ChatMessage.create({
+          conversationId: conversation._id,
+          senderId: new mongoose.Types.ObjectId(userId),
+          senderRole: "system",
+          messageType: "review_notification",
+          text: `${customer?.name || "Customer"} left a review - ${avgRating.toFixed(1)} avg`,
+          reviewMeta: {
+            bookingId: bookingId,
+            avgRating,
+            communicationLevel,
+            valueOfDelivery,
+            qualityOfService,
+            comment: trimmedComment,
+            customerName: customer?.name || "Customer",
+          },
+          readBy: [{ userId: new mongoose.Types.ObjectId(userId), readAt: new Date() }],
+        });
+
+        // Update conversation with notification preview and bump unread count
+        await Conversation.findByIdAndUpdate(conversation._id, {
+          $set: {
+            lastMessageAt: new Date(),
+            lastMessagePreview: `New review - ${avgRating.toFixed(1)} avg`,
+            lastMessageSenderId: new mongoose.Types.ObjectId(userId),
+            customerUnreadCount: 0,
+          },
+          $inc: { professionalUnreadCount: 1 },
+        });
+      }
+    } catch (notifError) {
+      console.error("Failed to send review notification in chat:", notifError);
+    }
 
     return res.status(200).json({
       success: true,
@@ -86,6 +153,14 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
     const trimmedComment = typeof comment === "string" ? comment.trim() : undefined;
     if (trimmedComment && trimmedComment.length > MAX_COMMENT_LENGTH) {
       return res.status(400).json({ success: false, msg: `Comment must be ${MAX_COMMENT_LENGTH} characters or less` });
+    }
+
+    // Profanity filter
+    if (trimmedComment) {
+      const moderation = moderateText(trimmedComment);
+      if (!moderation.passed) {
+        return res.status(400).json({ success: false, msg: "Your review contains inappropriate language. Please revise." });
+      }
     }
 
     const booking = await Booking.findById(bookingId);
@@ -141,6 +216,12 @@ export const replyToCustomerReview = async (req: Request, res: Response, next: N
 
     if (comment.trim().length > MAX_COMMENT_LENGTH) {
       return res.status(400).json({ success: false, msg: `Reply comment must be ${MAX_COMMENT_LENGTH} characters or less` });
+    }
+
+    // Profanity filter
+    const replyModeration = moderateText(comment.trim());
+    if (!replyModeration.passed) {
+      return res.status(400).json({ success: false, msg: "Your reply contains inappropriate language. Please revise." });
     }
 
     const booking = await Booking.findById(bookingId);

@@ -13,15 +13,29 @@ export interface IChatAttachment {
   fileSize?: number;
 }
 
+export type ChatMessageType = "text" | "review_notification";
+
+export interface IReviewNotificationMeta {
+  bookingId: string;
+  avgRating: number;
+  communicationLevel: number;
+  valueOfDelivery: number;
+  qualityOfService: number;
+  comment?: string;
+  customerName: string;
+}
+
 export interface IChatMessage extends Document {
   _id: Types.ObjectId;
   conversationId: Types.ObjectId;
   senderId: Types.ObjectId;
-  senderRole: "customer" | "professional";
+  senderRole: "customer" | "professional" | "system";
+  messageType: ChatMessageType;
   text?: string;
   images: string[];
   attachments: IChatAttachment[];
   readBy: IChatMessageReadReceipt[];
+  reviewMeta?: IReviewNotificationMeta;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -41,7 +55,13 @@ const ChatMessageSchema = new Schema<IChatMessage>(
     },
     senderRole: {
       type: String,
-      enum: ["customer", "professional"],
+      enum: ["customer", "professional", "system"],
+      required: true,
+    },
+    messageType: {
+      type: String,
+      enum: ["text", "review_notification"],
+      default: "text",
       required: true,
     },
     text: {
@@ -74,6 +94,15 @@ const ChatMessageSchema = new Schema<IChatMessage>(
         message: "A message can include at most 5 attachments",
       },
     },
+    reviewMeta: {
+      bookingId: { type: String },
+      avgRating: { type: Number, min: 1, max: 5 },
+      communicationLevel: { type: Number, min: 1, max: 5 },
+      valueOfDelivery: { type: Number, min: 1, max: 5 },
+      qualityOfService: { type: Number, min: 1, max: 5 },
+      comment: { type: String },
+      customerName: { type: String },
+    },
     readBy: [
       {
         userId: {
@@ -96,6 +125,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
 // document-level operations (create/save). Mongoose update operations
 // (updateOne/findOneAndUpdate) do not invoke this with document context.
 ChatMessageSchema.path("text").validate(function (value: string | undefined) {
+  if (this.messageType === "review_notification") return true;
   const hasText = typeof value === "string" && value.trim().length > 0;
   const hasImages = Array.isArray(this.images) && this.images.length > 0;
   const hasAttachments = Array.isArray(this.attachments) && this.attachments.length > 0;
