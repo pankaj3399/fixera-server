@@ -88,7 +88,9 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
           });
         }
 
-        const systemMessage = await ChatMessage.create({
+        // senderId uses the customer who triggered the review; senderRole "system"
+        // marks this as a platform-generated message so the UI renders it differently.
+        await ChatMessage.create({
           conversationId: conversation._id,
           senderId: new mongoose.Types.ObjectId(userId),
           senderRole: "system",

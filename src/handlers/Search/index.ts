@@ -7,6 +7,46 @@ import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngin
 
 export { getPopularServices } from "./getPopularServices";
 
+async function aggregateProfessionalRatings(
+  ids: (string | Types.ObjectId)[]
+): Promise<Map<string, { avgRating: number; totalReviews: number }>> {
+  if (ids.length === 0) return new Map();
+
+  const objectIds = ids.map((id) =>
+    typeof id === "string" ? new Types.ObjectId(id) : id
+  );
+
+  const results = await Booking.aggregate([
+    {
+      $match: {
+        professional: { $in: objectIds },
+        status: "completed",
+        "customerReview.communicationLevel": { $exists: true },
+      },
+    },
+    {
+      $group: {
+        _id: "$professional",
+        avgCommunication: { $avg: "$customerReview.communicationLevel" },
+        avgValueOfDelivery: { $avg: "$customerReview.valueOfDelivery" },
+        avgQualityOfService: { $avg: "$customerReview.qualityOfService" },
+        totalReviews: { $sum: 1 },
+      },
+    },
+  ]);
+
+  return new Map(
+    results.map((r: any) => {
+      const avg =
+        (r.avgCommunication + r.avgValueOfDelivery + r.avgQualityOfService) / 3;
+      return [
+        r._id.toString(),
+        { avgRating: Math.round(avg * 10) / 10, totalReviews: r.totalReviews },
+      ];
+    })
+  );
+}
+
 /**
  * Unified search endpoint for professionals and projects
  * Supports filtering by query, location, price range, category, and availability
@@ -154,33 +194,7 @@ async function searchProfessionals(
 
     // Aggregate ratings for returned professionals
     const professionalIds = professionals.map((p: any) => p._id);
-    const ratingAggregation = professionalIds.length > 0
-      ? await Booking.aggregate([
-          {
-            $match: {
-              professional: { $in: professionalIds },
-              status: "completed",
-              "customerReview.communicationLevel": { $exists: true },
-            },
-          },
-          {
-            $group: {
-              _id: "$professional",
-              avgCommunication: { $avg: "$customerReview.communicationLevel" },
-              avgValueOfDelivery: { $avg: "$customerReview.valueOfDelivery" },
-              avgQualityOfService: { $avg: "$customerReview.qualityOfService" },
-              totalReviews: { $sum: 1 },
-            },
-          },
-        ])
-      : [];
-
-    const ratingMap = new Map(
-      ratingAggregation.map((r: any) => {
-        const avg = (r.avgCommunication + r.avgValueOfDelivery + r.avgQualityOfService) / 3;
-        return [r._id.toString(), { avgRating: Math.round(avg * 10) / 10, totalReviews: r.totalReviews }];
-      })
-    );
+    const ratingMap = await aggregateProfessionalRatings(professionalIds);
 
     // If location filter is present, prioritize exact matches
     const hasAnyAvailability = (availability?: Record<string, any>) =>
@@ -563,33 +577,7 @@ async function searchProjects(
       : [];
 
     // Aggregate ratings for project professionals
-    const projectProfRatings = professionalIds.length > 0
-      ? await Booking.aggregate([
-          {
-            $match: {
-              professional: { $in: professionalIds.map((id) => new Types.ObjectId(id)) },
-              status: "completed",
-              "customerReview.communicationLevel": { $exists: true },
-            },
-          },
-          {
-            $group: {
-              _id: "$professional",
-              avgCommunication: { $avg: "$customerReview.communicationLevel" },
-              avgValueOfDelivery: { $avg: "$customerReview.valueOfDelivery" },
-              avgQualityOfService: { $avg: "$customerReview.qualityOfService" },
-              totalReviews: { $sum: 1 },
-            },
-          },
-        ])
-      : [];
-
-    const projectRatingMap = new Map(
-      projectProfRatings.map((r: any) => {
-        const avg = (r.avgCommunication + r.avgValueOfDelivery + r.avgQualityOfService) / 3;
-        return [r._id.toString(), { avgRating: Math.round(avg * 10) / 10, totalReviews: r.totalReviews }];
-      })
-    );
+    const projectRatingMap = await aggregateProfessionalRatings(professionalIds);
 
     // Create a lookup map for quick access
     const professionalMap = new Map(
