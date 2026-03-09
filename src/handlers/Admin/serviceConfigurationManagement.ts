@@ -69,10 +69,6 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
     try {
         const configurationData = req.body;
 
-        // Auto-sync certificationRequired with requiredCertifications
-        const certs = configurationData.requiredCertifications;
-        configurationData.certificationRequired = Array.isArray(certs) && certs.length > 0;
-
         // Check if configuration already exists
         const existing = await ServiceConfiguration.findOne({
             category: configurationData.category,
@@ -111,10 +107,6 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
     try {
         const { id } = req.params;
         const updateData = req.body;
-
-        // Auto-sync certificationRequired with requiredCertifications
-        const certs = updateData.requiredCertifications;
-        updateData.certificationRequired = Array.isArray(certs) && certs.length > 0;
 
         const configuration = await ServiceConfiguration.findByIdAndUpdate(
             id,
