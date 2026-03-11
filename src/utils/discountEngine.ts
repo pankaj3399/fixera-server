@@ -31,8 +31,8 @@ export interface DiscountBreakdown {
 }
 
 const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
-
-const STRIPE_MINIMUM = 0.50; // Minimum charge amount in EUR
+const hasNumericCap = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
 
 /**
  * Calculate auto-discount for a booking based on loyalty tier and repeat-buyer config
@@ -71,7 +71,7 @@ export const calculateAutoDiscount = async (
         let discountAmount = roundToTwo(quoteAmount * (discountPct / 100));
         let capped = false;
 
-        if (tier.maxDiscountAmount && discountAmount > tier.maxDiscountAmount) {
+        if (hasNumericCap(tier.maxDiscountAmount) && discountAmount > tier.maxDiscountAmount) {
           discountAmount = tier.maxDiscountAmount;
           capped = true;
         }
@@ -86,6 +86,7 @@ export const calculateAutoDiscount = async (
     }
   } catch (error) {
     console.error('Discount Engine: Failed to calculate loyalty discount:', error);
+    throw error;
   }
 
   // 2. Calculate repeat-buyer discount
@@ -106,7 +107,7 @@ export const calculateAutoDiscount = async (
           let discountAmount = roundToTwo(quoteAmount * (project.repeatBuyerDiscount.percentage / 100));
           let capped = false;
 
-          if (project.repeatBuyerDiscount.maxDiscountAmount &&
+          if (hasNumericCap(project.repeatBuyerDiscount.maxDiscountAmount) &&
               discountAmount > project.repeatBuyerDiscount.maxDiscountAmount) {
             discountAmount = project.repeatBuyerDiscount.maxDiscountAmount;
             capped = true;
@@ -122,12 +123,13 @@ export const calculateAutoDiscount = async (
       }
     } catch (error) {
       console.error('Discount Engine: Failed to calculate repeat-buyer discount:', error);
+      throw error;
     }
   }
 
   // 3. Combine discounts (additive)
   const totalDiscount = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount);
-  const finalAmount = roundToTwo(Math.max(STRIPE_MINIMUM, quoteAmount - totalDiscount));
+  const finalAmount = roundToTwo(Math.max(0, quoteAmount - totalDiscount));
 
   if (totalDiscount > 0) {
     console.log(
