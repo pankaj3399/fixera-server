@@ -7,7 +7,8 @@ import {
   submitPostBookingAnswers,
   submitQuote,
   updateBookingStatus,
-  cancelBooking
+  cancelBooking,
+  getDiscountPreview
 } from '../../handlers/Booking';
 import { respondToQuoteWithPayment, ensurePaymentIntent, updateBookingStatusWithPayment } from '../../handlers/Booking/payment-integration';
 import { submitCustomerReview, submitProfessionalReview, replyToCustomerReview } from '../../handlers/Booking/reviews';
@@ -45,6 +46,9 @@ router.put('/:bookingId/status', updateBookingStatusWithPayment);
 
 // Cancel booking
 router.post('/:bookingId/cancel', cancelBooking);
+
+// Discount preview
+router.get('/:bookingId/discount-preview', getDiscountPreview);
 
 // Reviews
 router.post('/:bookingId/customer-review', submitCustomerReview);

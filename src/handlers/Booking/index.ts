@@ -8,6 +8,7 @@ import {
   buildProjectScheduleWindow,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
+import { calculateAutoDiscount } from "../../utils/discountEngine";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -1059,6 +1060,77 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
     });
   } catch (error: any) {
     console.error('Get my payments error:', error);
+    next(error);
+  }
+};
+
+// Get discount preview for a booking before payment
+export const getDiscountPreview = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user?._id;
+    const { bookingId } = req.params;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    const booking = await Booking.findById(bookingId)
+      .populate('customer', 'totalSpent')
+      .populate('professional', '_id')
+      .populate('project', '_id professionalId repeatBuyerDiscount');
+
+    if (!booking) {
+      return res.status(404).json({ success: false, msg: "Booking not found" });
+    }
+
+    // Verify the customer owns this booking
+    const customerId = (booking.customer as any)?._id || booking.customer;
+    if (customerId.toString() !== userId.toString()) {
+      return res.status(403).json({ success: false, msg: "Not authorized" });
+    }
+
+    // Need a quote to calculate discount
+    if (!booking.quote?.amount) {
+      return res.status(400).json({ success: false, msg: "No quote available for this booking" });
+    }
+
+    const customer = booking.customer as any;
+    const professional = booking.professional as any;
+    const project = booking.project as any;
+
+    const professionalId = professional?._id?.toString() || project?.professionalId?.toString() || '';
+
+    const discountBreakdown = await calculateAutoDiscount(
+      customerId.toString(),
+      professionalId,
+      project?._id?.toString() || null,
+      booking.quote.amount,
+      customer.totalSpent || 0
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        originalAmount: discountBreakdown.originalAmount,
+        loyaltyDiscount: {
+          tier: discountBreakdown.loyaltyDiscount.tier,
+          percentage: discountBreakdown.loyaltyDiscount.percentage,
+          amount: discountBreakdown.loyaltyDiscount.amount,
+          capped: discountBreakdown.loyaltyDiscount.capped,
+        },
+        repeatBuyerDiscount: {
+          percentage: discountBreakdown.repeatBuyerDiscount.percentage,
+          amount: discountBreakdown.repeatBuyerDiscount.amount,
+          previousBookings: discountBreakdown.repeatBuyerDiscount.previousBookings,
+          capped: discountBreakdown.repeatBuyerDiscount.capped,
+        },
+        totalDiscount: discountBreakdown.totalDiscount,
+        finalAmount: discountBreakdown.finalAmount,
+        currency: booking.quote.currency || 'EUR',
+      }
+    });
+  } catch (error: any) {
+    console.error('Get discount preview error:', error);
     next(error);
   }
 };
