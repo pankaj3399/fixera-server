@@ -196,7 +196,7 @@ export const getUserReferralStats = async (userId: mongoose.Types.ObjectId) => {
   if (!user) return null;
 
   const referrals = await Referral.find({ referrer: userId })
-    .populate('referredUser', 'name email createdAt')
+    .populate('referredUser', 'name createdAt')
     .sort({ createdAt: -1 })
     .limit(50);
 
