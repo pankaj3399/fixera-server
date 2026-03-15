@@ -134,6 +134,17 @@ export interface IBooking extends Document {
     invoiceNumber?: string;
     invoiceUrl?: string;
     invoiceGeneratedAt?: Date;
+
+    // Auto-discount breakdown
+    discount?: {
+      loyaltyTier: string;
+      loyaltyPercentage: number;
+      loyaltyAmount: number;
+      repeatBuyerPercentage: number;
+      repeatBuyerAmount: number;
+      totalDiscount: number;
+      originalAmount: number;
+    };
   };
 
   // Scheduling
@@ -471,7 +482,18 @@ const BookingSchema = new Schema({
     // Invoice
     invoiceNumber: { type: String },
     invoiceUrl: { type: String },
-    invoiceGeneratedAt: { type: Date }
+    invoiceGeneratedAt: { type: Date },
+
+    // Auto-discount breakdown
+    discount: {
+      loyaltyTier: { type: String },
+      loyaltyPercentage: { type: Number, default: 0 },
+      loyaltyAmount: { type: Number, default: 0 },
+      repeatBuyerPercentage: { type: Number, default: 0 },
+      repeatBuyerAmount: { type: Number, default: 0 },
+      totalDiscount: { type: Number, default: 0 },
+      originalAmount: { type: Number, default: 0 },
+    }
   },
 
   // Scheduling

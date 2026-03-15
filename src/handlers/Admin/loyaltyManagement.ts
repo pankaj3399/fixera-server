@@ -121,6 +121,24 @@ export const updateLoyaltyConfig = async (req: Request, res: Response, next: Nex
         });
       }
 
+      if (tier.discountPercentage !== undefined && tier.discountPercentage !== null) {
+        if (typeof tier.discountPercentage !== 'number' || tier.discountPercentage < 0 || tier.discountPercentage > 50) {
+          return res.status(400).json({
+            success: false,
+            msg: `Discount percentage must be between 0 and 50 for tier ${tier.name}`
+          });
+        }
+      }
+
+      if (tier.maxDiscountAmount !== undefined && tier.maxDiscountAmount !== null) {
+        if (typeof tier.maxDiscountAmount !== 'number' || tier.maxDiscountAmount < 0) {
+          return res.status(400).json({
+            success: false,
+            msg: `Max discount amount must be a positive number for tier ${tier.name}`
+          });
+        }
+      }
+
       if (!Array.isArray(tier.benefits)) {
         return res.status(400).json({
           success: false,

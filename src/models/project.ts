@@ -102,6 +102,13 @@ export interface ISubproject {
   };
 }
 
+export interface IRepeatBuyerDiscount {
+  enabled: boolean;
+  percentage: number; // 1-20% discount for returning customers
+  minPreviousBookings: number; // minimum completed bookings to qualify
+  maxDiscountAmount?: number; // optional cap per booking
+}
+
 export interface IExtraOption {
   name: string;
   description?: string;
@@ -200,6 +207,9 @@ export interface IProject extends Document {
 
   // Step 2: Subprojects (max 5)
   subprojects: ISubproject[];
+
+  // Repeat-buyer discount (per-project setting for returning customers)
+  repeatBuyerDiscount?: IRepeatBuyerDiscount;
 
   // Step 3: Extra Options
   extraOptions: IExtraOption[];
@@ -561,6 +571,14 @@ const ProjectSchema = new Schema<IProject>(
 
     // Step 2: Subprojects
     subprojects: [SubprojectSchema],
+
+    // Repeat-buyer discount
+    repeatBuyerDiscount: {
+      enabled: { type: Boolean, default: false },
+      percentage: { type: Number, min: 1, max: 20, default: 5 },
+      minPreviousBookings: { type: Number, min: 1, default: 1 },
+      maxDiscountAmount: { type: Number, min: 0, default: null },
+    },
 
     // Step 3: Extra Options
     extraOptions: [ExtraOptionSchema],

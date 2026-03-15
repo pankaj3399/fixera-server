@@ -6,6 +6,8 @@ export interface ILoyaltyTier extends Document {
   maxSpendingAmount?: number; // null for highest tier
   pointsPercentage: number; // percentage of booking amount as points (e.g., 5 = 5%)
   bookingBonus: number; // fixed points per completed booking
+  discountPercentage: number; // auto-discount percentage for this tier (e.g., 5 = 5% off bookings)
+  maxDiscountAmount?: number; // maximum discount per booking in currency (null = no cap)
   benefits: string[]; // list of benefits for this tier
   color: string; // hex color for UI
   icon: string; // icon name for UI
@@ -57,6 +59,18 @@ const loyaltyTierSchema = new Schema<ILoyaltyTier>({
     required: true,
     min: 0,
     default: 50
+  },
+  discountPercentage: {
+    type: Number,
+    required: true,
+    min: 0,
+    max: 50,
+    default: 0
+  },
+  maxDiscountAmount: {
+    type: Number,
+    min: 0,
+    default: null
   },
   benefits: [{
     type: String,
@@ -178,6 +192,8 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           maxSpendingAmount: 999.99,
           pointsPercentage: 1, // 1% of booking amount as points
           bookingBonus: 25,
+          discountPercentage: 0, // No auto-discount for Bronze
+          maxDiscountAmount: null,
           benefits: [
             'Standard customer support',
             'Basic booking features',
@@ -194,8 +210,11 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           maxSpendingAmount: 4999.99,
           pointsPercentage: 2, // 2% of booking amount as points
           bookingBonus: 50,
+          discountPercentage: 2, // 2% auto-discount
+          maxDiscountAmount: 25, // Max €25 off per booking
           benefits: [
             '2% cashback in points',
+            '2% booking discount',
             'Priority customer support',
             'Early access to new professionals',
             'Extended booking window'
@@ -211,8 +230,11 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           maxSpendingAmount: 9999.99,
           pointsPercentage: 3, // 3% of booking amount as points
           bookingBonus: 75,
+          discountPercentage: 5, // 5% auto-discount
+          maxDiscountAmount: 75, // Max €75 off per booking
           benefits: [
             '3% cashback in points',
+            '5% booking discount',
             'Free service call fees',
             'Dedicated account manager',
             'Monthly loyalty rewards',
@@ -228,8 +250,11 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           minSpendingAmount: 10000,
           pointsPercentage: 5, // 5% of booking amount as points
           bookingBonus: 100,
+          discountPercentage: 10, // 10% auto-discount
+          maxDiscountAmount: 150, // Max €150 off per booking
           benefits: [
             '5% cashback in points',
+            '10% booking discount',
             'Free cancellations up to 2 hours before',
             'Premium support line',
             'Exclusive seasonal offers',
