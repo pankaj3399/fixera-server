@@ -588,7 +588,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email businessInfo hourlyRate')
-      .populate('project', 'title description pricing category service team postBookingQuestions')
+      .populate('project', 'title description pricing category service team postBookingQuestions professionalId')
       .populate('assignedTeamMembers', 'name email');
 
     if (!booking) {
@@ -598,11 +598,14 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    // Check authorization - only customer or professional can view
+    // Check authorization - only customer, professional, or project owner can view
     const isCustomer = booking.customer._id.toString() === userIdString;
     const isProfessional = booking.professional?._id.toString() === userIdString;
+    // For project bookings, also check if user owns the project
+    const isProjectOwner = booking.bookingType === 'project' && booking.project
+      && (booking.project as any).professionalId?.toString() === userIdString;
 
-    if (!isCustomer && !isProfessional) {
+    if (!isCustomer && !isProfessional && !isProjectOwner) {
       return res.status(403).json({
         success: false,
         msg: "You do not have permission to view this booking"
