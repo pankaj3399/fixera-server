@@ -8,6 +8,7 @@ import twilio from 'twilio';
 import mongoose from "mongoose";
 import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
+import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 
 // Helper function to set secure cookie
 const setTokenCookie = (res: Response, token: string) => {
@@ -39,7 +40,9 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       latitude,
       longitude,
       companyName,
-      vatNumber
+      vatNumber,
+      // Referral
+      referralCode
     } = req.body;
 
     // Comprehensive validation
@@ -187,8 +190,52 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       }
     }
 
+    // Validate referral code before creating user (if provided)
+    let referralValidation: { valid: boolean; referrer?: any; error?: string } | null = null;
+    if (referralCode) {
+      try {
+        referralValidation = await validateReferralCode(referralCode);
+        if (referralValidation.valid && referralValidation.referrer) {
+          userData.referredBy = referralValidation.referrer._id;
+        }
+      } catch (e) {
+        console.warn('Referral validation failed due to transient error, skipping referral:', e);
+        referralValidation = null;
+      }
+    }
+
     // Create user with all fields
     const user = await User.create(userData);
+
+    // Generate referral code for the new user with retry on duplicate key
+    if (user.role === 'customer' || user.role === 'professional') {
+      const maxRetries = 3;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          const userReferralCode = await generateReferralCode(user.name);
+          user.referralCode = userReferralCode;
+          await user.save();
+          break;
+        } catch (e: any) {
+          if (e.code === 11000 && attempt < maxRetries - 1) {
+            continue; // Duplicate key — retry with a new code
+          }
+          console.error('Error generating referral code during signup:', e);
+          break;
+        }
+      }
+    }
+
+    // Create referral record if valid referral code was provided
+    if (referralValidation?.valid && referralValidation.referrer) {
+      try {
+        const forwardedFor = req.headers['x-forwarded-for']?.toString();
+        const ipAddress = (forwardedFor ? forwardedFor.split(',')[0].trim() : '') || req.ip;
+        await createReferral(referralValidation.referrer._id, user._id, referralCode, ipAddress);
+      } catch (e) {
+        console.error('Error creating referral record during signup:', e);
+      }
+    }
 
     // Kick off OTP sends (email + SMS) and welcome email in parallel, but await to report status
     let emailOtpSent = false;
@@ -270,6 +317,10 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       // Customer-specific fields
       customerType: user.customerType,
       location: user.location,
+      // Referral fields
+      referralCode: user.referralCode,
+      referredBy: user.referredBy,
+      referralCredits: user.referralCredits || 0,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };
@@ -492,6 +543,13 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       businessName: user.businessName,
       companyAddress: user.companyAddress,
       location: user.location,
+      // Referral fields
+      referralCode: user.referralCode,
+      referredBy: user.referredBy,
+      referralCredits: user.referralCredits || 0,
+      referralCreditsExpiry: user.referralCreditsExpiry,
+      totalReferrals: user.totalReferrals || 0,
+      completedReferrals: user.completedReferrals || 0,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };

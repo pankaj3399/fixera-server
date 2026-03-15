@@ -30,6 +30,13 @@ import {
 } from "../../handlers/Admin/serviceConfigurationManagement";
 import { getPayments, capturePayment } from "../../handlers/Admin/payments";
 import {
+  getReferralConfig,
+  updateReferralConfig,
+  getReferralAnalytics,
+  getReferralList,
+  revokeReferral
+} from "../../handlers/Admin/referralManagement";
+import {
   getPlatformSettings,
   updatePlatformSettings,
 } from "../../handlers/Admin/platformSettings";
@@ -56,6 +63,13 @@ adminRouter.route('/loyalty/config').put(updateLoyaltyConfig);
 adminRouter.route('/loyalty/recalculate').post(recalculateCustomerTiers);
 adminRouter.route('/loyalty/analytics').get(getLoyaltyAnalytics);
 adminRouter.route('/loyalty/test').post(testLoyaltySystem);
+
+// Referral system management routes
+adminRouter.route('/referral/config').get(getReferralConfig);
+adminRouter.route('/referral/config').put(updateReferralConfig);
+adminRouter.route('/referral/analytics').get(getReferralAnalytics);
+adminRouter.route('/referral/list').get(getReferralList);
+adminRouter.route('/referral/:referralId/revoke').put(revokeReferral);
 
 // Service configuration management routes
 adminRouter.route('/service-configurations').get(getAllServiceConfigurations);

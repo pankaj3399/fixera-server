@@ -119,6 +119,13 @@ export interface IUser extends Document {
     totalSpent?: number;
     totalBookings?: number;
     lastLoyaltyUpdate?: Date;
+    // Referral system fields
+    referralCode?: string;
+    referredBy?: Types.ObjectId;
+    referralCredits?: number;
+    referralCreditsExpiry?: Date;
+    totalReferrals?: number;
+    completedReferrals?: number;
     employee?: {
         companyId?: string;
         invitedBy?: string;
@@ -426,6 +433,37 @@ const UserSchema = new Schema({
         type: Date,
         default: Date.now
     },
+    // Referral system fields
+    referralCode: {
+        type: String,
+        unique: true,
+        sparse: true,
+        index: true
+    },
+    referredBy: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+        required: false
+    },
+    referralCredits: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    referralCreditsExpiry: {
+        type: Date,
+        required: false
+    },
+    totalReferrals: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    completedReferrals: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
     employee: {
         companyId: { type: String, required: false },
         invitedBy: { type: String, required: false },
@@ -576,6 +614,14 @@ UserSchema.pre("save", function (next) {
         this.set("totalSpent", undefined);
         this.set("totalBookings", undefined);
         this.set("lastLoyaltyUpdate", undefined);
+
+        // Referral fields
+        this.set("referralCode", undefined);
+        this.set("referredBy", undefined);
+        this.set("referralCredits", undefined);
+        this.set("referralCreditsExpiry", undefined);
+        this.set("totalReferrals", undefined);
+        this.set("completedReferrals", undefined);
 
         this.set("profileCompletedAt", undefined);
         this.set("professionalOnboardingCompletedAt", undefined);
