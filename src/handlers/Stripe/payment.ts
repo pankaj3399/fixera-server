@@ -24,6 +24,7 @@ import {
 import { calculateVAT } from '../../utils/vat';
 import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
+import { calculateDiscountedPayouts } from '../../utils/discountSystem';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const customerId = (booking.customer as any)?._id || booking.customer;
@@ -238,9 +239,31 @@ export const createPaymentIntent = async (
       commissionPercent = Number.isFinite(parsed) ? parsed : 0;
     }
 
-    const platformCommission = calculatePlatformCommission(totalAmount, commissionPercent);
-    const professionalPayout = totalAmount - platformCommission;
+    // Use hybrid discount absorption model
+    const discountedPayouts = calculateDiscountedPayouts({
+      loyaltyDiscount: {
+        tierName: discountBreakdown.loyaltyDiscount.tier,
+        percentage: discountBreakdown.loyaltyDiscount.percentage,
+        amount: discountBreakdown.loyaltyDiscount.amount,
+        absorbedBy: 'platform',
+      },
+      repeatBuyerDiscount: {
+        percentage: discountBreakdown.repeatBuyerDiscount.percentage,
+        amount: discountBreakdown.repeatBuyerDiscount.amount,
+        completedBookings: discountBreakdown.repeatBuyerDiscount.previousBookings,
+        absorbedBy: 'professional',
+      },
+      totalDiscount: discountBreakdown.totalDiscount,
+      originalAmount: discountBreakdown.originalAmount,
+      discountedAmount: discountBreakdown.finalAmount,
+    }, commissionPercent);
+    const platformCommission = discountedPayouts.platformCommission;
+    const professionalPayout = discountedPayouts.professionalPayout;
     const stripeFee = calculateStripeFee(totalAmount, currency);
+
+    if (discountBreakdown.totalDiscount > 0) {
+      console.log(`💰 Discount applied for booking ${booking._id}: loyalty=${discountBreakdown.loyaltyDiscount.amount}, repeat=${discountBreakdown.repeatBuyerDiscount.amount}, total=${discountBreakdown.totalDiscount}`);
+    }
 
     // Create Payment Intent with immediate charge
     const paymentIntent = await stripe.paymentIntents.create({

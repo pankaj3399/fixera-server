@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
+import { processReferralCompletion } from '../../utils/referralSystem';
 
 const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'rfq',
@@ -221,6 +222,14 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         booking.actualEndDate = booking.actualEndDate || new Date();
         await booking.save();
 
+        // Process referral completion for the customer
+        try {
+          const bookingAmount = booking.payment?.amount || 0;
+          await processReferralCompletion(booking.customer, booking._id, bookingAmount);
+        } catch (e) {
+          console.error('Error processing referral completion:', e);
+        }
+
         return res.json({
           success: true,
           data: {
@@ -243,6 +252,14 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
         await booking.save();
+
+        // Process referral completion for the customer
+        try {
+          const bookingAmount = booking.payment?.amount || 0;
+          await processReferralCompletion(booking.customer, booking._id, bookingAmount);
+        } catch (e) {
+          console.error('Error processing referral completion:', e);
+        }
 
         return res.json({
           success: true,

@@ -33,6 +33,7 @@ export interface DiscountBreakdown {
 const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
 const hasNumericCap = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
+const MINIMUM_PAYMENT_AMOUNT = 0.50; // Stripe minimum in EUR
 
 /**
  * Calculate auto-discount for a booking based on loyalty tier and repeat-buyer config
@@ -129,7 +130,7 @@ export const calculateAutoDiscount = async (
 
   // 3. Combine discounts (additive)
   const totalDiscount = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount);
-  const finalAmount = roundToTwo(Math.max(0, quoteAmount - totalDiscount));
+  const finalAmount = roundToTwo(Math.max(MINIMUM_PAYMENT_AMOUNT, quoteAmount - totalDiscount));
 
   if (totalDiscount > 0) {
     console.log(

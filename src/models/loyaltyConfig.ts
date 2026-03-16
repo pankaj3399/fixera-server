@@ -93,7 +93,7 @@ const loyaltyTierSchema = new Schema<ILoyaltyTier>({
   order: {
     type: Number,
     required: true
-  }
+  },
 });
 
 const loyaltyConfigSchema = new Schema<ILoyaltyConfig>({
@@ -202,7 +202,7 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           color: '#CD7F32',
           icon: 'bronze-medal',
           isActive: true,
-          order: 1
+          order: 1,
         },
         {
           name: 'Silver',
@@ -222,7 +222,7 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           color: '#C0C0C0',
           icon: 'silver-medal',
           isActive: true,
-          order: 2
+          order: 2,
         },
         {
           name: 'Gold',
@@ -243,7 +243,7 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           color: '#FFD700',
           icon: 'gold-medal',
           isActive: true,
-          order: 3
+          order: 3,
         },
         {
           name: 'Platinum',
@@ -264,7 +264,7 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
           color: '#E5E4E2',
           icon: 'crown',
           isActive: true,
-          order: 4
+          order: 4,
         }
       ],
       lastModifiedBy: defaultAdmin?._id,

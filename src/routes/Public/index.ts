@@ -10,6 +10,7 @@ import {
   getProjectWorkingHours,
 } from "../../handlers/Project";
 import { getProfessionalReviews } from "../../handlers/Booking/reviews";
+import { validateReferralCodePublic } from "../../handlers/User/referralManagement";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -46,6 +47,9 @@ publicRouter
 publicRouter
   .route("/projects/:id/schedule-window")
   .get(schedulingRateLimiter, getProjectScheduleWindow);
+
+// Referral code validation (public endpoint for signup)
+publicRouter.route("/referral/validate/:code").get(schedulingRateLimiter, validateReferralCodePublic);
 
 // Professional profile and reviews (public)
 publicRouter

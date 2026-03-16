@@ -1629,6 +1629,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
     const search = (req.query.search as string) || "";
     const status = (req.query.status as string) || "all";
     const category = (req.query.category as string) || "all";
+    const service = (req.query.service as string) || "all";
     const page = Math.max(parseInt((req.query.page as string) || "1", 10), 1);
     const limit = Math.min(
       Math.max(parseInt((req.query.limit as string) || "20", 10), 1),
@@ -1649,6 +1650,16 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       // Match either the primary category field or within services[] selections
       filter.$or = [{ category }, { "services.category": category }];
     }
+    if (service && service !== "all") {
+      // Match either the primary service field or within services[] selections
+      const serviceConditions = [{ service }, { "services.service": service }];
+      if (filter.$or) {
+        // If category filter already set $or, combine with $and
+        filter.$and = (filter.$and || []).concat([{ $or: serviceConditions }]);
+      } else {
+        filter.$or = serviceConditions;
+      }
+    }
     if (search) {
       const regex = new RegExp(search, "i");
       filter.$and = (filter.$and || []).concat([
@@ -1658,12 +1669,13 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       ]);
     }
 
-    const [items, total, counts] = await Promise.all([
+    const [items, total, distinctServices, counts] = await Promise.all([
       Project.find(filter)
         .sort({ updatedAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit),
       Project.countDocuments(filter),
+      Project.distinct("service", { professionalId }),
       // Status counts for header cards – normalize raw DB statuses
       (async () => {
         const professionalObjectId = new mongoose.Types.ObjectId(professionalId);
@@ -1716,6 +1728,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         pages: Math.ceil(total / limit),
       },
       counts,
+      distinctServices: distinctServices.filter(Boolean).sort(),
     });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch projects" });

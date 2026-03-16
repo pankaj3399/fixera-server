@@ -8,7 +8,6 @@ import {
   buildProjectScheduleWindow,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
-import { calculateAutoDiscount } from "../../utils/discountEngine";
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -506,7 +505,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
 export const getMyBookings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
-    const { status, page = 1, limit = 20 } = req.query;
+    const { status, page = 1, limit = 20, service, search } = req.query;
 
     const user = await User.findById(userId);
     if (!user) {
@@ -537,14 +536,46 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    // Filter by status if provided
+    // Filter by status if provided (supports comma-separated for multiple statuses)
     if (status && typeof status === 'string') {
-      query.status = status;
+      if (status.includes(',')) {
+        query.status = { $in: status.split(',').map(s => s.trim()) };
+      } else {
+        query.status = status;
+      }
+    }
+
+    // Filter by service type
+    if (service && typeof service === 'string') {
+      query['rfqData.serviceType'] = service;
+    }
+
+    // Text search across customer name, service type, and description
+    if (search && typeof search === 'string') {
+      const regex = new RegExp(search, 'i');
+      query.$and = (query.$and || []).concat([{
+        $or: [
+          { 'rfqData.serviceType': regex },
+          { 'rfqData.description': regex },
+        ]
+      }]);
     }
 
     const skip = (Number(page) - 1) * Number(limit);
 
-    const [bookings, total] = await Promise.all([
+    // Fetch distinct service types for the filter dropdown (unfiltered by service/search)
+    const roleFilter: any = {};
+    if (user.role === 'customer') {
+      roleFilter.customer = userId;
+    } else {
+      const projectIds = await Project.find({ professionalId: userId }).select("_id");
+      roleFilter.$or = [
+        { professional: userId },
+        { project: { $in: projectIds.map(p => p._id) } },
+      ];
+    }
+
+    const [bookings, total, distinctServices] = await Promise.all([
       Booking.find(query)
         .populate('customer', 'name email phone customerType')
         .populate('professional', 'name email businessInfo')
@@ -552,12 +583,14 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit)),
-      Booking.countDocuments(query)
+      Booking.countDocuments(query),
+      Booking.distinct('rfqData.serviceType', roleFilter)
     ]);
 
     return res.status(200).json({
       success: true,
       bookings,
+      distinctServices: distinctServices.filter(Boolean).sort(),
       pagination: {
         total,
         page: Number(page),
@@ -589,7 +622,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email businessInfo hourlyRate')
-      .populate('project', 'title description pricing category service team postBookingQuestions')
+      .populate('project', 'title description pricing category service team postBookingQuestions professionalId')
       .populate('assignedTeamMembers', 'name email');
 
     if (!booking) {
@@ -599,11 +632,14 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    // Check authorization - only customer or professional can view
+    // Check authorization - only customer, professional, or project owner can view
     const isCustomer = booking.customer._id.toString() === userIdString;
     const isProfessional = booking.professional?._id.toString() === userIdString;
+    // For project bookings, also check if user owns the project
+    const isProjectOwner = booking.bookingType === 'project' && booking.project
+      && (booking.project as any).professionalId?.toString() === userIdString;
 
-    if (!isCustomer && !isProfessional) {
+    if (!isCustomer && !isProfessional && !isProjectOwner) {
       return res.status(403).json({
         success: false,
         msg: "You do not have permission to view this booking"
@@ -1064,77 +1100,3 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
   }
 };
 
-// Get discount preview for a booking before payment
-export const getDiscountPreview = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const userId = req.user?._id;
-    const { bookingId } = req.params;
-
-    if (!userId) {
-      return res.status(401).json({ success: false, msg: "Authentication required" });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(bookingId as string)) {
-      return res.status(400).json({ success: false, msg: "Invalid bookingId" });
-    }
-
-    const booking = await Booking.findById(bookingId)
-      .populate('customer', 'totalSpent')
-      .populate('professional', '_id')
-      .populate('project', '_id professionalId repeatBuyerDiscount');
-
-    if (!booking) {
-      return res.status(404).json({ success: false, msg: "Booking not found" });
-    }
-
-    // Verify the customer owns this booking
-    const customerId = (booking.customer as any)?._id || booking.customer;
-    if (customerId.toString() !== userId.toString()) {
-      return res.status(403).json({ success: false, msg: "Not authorized" });
-    }
-
-    // Need a quote to calculate discount
-    if (!booking.quote?.amount) {
-      return res.status(400).json({ success: false, msg: "No quote available for this booking" });
-    }
-
-    const customer = booking.customer as any;
-    const professional = booking.professional as any;
-    const project = booking.project as any;
-
-    const professionalId = professional?._id?.toString() || project?.professionalId?.toString() || '';
-
-    const discountBreakdown = await calculateAutoDiscount(
-      customerId.toString(),
-      professionalId,
-      project?._id?.toString() || null,
-      booking.quote.amount,
-      customer.totalSpent || 0
-    );
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        originalAmount: discountBreakdown.originalAmount,
-        loyaltyDiscount: {
-          tier: discountBreakdown.loyaltyDiscount.tier,
-          percentage: discountBreakdown.loyaltyDiscount.percentage,
-          amount: discountBreakdown.loyaltyDiscount.amount,
-          capped: discountBreakdown.loyaltyDiscount.capped,
-        },
-        repeatBuyerDiscount: {
-          percentage: discountBreakdown.repeatBuyerDiscount.percentage,
-          amount: discountBreakdown.repeatBuyerDiscount.amount,
-          previousBookings: discountBreakdown.repeatBuyerDiscount.previousBookings,
-          capped: discountBreakdown.repeatBuyerDiscount.capped,
-        },
-        totalDiscount: discountBreakdown.totalDiscount,
-        finalAmount: discountBreakdown.finalAmount,
-        currency: booking.quote.currency || 'EUR',
-      }
-    });
-  } catch (error: any) {
-    console.error('Get discount preview error:', error);
-    next(error);
-  }
-};

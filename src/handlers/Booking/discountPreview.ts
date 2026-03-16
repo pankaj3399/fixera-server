@@ -1,0 +1,90 @@
+/**
+ * Discount Preview Handler
+ * Returns discount breakdown for a booking before the customer accepts the quote
+ */
+
+import { Request, Response } from 'express';
+import Booking from '../../models/booking';
+import User from '../../models/user';
+import { calculateDiscountBreakdown } from '../../utils/discountSystem';
+
+/**
+ * GET /api/bookings/:bookingId/discount-preview
+ * Returns the discount breakdown for a quoted booking
+ */
+export const getDiscountPreview = async (req: Request, res: Response) => {
+  try {
+    const { bookingId } = req.params;
+    const userId = (req as any).user?._id?.toString();
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' }
+      });
+    }
+
+    const booking = await Booking.findById(bookingId)
+      .populate('project', 'repeatBuyerDiscount professionalId');
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' }
+      });
+    }
+
+    // Only the customer can see discount preview
+    if (booking.customer.toString() !== userId) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Not authorized' }
+      });
+    }
+
+    // Must have a quote
+    if (!booking.quote || !booking.quote.amount) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'NO_QUOTE', message: 'No quote available for discount calculation' }
+      });
+    }
+
+    // Determine professional ID
+    let professionalId = booking.professional?.toString();
+    if (!professionalId && booking.project) {
+      const project = booking.project as any;
+      professionalId = project.professionalId?.toString();
+    }
+
+    if (!professionalId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'NO_PROFESSIONAL', message: 'No professional assigned' }
+      });
+    }
+
+    const projectId = booking.project
+      ? (typeof booking.project === 'object' ? (booking.project as any)._id : booking.project)
+      : undefined;
+
+    const discount = await calculateDiscountBreakdown(
+      booking.customer,
+      professionalId,
+      projectId,
+      booking.quote.amount
+    );
+
+    return res.json({
+      success: true,
+      data: { discount }
+    });
+
+  } catch (error: any) {
+    console.error('Error calculating discount preview:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: 'Failed to calculate discount' }
+    });
+  }
+};

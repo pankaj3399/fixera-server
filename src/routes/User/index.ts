@@ -38,6 +38,7 @@ import {
     uploadQuestionAttachment
 } from "../../handlers/Professional/fileUpload";
 import { validateAddress, getGoogleMapsConfig } from "../../handlers/User/googleMaps";
+import { getReferralStats, generateUserReferralCode, addLateReferralCode } from "../../handlers/User/referralManagement";
 
 const userRouter = Router();
 
@@ -59,6 +60,11 @@ userRouter.route("/id-info").put(updateIdInfo)
 userRouter.route("/loyalty/status").get(getLoyaltyStatus)
 userRouter.route("/loyalty/add-spending").post(addSpending)
 userRouter.route("/loyalty/leaderboard").get(getLeaderboard)
+
+// Referral Routes
+userRouter.route("/referral/stats").get(getReferralStats)
+userRouter.route("/referral/generate-code").post(generateUserReferralCode)
+userRouter.route("/referral/add-late-code").post(addLateReferralCode)
 
 // Employee Management Routes
 userRouter.route("/employee/invite").post(inviteEmployee)

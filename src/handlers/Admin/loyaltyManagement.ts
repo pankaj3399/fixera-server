@@ -145,6 +145,25 @@ export const updateLoyaltyConfig = async (req: Request, res: Response, next: Nex
           msg: `Benefits must be an array for tier ${tier.name}`
         });
       }
+
+      // Validate discount fields if present
+      if (tier.discountPercentage !== undefined && tier.discountPercentage !== null) {
+        if (typeof tier.discountPercentage !== 'number' || tier.discountPercentage < 0 || tier.discountPercentage > 100) {
+          return res.status(400).json({
+            success: false,
+            msg: `Discount percentage must be between 0 and 100 for tier ${tier.name}`
+          });
+        }
+      }
+
+      if (tier.maxDiscountAmount !== undefined && tier.maxDiscountAmount !== null) {
+        if (typeof tier.maxDiscountAmount !== 'number' || tier.maxDiscountAmount < 0) {
+          return res.status(400).json({
+            success: false,
+            msg: `Max discount amount must be a positive number for tier ${tier.name}`
+          });
+        }
+      }
     }
 
     await connecToDatabase();
