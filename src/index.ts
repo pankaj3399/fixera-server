@@ -18,12 +18,15 @@ import professionalRouter from './routes/Professional';
 import professionalPaymentRouter from './routes/ProfessionalPayment';
 import searchRouter from './routes/Search';
 import bookingRouter from './routes/Booking';
+import quotationRouter from './routes/Quotation';
 import stripeRouter from './routes/Stripe';
 import chatRouter from './routes/Chat';
 import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
+import { startRfqDeadlineScheduler } from './utils/rfqDeadlineScheduler';
 
 const app: Express = express();
 let idExpirySchedulerHandle: { stop: () => void } | null = null;
+let rfqDeadlineSchedulerHandle: { stop: () => void } | null = null;
 
 // 🚨 Allow ALL origins but still allow credentials (cookies)
 app.use(cors({
@@ -62,6 +65,7 @@ app.use('/api/service-categories', serviceCategoryRouter);
 app.use('/api/professionals', professionalRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/bookings', bookingRouter);
+app.use('/api/quotations', quotationRouter);
 app.use('/api/stripe', stripeRouter);
 app.use('/api/professional', professionalPaymentRouter);
 app.use('/api/chat', chatRouter);
@@ -84,12 +88,26 @@ const stopIdExpiryScheduler = () => {
   }
 };
 
+const stopRfqDeadlineScheduler = () => {
+  if (!rfqDeadlineSchedulerHandle) return;
+
+  try {
+    rfqDeadlineSchedulerHandle.stop();
+  } catch (error) {
+    console.error('Failed to stop RFQ deadline scheduler:', error);
+  } finally {
+    rfqDeadlineSchedulerHandle = null;
+  }
+};
+
 process.on('SIGINT', () => {
   stopIdExpiryScheduler();
+  stopRfqDeadlineScheduler();
 });
 
 process.on('SIGTERM', () => {
   stopIdExpiryScheduler();
+  stopRfqDeadlineScheduler();
 });
 
 connectDB()
@@ -98,6 +116,7 @@ connectDB()
       console.log(`🚀 Server running on port ${PORT}`);
     });
     idExpirySchedulerHandle = startIdExpiryScheduler();
+    rfqDeadlineSchedulerHandle = startRfqDeadlineScheduler();
   })
   .catch((error) => {
     console.error('Failed to connect to MongoDB at startup:', error);

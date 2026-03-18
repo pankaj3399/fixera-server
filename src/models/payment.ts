@@ -22,6 +22,8 @@ export interface IPaymentRefund {
 export interface IPayment extends Document {
   booking: Types.ObjectId;
   bookingNumber?: string;
+  milestoneIndex?: number;
+  milestoneTitle?: string;
   customer: Types.ObjectId;
   professional?: Types.ObjectId;
   status: PaymentStatus;
@@ -85,8 +87,10 @@ const DEFAULT_CURRENCY = SUPPORTED_CURRENCIES.includes(STRIPE_CONFIG.defaultCurr
 
 const PaymentSchema = new Schema<IPayment>(
   {
-    booking: { type: Schema.Types.ObjectId, ref: "Booking", required: true, unique: true },
+    booking: { type: Schema.Types.ObjectId, ref: "Booking", required: true },
     bookingNumber: { type: String },
+    milestoneIndex: { type: Number },
+    milestoneTitle: { type: String, maxlength: 200 },
     customer: { type: Schema.Types.ObjectId, ref: "User", required: true },
     professional: { type: Schema.Types.ObjectId, ref: "User" },
     status: {
@@ -133,6 +137,7 @@ const PaymentSchema = new Schema<IPayment>(
   }
 );
 
+PaymentSchema.index({ booking: 1, milestoneIndex: 1 }, { unique: true, sparse: true });
 PaymentSchema.index({ status: 1 });
 PaymentSchema.index({ customer: 1, status: 1 });
 PaymentSchema.index({ professional: 1, status: 1 });

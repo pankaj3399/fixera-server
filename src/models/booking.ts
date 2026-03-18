@@ -2,6 +2,8 @@ import { Schema, model, Document, Types } from "mongoose";
 
 export type BookingStatus =
   | 'rfq'           // Request for Quote - Initial state when customer requests
+  | 'rfq_accepted'  // Professional accepted the RFQ, working on quotation
+  | 'draft_quote'   // Professional-initiated quotation (entry 1.2), no RFQ step
   | 'quoted'        // Professional has provided a quote
   | 'quote_accepted'// Customer accepted the quote
   | 'quote_rejected'// Customer rejected the quote
@@ -39,6 +41,45 @@ export interface IQuote {
   submittedBy: Types.ObjectId; // Professional who submitted the quote
 }
 
+export interface IQuotationMilestone {
+  title: string;
+  amount: number;
+  description?: string;
+  dueCondition: 'on_start' | 'on_milestone_completion' | 'on_project_completion' | 'custom_date';
+  customDueDate?: Date;
+  order: number;
+  status: 'pending' | 'invoiced' | 'paid' | 'overdue';
+  stripePaymentIntentId?: string;
+  stripeClientSecret?: string;
+  paidAt?: Date;
+}
+
+export interface IQuoteMaterial {
+  name: string;
+  quantity?: number;
+  unit?: string;
+  description?: string;
+}
+
+export interface IQuoteVersion {
+  version: number;
+  quotationNumber: string;
+  scope: string;
+  warrantyDuration: { value: number; unit: 'months' | 'years' };
+  materialsIncluded: boolean;
+  materials?: IQuoteMaterial[];
+  description: string;
+  totalAmount: number;
+  currency: string;
+  milestones?: IQuotationMilestone[];
+  preparationDuration: { value: number; unit: 'hours' | 'days' };
+  executionDuration: { value: number; unit: 'hours' | 'days' };
+  bufferDuration?: { value: number; unit: 'hours' | 'days' };
+  validUntil: Date;
+  createdAt: Date;
+  changeNote?: string;
+}
+
 export interface IBooking extends Document {
   _id: Types.ObjectId;
   // Core references
@@ -71,8 +112,19 @@ export interface IBooking extends Document {
     attachments?: string[]; // S3 URLs for uploaded files
   };
 
-  // Quote from professional
+  // Quote from professional (legacy simple quote)
   quote?: IQuote;
+
+  // New quotation system
+  quotationNumber?: string;
+  quoteVersions: IQuoteVersion[];
+  currentQuoteVersion?: number;
+  rfqResponse?: { action: 'accepted' | 'rejected'; respondedAt: Date; rejectionReason?: string };
+  rfqDeadline?: Date;
+  rfqRemindersSent: number;
+  lastReminderSentAt?: Date;
+  customerRejectionReason?: string;
+  milestonePayments?: IQuotationMilestone[];
 
   // Booking location (customer's location from their profile)
   location: {
@@ -265,7 +317,7 @@ const BookingSchema = new Schema({
   // Status and lifecycle
   status: {
     type: String,
-    enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
+    enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
     default: 'rfq',
     required: true,
     index: true
@@ -273,7 +325,7 @@ const BookingSchema = new Schema({
   statusHistory: [{
     status: {
       type: String,
-      enum: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
+      enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
       required: true
     },
     timestamp: {
@@ -349,7 +401,10 @@ const BookingSchema = new Schema({
     amount: {
       type: Number,
       required: function(this: IBooking) {
-        return this.status !== 'rfq';
+        // Legacy quote.amount is not required when using the new quoteVersions system
+        if (this.quoteVersions && this.quoteVersions.length > 0) return false;
+        const noQuoteStatuses = ['rfq', 'rfq_accepted', 'draft_quote', 'cancelled'];
+        return !noQuoteStatuses.includes(this.status);
       },
       min: 0
     },
@@ -387,6 +442,88 @@ const BookingSchema = new Schema({
       ref: 'User'
     }
   },
+
+  // New quotation system
+  quotationNumber: {
+    type: String,
+    index: true
+  },
+  quoteVersions: [{
+    version: { type: Number, required: true },
+    quotationNumber: { type: String, required: true },
+    scope: { type: String, required: true, minlength: 10, maxlength: 100 },
+    warrantyDuration: {
+      value: { type: Number, required: true, min: 0 },
+      unit: { type: String, enum: ['months', 'years'], required: true }
+    },
+    materialsIncluded: { type: Boolean, default: false },
+    materials: [{
+      name: { type: String, required: true, maxlength: 200 },
+      quantity: { type: Number, min: 0 },
+      unit: { type: String, maxlength: 50 },
+      description: { type: String, maxlength: 500 }
+    }],
+    description: { type: String, required: true, maxlength: 5000 },
+    totalAmount: { type: Number, required: true, min: 0 },
+    currency: { type: String, enum: ['USD', 'EUR', 'GBP', 'CAD', 'AUD'], default: 'EUR' },
+    milestones: [{
+      title: { type: String, required: true, maxlength: 200 },
+      amount: { type: Number, required: true, min: 0 },
+      description: { type: String, maxlength: 500 },
+      dueCondition: {
+        type: String,
+        enum: ['on_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+        required: true
+      },
+      customDueDate: { type: Date },
+      order: { type: Number, required: true },
+      status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
+      stripePaymentIntentId: { type: String },
+      stripeClientSecret: { type: String },
+      paidAt: { type: Date }
+    }],
+    preparationDuration: {
+      value: { type: Number, required: true, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'], required: true }
+    },
+    executionDuration: {
+      value: { type: Number, required: true, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'], required: true }
+    },
+    bufferDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] }
+    },
+    validUntil: { type: Date, required: true },
+    createdAt: { type: Date, default: Date.now },
+    changeNote: { type: String, maxlength: 500 }
+  }],
+  currentQuoteVersion: { type: Number },
+  rfqResponse: {
+    action: { type: String, enum: ['accepted', 'rejected'] },
+    respondedAt: { type: Date },
+    rejectionReason: { type: String, maxlength: 500 }
+  },
+  rfqDeadline: { type: Date },
+  rfqRemindersSent: { type: Number, default: 0 },
+  lastReminderSentAt: { type: Date },
+  customerRejectionReason: { type: String, maxlength: 1000 },
+  milestonePayments: [{
+    title: { type: String, required: true, maxlength: 200 },
+    amount: { type: Number, required: true, min: 0 },
+    description: { type: String, maxlength: 500 },
+    dueCondition: {
+      type: String,
+      enum: ['on_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+      required: true
+    },
+    customDueDate: { type: Date },
+    order: { type: Number, required: true },
+    status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
+    stripePaymentIntentId: { type: String },
+    stripeClientSecret: { type: String },
+    paidAt: { type: Date }
+  }],
 
   // Location
   location: {
@@ -697,6 +834,8 @@ BookingSchema.index({ assignedTeamMembers: 1, status: 1, scheduledStartDate: 1 }
 BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ professional: 1, status: 1, 'customerReview.communicationLevel': 1 }); // Reviews query
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
+BookingSchema.index({ status: 1, rfqDeadline: 1 }); // RFQ deadline scheduler
+BookingSchema.index({ quotationNumber: 1 }); // Quotation lookup
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
 
 // Helper to parse HH:mm to minutes for comparison
@@ -763,6 +902,13 @@ BookingSchema.pre('save', async function(next) {
     const year = new Date().getFullYear();
     const count = await model('Booking').countDocuments();
     this.bookingNumber = `BK-${year}-${String(count + 1).padStart(6, '0')}`;
+  }
+
+  // Generate quotation number if quoteVersions exist and no quotationNumber yet
+  if (!this.quotationNumber && this.quoteVersions && this.quoteVersions.length > 0) {
+    const year = new Date().getFullYear();
+    const count = await model('Booking').countDocuments({ quotationNumber: { $exists: true, $ne: null } });
+    this.quotationNumber = `QT-${year}-${String(count + 1).padStart(6, '0')}`;
   }
 
   // Initialize status history if empty
