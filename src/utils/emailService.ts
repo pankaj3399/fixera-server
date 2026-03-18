@@ -1445,7 +1445,10 @@ export const sendRfqDeadlineExpiredEmail = async (
       </div>
     </div>
   `;
-  await sendEmail(profEmail, 'Quotation Deadline Expired - Fixera', profContent);
+  const profResult = await sendEmail(profEmail, 'Quotation Deadline Expired - Fixera', profContent);
+  if (!profResult) {
+    console.error(`[Email] Failed to send RFQ deadline expired email to professional: ${profEmail}`);
+  }
 
   // Send to customer
   const custContent = `
@@ -1464,7 +1467,11 @@ export const sendRfqDeadlineExpiredEmail = async (
       </div>
     </div>
   `;
-  return sendEmail(custEmail, 'Request Update - Fixera', custContent);
+  const custResult = await sendEmail(custEmail, 'Request Update - Fixera', custContent);
+  if (!custResult) {
+    console.error(`[Email] Failed to send RFQ deadline expired email to customer: ${custEmail}`);
+  }
+  return profResult && custResult;
 };
 
 // Customer receives direct quotation from professional

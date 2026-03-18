@@ -200,11 +200,17 @@ export const submitQuotation = async (req: Request, res: Response) => {
 
     const now = new Date();
     const versionNumber = 1;
-    const quotationNumber = booking.quotationNumber || '';
+
+    // Generate quotation number before save to avoid double-save
+    if (!booking.quotationNumber) {
+      const year = new Date().getFullYear();
+      const count = await Booking.countDocuments({ quotationNumber: { $exists: true, $ne: null } });
+      booking.quotationNumber = `QT-${year}-${String(count + 1).padStart(6, '0')}`;
+    }
 
     const quoteVersion: any = {
       version: versionNumber,
-      quotationNumber: quotationNumber ? `${quotationNumber}-v${versionNumber}` : 'PENDING',
+      quotationNumber: `${booking.quotationNumber}-v${versionNumber}`,
       scope,
       warrantyDuration,
       materialsIncluded: materialsIncluded || false,
@@ -236,12 +242,6 @@ export const submitQuotation = async (req: Request, res: Response) => {
     });
 
     await booking.save();
-
-    // Update quotation number on version after save (pre-save generates it)
-    if (booking.quotationNumber && booking.quoteVersions[0]) {
-      booking.quoteVersions[0].quotationNumber = `${booking.quotationNumber}-v1`;
-      await booking.save();
-    }
 
     const customer = booking.customer as any;
     const professional = booking.professional as any;
@@ -509,6 +509,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       booking.statusHistory.push({
         status: 'quoted',
         timestamp: new Date(),
+        updatedBy: new mongoose.Types.ObjectId(userId),
         note: 'Reverted: Payment intent creation failed'
       });
       await booking.save();
@@ -777,9 +778,9 @@ export const createMilestonePaymentIntent = async (req: Request, res: Response) 
       }
     }
 
-    // Create payment intent for this milestone amount
-    // We override the quote amount temporarily for the payment intent creation
-    const originalQuote = booking.quote;
+    // Temporarily set quote to milestone amount for payment intent creation
+    // Use try/finally to guarantee the original quote is always restored
+    const originalQuote = booking.quote ? { ...booking.quote } : undefined;
     booking.quote = {
       amount: milestone.amount,
       currency: originalQuote?.currency || 'EUR',
@@ -789,18 +790,21 @@ export const createMilestonePaymentIntent = async (req: Request, res: Response) 
     };
     await booking.save();
 
-    const paymentResult = await createPaymentIntent(booking._id.toString(), userId);
-
-    // Restore original quote
-    booking.quote = originalQuote;
-    await booking.save();
+    let paymentResult: { success: boolean; clientSecret?: string; paymentIntentId?: string; error?: any };
+    try {
+      paymentResult = await createPaymentIntent(booking._id.toString(), userId) as any;
+    } finally {
+      // Always restore original quote regardless of success/failure
+      booking.quote = originalQuote as any;
+      await booking.save();
+    }
 
     if (!paymentResult.success) {
       return res.status(400).json({ success: false, error: paymentResult.error });
     }
 
-    // Store payment intent on milestone
-    booking.milestonePayments[milestoneIndex].stripePaymentIntentId = (paymentResult as any).paymentIntentId;
+    // Store payment intent on milestone only after successful payment
+    booking.milestonePayments[milestoneIndex].stripePaymentIntentId = paymentResult.paymentIntentId;
     booking.milestonePayments[milestoneIndex].stripeClientSecret = paymentResult.clientSecret;
     await booking.save();
 

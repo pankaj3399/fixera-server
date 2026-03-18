@@ -1,4 +1,4 @@
-import { Schema, model, Document, Types } from "mongoose";
+import mongoose, { Schema, model, Document, Types } from "mongoose";
 
 export type BookingStatus =
   | 'rfq'           // Request for Quote - Initial state when customer requests
@@ -905,10 +905,19 @@ BookingSchema.pre('save', async function(next) {
   }
 
   // Generate quotation number if quoteVersions exist and no quotationNumber yet
+  // Uses atomic counter to avoid race conditions with concurrent saves
   if (!this.quotationNumber && this.quoteVersions && this.quoteVersions.length > 0) {
     const year = new Date().getFullYear();
-    const count = await model('Booking').countDocuments({ quotationNumber: { $exists: true, $ne: null } });
-    this.quotationNumber = `QT-${year}-${String(count + 1).padStart(6, '0')}`;
+    const db = mongoose.connection.db;
+    if (db) {
+      const counter = await db.collection('counters').findOneAndUpdate(
+        { _id: `quotationNumber-${year}` },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after' }
+      );
+      const seq = counter?.seq ?? 1;
+      this.quotationNumber = `QT-${year}-${String(seq).padStart(6, '0')}`;
+    }
   }
 
   // Initialize status history if empty

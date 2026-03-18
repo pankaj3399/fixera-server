@@ -8,10 +8,13 @@
  * Follows idExpiryScheduler.ts pattern with MongoDB distributed lock.
  */
 
-import mongoose from 'mongoose';
+import mongoose, { Types } from 'mongoose';
 import { randomUUID } from 'crypto';
 import os from 'os';
 import Booking from '../models/booking';
+
+// System user ID for automated actions
+const SYSTEM_USER_ID = new Types.ObjectId('000000000000000000000000');
 import User from '../models/user';
 import { getWorkingDaysBetween } from './workingDays';
 import {
@@ -113,6 +116,7 @@ const runRfqDeadlineCheck = async () => {
         booking.statusHistory.push({
           status: 'cancelled',
           timestamp: now,
+          updatedBy: SYSTEM_USER_ID,
           note: 'Auto-cancelled: RFQ deadline expired without quotation submission',
         });
         await booking.save();
@@ -184,8 +188,9 @@ const runRfqDeadlineCheck = async () => {
         if (!currentVersion) continue;
 
         if (currentVersion.validUntil && new Date(currentVersion.validUntil) < now) {
-          // Quotation expired, just log it - could add notification here
-          console.log(`[RFQ Scheduler] Quotation ${booking.quotationNumber} has expired validity`);
+          // TODO: Send quotation expiry notification to customer and professional
+          // e.g., NotificationService.sendQuotationExpiryNotification(booking)
+          console.warn(`[RFQ Scheduler] Quotation ${booking.quotationNumber} has expired validity — notification not yet implemented`);
         }
       } catch (e) {
         console.error(`[RFQ Scheduler] Failed to check quotation validity for ${String(booking._id)}:`, e);
@@ -209,9 +214,12 @@ const runWithLock = async (ownerId: string) => {
 
     lockRefreshHandle = setInterval(async () => {
       try {
-        await refreshJobLock(ownerId);
+        const refreshed = await refreshJobLock(ownerId);
+        if (!refreshed) {
+          console.warn(`[RFQ Deadline Scheduler] Lock refresh failed for owner ${ownerId} — another process may acquire it`);
+        }
       } catch (error) {
-        console.error('[RFQ Deadline Scheduler] Lock refresh error:', error);
+        console.warn(`[RFQ Deadline Scheduler] Lock refresh error for owner ${ownerId} — lock may have been lost:`, error);
       }
     }, LOCK_REFRESH_MS);
 

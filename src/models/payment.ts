@@ -138,6 +138,11 @@ const PaymentSchema = new Schema<IPayment>(
 );
 
 PaymentSchema.index({ booking: 1, milestoneIndex: 1 }, { unique: true, sparse: true });
+// Ensure only one non-milestone payment per booking
+PaymentSchema.index(
+  { booking: 1 },
+  { unique: true, partialFilterExpression: { milestoneIndex: null } }
+);
 PaymentSchema.index({ status: 1 });
 PaymentSchema.index({ customer: 1, status: 1 });
 PaymentSchema.index({ professional: 1, status: 1 });

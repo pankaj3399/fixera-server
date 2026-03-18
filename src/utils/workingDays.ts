@@ -9,6 +9,13 @@ export function isWorkingDay(date: Date): boolean {
 }
 
 export function addWorkingDays(startDate: Date, days: number): Date {
+  if (days < 0) {
+    throw new RangeError('days must be a positive number');
+  }
+  if (days === 0) {
+    return new Date(startDate);
+  }
+
   const result = new Date(startDate);
   let added = 0;
 
