@@ -115,7 +115,7 @@ export interface IUser extends Document {
     professionalOnboardingCompletedAt?: Date;
     // Loyalty system fields
     loyaltyPoints?: number;
-    loyaltyLevel?: 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
+    loyaltyLevel?: 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
     totalSpent?: number;
     totalBookings?: number;
     lastLoyaltyUpdate?: Date;
@@ -416,7 +416,7 @@ const UserSchema = new Schema({
     },
     loyaltyLevel: {
         type: String,
-        enum: ['Bronze', 'Silver', 'Gold', 'Platinum'],
+        enum: ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'],
         default: 'Bronze'
     },
     totalSpent: {

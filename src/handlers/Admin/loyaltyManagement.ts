@@ -248,8 +248,8 @@ export const recalculateCustomerTiers = async (req: Request, res: Response, next
         const loyaltyStatus = await calculateLoyaltyStatus(totalSpent, loyaltyPoints);
         
         const oldLevel = customer.loyaltyLevel;
-        const VALID_LEVELS = new Set(['Bronze', 'Silver', 'Gold', 'Platinum']);
-        customer.loyaltyLevel = (VALID_LEVELS.has(loyaltyStatus.level) ? loyaltyStatus.level : 'Bronze') as 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
+        const VALID_LEVELS = new Set(['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']);
+        customer.loyaltyLevel = (VALID_LEVELS.has(loyaltyStatus.level) ? loyaltyStatus.level : 'Bronze') as 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
         customer.lastLoyaltyUpdate = new Date();
         
         await customer.save();

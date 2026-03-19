@@ -1,8 +1,8 @@
 import User, { IUser } from "../models/user";
 import LoyaltyConfig, { ILoyaltyConfig, ILoyaltyTier } from "../models/loyaltyConfig";
 
-type LoyaltyLevel = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
-const VALID_LOYALTY_LEVELS: Set<string> = new Set(['Bronze', 'Silver', 'Gold', 'Platinum']);
+type LoyaltyLevel = 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
+const VALID_LOYALTY_LEVELS: Set<string> = new Set(['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']);
 
 function toValidLoyaltyLevel(level: string): LoyaltyLevel {
   if (VALID_LOYALTY_LEVELS.has(level)) {
