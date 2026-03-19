@@ -109,4 +109,16 @@ userRouter.route("/projects/upload/attachment").post(upload.single('attachment')
 userRouter.route("/validate-address").post(validateAddress)
 userRouter.route("/google-maps-config").get(getGoogleMapsConfig)
 
+// Platform commission (read-only for professionals)
+userRouter.route("/commission-rate").get(async (req, res) => {
+  try {
+    const PlatformSettings = (await import("../../models/platformSettings")).default;
+    const config = await PlatformSettings.getCurrentConfig();
+    return res.status(200).json({ success: true, data: { commissionPercent: config.commissionPercent } });
+  } catch (error) {
+    console.error("Failed to retrieve commission rate:", error);
+    return res.status(500).json({ success: false, msg: "Failed to retrieve commission rate" });
+  }
+});
+
 export default userRouter;
