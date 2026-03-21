@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import ReferralConfig from '../../models/referralConfig';
 import Referral from '../../models/referral';
 import User from '../../models/user';
+import PointTransaction from '../../models/pointTransaction';
 import { deductPoints } from '../../utils/pointsSystem';
 
 /**
@@ -96,9 +97,9 @@ export const getReferralAnalytics = async (req: Request, res: Response, next: Ne
         { $match: { status: 'completed' } },
         { $group: { _id: null, total: { $sum: '$referrerRewardAmount' } } }
       ]),
-      User.aggregate([
-        { $match: { points: { $gt: 0 } } },
-        { $group: { _id: null, total: { $sum: '$points' } } }
+      PointTransaction.aggregate([
+        { $match: { source: 'referral', type: 'earn' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
       ]),
       Referral.aggregate([
         { $group: { _id: '$referrer', total: { $sum: 1 }, completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } } } },
@@ -141,7 +142,7 @@ export const getReferralAnalytics = async (req: Request, res: Response, next: Ne
         revokedReferrals,
         conversionRate: parseFloat(conversionRate),
         totalPointsIssued: totalCreditsIssued[0]?.total || 0,
-        currentPointsBalance: totalCurrentPoints[0]?.total || 0,
+        totalReferralPointsEarned: totalCurrentPoints[0]?.total || 0,
         topReferrers
       }
     });
@@ -223,9 +224,13 @@ export const revokeReferral = async (req: Request, res: Response, next: NextFunc
           `Referral revoked: points clawed back`,
           { metadata: { relatedReferral: referral._id } }
         );
-      } catch {
-        // User may not have enough points — set to 0
-        await User.findByIdAndUpdate(referral.referrer, { $set: { points: 0 } });
+      } catch (err: any) {
+        // Only zero out wallet for insufficient balance; rethrow other errors
+        if (err?.message?.includes('Insufficient points') || err?.message?.includes('insufficient balance')) {
+          await User.findByIdAndUpdate(referral.referrer, { $set: { points: 0 } });
+        } else {
+          throw err;
+        }
       }
 
       await User.findByIdAndUpdate(referral.referrer, {

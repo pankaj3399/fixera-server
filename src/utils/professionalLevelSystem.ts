@@ -92,7 +92,7 @@ export const getProfessionalMetrics = async (
   // Response rate: quoted / total RFQs received
   const totalRfqs = await Booking.countDocuments({
     professional: professionalId,
-    status: { $in: ['quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled'] }
+    status: { $in: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled'] }
   });
   const respondedRfqs = await Booking.countDocuments({
     professional: professionalId,
@@ -100,25 +100,18 @@ export const getProfessionalMetrics = async (
   });
   const responseRate = totalRfqs > 0 ? Math.round((respondedRfqs / totalRfqs) * 100) : 100;
 
-  // Points boost: count how many booking credits this professional has purchased
-  const boostTxns = await PointTransaction.aggregate([
-    {
-      $match: {
-        userId: new mongoose.Types.ObjectId(professionalId.toString()),
-        source: 'boost',
-        type: 'spend'
-      }
-    },
-    {
-      $group: {
-        _id: null,
-        totalPointsSpent: { $sum: '$amount' }
-      }
-    }
-  ]);
+  // Points boost: count booking credits purchased, using the ratio stored per transaction
+  const boostTxns = await PointTransaction.find({
+    userId: new mongoose.Types.ObjectId(professionalId.toString()),
+    source: 'boost',
+    type: 'spend'
+  }).select('amount metadata');
 
-  // Will compute boostedBookings using the level config's pointsBoostRatio
-  const totalBoostPointsSpent = boostTxns.length > 0 ? boostTxns[0].totalPointsSpent : 0;
+  let totalBoostedBookings = 0;
+  for (const tx of boostTxns) {
+    const ratio = tx.metadata?.boostRatio || 100; // fallback for old transactions without stored ratio
+    totalBoostedBookings += Math.floor(tx.amount / ratio);
+  }
 
   return {
     completedBookings,
@@ -126,7 +119,7 @@ export const getProfessionalMetrics = async (
     avgRating,
     onTimePercentage,
     responseRate,
-    boostedBookings: totalBoostPointsSpent // raw points spent, converted later
+    boostedBookings: totalBoostedBookings // already converted to booking credits
   };
 };
 
@@ -145,16 +138,13 @@ export const calculateProfessionalLevel = async (
   }
 
   // Find the highest level where ALL criteria are met
+  // metrics.boostedBookings is already in booking credits (converted per-transaction)
+  const effectiveBookings = metrics.completedBookings + metrics.boostedBookings;
+
   let currentLevelIndex = 0;
   for (let i = activeLevels.length - 1; i >= 0; i--) {
     const level = activeLevels[i];
     const c = level.criteria;
-
-    // Calculate effective bookings (real + boosted)
-    const boostedBookings = level.pointsBoostRatio > 0
-      ? Math.floor(metrics.boostedBookings / level.pointsBoostRatio)
-      : 0;
-    const effectiveBookings = metrics.completedBookings + boostedBookings;
 
     const meetsAll =
       effectiveBookings >= c.minCompletedBookings &&
@@ -170,10 +160,6 @@ export const calculateProfessionalLevel = async (
   }
 
   const currentLevel = activeLevels[currentLevelIndex];
-  const boostedBookings = currentLevel.pointsBoostRatio > 0
-    ? Math.floor(metrics.boostedBookings / currentLevel.pointsBoostRatio)
-    : 0;
-  const effectiveBookings = metrics.completedBookings + boostedBookings;
 
   // Next level info
   let nextLevel: ProfessionalLevelInfo['nextLevel'] = undefined;
@@ -181,14 +167,9 @@ export const calculateProfessionalLevel = async (
     const next = activeLevels[currentLevelIndex + 1];
     const nc = next.criteria;
 
-    const nextBoosted = next.pointsBoostRatio > 0
-      ? Math.floor(metrics.boostedBookings / next.pointsBoostRatio)
-      : 0;
-    const nextEffective = metrics.completedBookings + nextBoosted;
-
     const missingCriteria: string[] = [];
-    if (nextEffective < nc.minCompletedBookings) {
-      missingCriteria.push(`${nc.minCompletedBookings - nextEffective} more completed bookings`);
+    if (effectiveBookings < nc.minCompletedBookings) {
+      missingCriteria.push(`${nc.minCompletedBookings - effectiveBookings} more completed bookings`);
     }
     if (metrics.daysActive < nc.minDaysActive) {
       missingCriteria.push(`${nc.minDaysActive - metrics.daysActive} more days active`);
@@ -217,10 +198,7 @@ export const calculateProfessionalLevel = async (
 
   return {
     currentLevel: currentLevel.name as ProfessionalLevelName,
-    metrics: {
-      ...metrics,
-      boostedBookings
-    },
+    metrics,
     effectiveBookings,
     nextLevel,
     perks: {
@@ -281,15 +259,29 @@ export const applyPointsBoost = async (
   // Only spend exact multiple
   const actualPointsSpent = boostedBookings * boostRatio;
 
-  await deductPoints(
-    professionalId as mongoose.Types.ObjectId,
-    actualPointsSpent,
-    'boost',
-    `Boosted ${boostedBookings} booking credits toward professional level`
-  );
+  // Use a transaction so deduction + level update are atomic
+  const session = await mongoose.startSession();
+  try {
+    let levelChanged = false;
+    let newLevel = 'New';
 
-  // Recalculate level
-  const { levelChanged, newLevel } = await updateProfessionalLevel(professionalId);
+    await session.withTransaction(async () => {
+      await deductPoints(
+        professionalId as mongoose.Types.ObjectId,
+        actualPointsSpent,
+        'boost',
+        `Boosted ${boostedBookings} booking credits toward professional level`,
+        { session, metadata: { boostRatio, boostedBookings } }
+      );
 
-  return { boostedBookings, newLevel, levelChanged };
+      // Recalculate level within same transaction
+      const result = await updateProfessionalLevel(professionalId);
+      levelChanged = result.levelChanged;
+      newLevel = result.newLevel;
+    });
+
+    return { boostedBookings, newLevel, levelChanged };
+  } finally {
+    await session.endSession();
+  }
 };

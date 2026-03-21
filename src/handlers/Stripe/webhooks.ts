@@ -12,6 +12,7 @@ import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
+import { deductPoints } from '../../utils/pointsSystem';
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
@@ -226,6 +227,22 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
         stripeChargeId: booking.payment.stripeChargeId,
       }
     );
+
+    // Deduct points now that payment is confirmed
+    const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
+    if (pointsRedeemed > 0 && booking.customer) {
+      try {
+        await deductPoints(
+          booking.customer,
+          pointsRedeemed,
+          'redemption',
+          `Points redeemed for booking #${(booking as any).bookingNumber || bookingId}`,
+          { relatedBooking: booking._id }
+        );
+      } catch (pointsError: any) {
+        console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
+      }
+    }
 
     console.log(`Payment authorized via webhook for booking ${bookingId}`);
   }

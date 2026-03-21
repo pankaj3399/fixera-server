@@ -170,20 +170,30 @@ export const processReferralCompletion = async (
     return { completed: true };
   }
 
-  // Issue points reward to referrer
-  await addPoints(
-    referral.referrer,
-    config.referrerRewardAmount,
-    'referral',
-    `Referral reward: referred user completed first booking`,
-    { relatedReferral: referral._id as mongoose.Types.ObjectId, relatedBooking: bookingId }
-  );
+  // Issue points reward to referrer — revert referral status on failure
+  try {
+    await addPoints(
+      referral.referrer,
+      config.referrerRewardAmount,
+      'referral',
+      `Referral reward: referred user completed first booking`,
+      { relatedReferral: referral._id as mongoose.Types.ObjectId, relatedBooking: bookingId }
+    );
 
-  await User.findByIdAndUpdate(referral.referrer, {
-    $inc: { completedReferrals: 1 }
-  });
+    await User.findByIdAndUpdate(referral.referrer, {
+      $inc: { completedReferrals: 1 }
+    });
 
-  console.log(`Referral completed: referrer=${referral.referrer} earned ${config.referrerRewardAmount} points for referred user=${userId}`);
+    console.log(`Referral completed: referrer=${referral.referrer} earned ${config.referrerRewardAmount} points for referred user=${userId}`);
+  } catch (err) {
+    // Revert referral status so it can be retried
+    await Referral.findByIdAndUpdate(referral._id, {
+      $set: { status: 'pending' },
+      $unset: { qualifyingBooking: 1, referrerRewardIssuedAt: 1 }
+    });
+    console.error(`Referral completion failed for referrer=${referral.referrer}, reverted to pending:`, err);
+    return { completed: false, error: 'Failed to issue points reward' };
+  }
 
   return { completed: true };
 };

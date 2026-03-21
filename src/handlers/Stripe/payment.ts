@@ -24,7 +24,7 @@ import {
 import { calculateVAT } from '../../utils/vat';
 import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
-import { deductPoints } from '../../utils/pointsSystem';
+// deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
@@ -306,22 +306,9 @@ export const createPaymentIntent = async (
     booking.status = 'payment_pending';
     await booking.save();
 
-    // Deduct points if any were used
-    if (discountBreakdown.pointsDiscount.pointsUsed > 0) {
-      try {
-        await deductPoints(
-          customer._id,
-          discountBreakdown.pointsDiscount.pointsUsed,
-          'redemption',
-          `Points redeemed for booking #${booking.bookingNumber}`,
-          { relatedBooking: booking._id }
-        );
-      } catch (pointsError: any) {
-        console.error('Failed to deduct points for booking:', pointsError);
-        // Points deduction failed — the payment intent was already created.
-        // Log it but don't block the payment. The discount was already applied.
-      }
-    }
+    // Points deduction is handled in the payment success webhook (handlePaymentIntentSucceeded)
+    // to avoid permanently consuming points if the payment is abandoned or fails.
+    // The booking.payment.discount.pointsRedeemed field tells the webhook how much to deduct.
 
     await Payment.findOneAndUpdate(
       { booking: booking._id },

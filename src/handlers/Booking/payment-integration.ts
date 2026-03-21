@@ -5,6 +5,7 @@
 
 import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
+import Project from '../../models/project';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
@@ -232,12 +233,12 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         }
 
         // Update professional's level after booking completion
-        if (booking.professional) {
-          try {
-            await updateProfessionalLevel(booking.professional);
-          } catch (e) {
-            console.error('Error updating professional level:', e);
-          }
+        try {
+          const proId = booking.professional
+            || (booking.project ? (await Project.findById(booking.project).select('professionalId'))?.professionalId : undefined);
+          if (proId) await updateProfessionalLevel(proId);
+        } catch (e) {
+          console.error('Error updating professional level:', e);
         }
 
         return res.json({
@@ -272,12 +273,12 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         }
 
         // Update professional's level after booking completion
-        if (booking.professional) {
-          try {
-            await updateProfessionalLevel(booking.professional);
-          } catch (e) {
-            console.error('Error updating professional level:', e);
-          }
+        try {
+          const proId = booking.professional
+            || (booking.project ? (await Project.findById(booking.project).select('professionalId'))?.professionalId : undefined);
+          if (proId) await updateProfessionalLevel(proId);
+        } catch (e) {
+          console.error('Error updating professional level:', e);
         }
 
         return res.json({

@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import User from '../../models/user';
 import Referral from '../../models/referral';
 import ReferralConfig from '../../models/referralConfig';
+import PointsConfig from '../../models/pointsConfig';
 import { generateReferralCode, getUserReferralStats, validateReferralCode, createReferral } from '../../utils/referralSystem';
 
 /**
@@ -16,8 +17,11 @@ export const getReferralStats = async (req: Request, res: Response, next: NextFu
       return res.status(401).json({ success: false, msg: 'Authentication required' });
     }
 
-    const config = await ReferralConfig.getCurrentConfig();
-    const stats = await getUserReferralStats(userId);
+    const [config, pointsConfig, stats] = await Promise.all([
+      ReferralConfig.getCurrentConfig(),
+      PointsConfig.getCurrentConfig(),
+      getUserReferralStats(userId),
+    ]);
 
     if (!stats) {
       return res.status(404).json({ success: false, msg: 'User not found' });
@@ -32,6 +36,7 @@ export const getReferralStats = async (req: Request, res: Response, next: NextFu
         referredCustomerDiscountType: config.referredCustomerDiscountType,
         referredCustomerDiscountValue: config.referredCustomerDiscountValue,
         referredCustomerDiscountMaxAmount: config.referredCustomerDiscountMaxAmount,
+        conversionRate: pointsConfig.conversionRate,
       }
     });
   } catch (error) {

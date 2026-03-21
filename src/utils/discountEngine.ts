@@ -80,10 +80,12 @@ export function calculateDiscountedPayouts(
   const platformAbsorbed = roundToTwo(loyaltyDiscount.amount + pointsDiscount.discountAmount);
   const platformCommission = roundToTwo(platformCommissionOnBase - platformAbsorbed);
 
+  // When loyalty+points absorption exceeds the base commission, platform subsidizes
+  // the difference. Keep accounting identity: customerPays = platformCommission + professionalPayout
   return {
     customerPays: finalAmount,
-    platformCommission: Math.max(0, platformCommission),
-    professionalPayout: Math.max(0, professionalPayout),
+    platformCommission,
+    professionalPayout,
   };
 }
 
@@ -238,9 +240,10 @@ export const calculateAutoDiscount = async (
     loyaltyDiscount.amount = roundToTwo(loyaltyDiscount.amount * scale);
     repeatBuyerDiscount.amount = roundToTwo(repeatBuyerDiscount.amount * scale);
     pointsDiscount.discountAmount = roundToTwo(pointsDiscount.discountAmount * scale);
-    // Recalculate points used based on scaled discount
+    // Recalculate points used based on scaled discount — floor to avoid spending more than value received
     if (pointsDiscount.conversionRate > 0) {
-      pointsDiscount.pointsUsed = Math.ceil(pointsDiscount.discountAmount / pointsDiscount.conversionRate);
+      const scaledPoints = Math.floor(pointsDiscount.discountAmount / pointsDiscount.conversionRate);
+      pointsDiscount.pointsUsed = Math.min(pointsDiscount.pointsUsed, scaledPoints);
     }
     totalDiscount = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount);
     finalAmount = roundToTwo(quoteAmount - totalDiscount);

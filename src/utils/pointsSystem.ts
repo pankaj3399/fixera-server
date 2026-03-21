@@ -25,24 +25,30 @@ export const addPoints = async (
 
   const config = await PointsConfig.getCurrentConfig();
 
-  const user = await User.findById(userId, null, opts?.session ? { session: opts.session } : {});
-  if (!user) {
-    throw new Error('User not found');
-  }
-
-  const balanceBefore = user.points || 0;
-  const balanceAfter = balanceBefore + amount;
-
   // Calculate expiry
   const expiresAt = new Date();
   expiresAt.setMonth(expiresAt.getMonth() + config.expiryMonths);
 
-  // Update user balance and push expiry forward
-  const updateOpts = opts?.session ? { session: opts.session } : {};
-  await User.findByIdAndUpdate(userId, {
-    $inc: { points: amount },
-    $max: { pointsExpiry: expiresAt }
-  }, updateOpts);
+  // Atomically update and return the previous document for accurate balanceBefore
+  const updateOpts: Record<string, any> = { returnDocument: 'before' as const };
+  if (opts?.session) updateOpts.session = opts.session;
+
+  const prevUser = await User.findOneAndUpdate(
+    { _id: userId },
+    { $inc: { points: amount }, $max: { pointsExpiry: expiresAt } },
+    updateOpts
+  );
+  if (!prevUser) {
+    throw new Error('User not found');
+  }
+  if (prevUser.role === 'employee') {
+    // Rollback: undo the increment
+    await User.findByIdAndUpdate(userId, { $inc: { points: -amount } }, opts?.session ? { session: opts.session } : {});
+    throw new Error('Employees cannot earn or spend points');
+  }
+
+  const balanceBefore = prevUser.points || 0;
+  const balanceAfter = balanceBefore + amount;
 
   // Create transaction record
   const txData = {
@@ -85,29 +91,31 @@ export const deductPoints = async (
     throw new Error('Points amount must be positive');
   }
 
-  const user = await User.findById(userId, null, opts?.session ? { session: opts.session } : {});
-  if (!user) {
-    throw new Error('User not found');
-  }
+  // Atomically decrement with guard and return the previous document
+  const updateOpts: Record<string, any> = { returnDocument: 'before' as const };
+  if (opts?.session) updateOpts.session = opts.session;
 
-  const balanceBefore = user.points || 0;
-  if (balanceBefore < amount) {
-    throw new Error(`Insufficient points: has ${balanceBefore}, needs ${amount}`);
-  }
-
-  const balanceAfter = balanceBefore - amount;
-
-  // Atomically decrement with guard
-  const updateOpts = opts?.session ? { session: opts.session } : {};
-  const result = await User.findOneAndUpdate(
+  const prevUser = await User.findOneAndUpdate(
     { _id: userId, points: { $gte: amount } },
     { $inc: { points: -amount } },
-    { new: true, ...updateOpts }
+    updateOpts
   );
 
-  if (!result) {
-    throw new Error('Failed to deduct points — insufficient balance or concurrent modification');
+  if (!prevUser) {
+    // Distinguish between user-not-found and insufficient balance
+    const exists = await User.findById(userId).select('_id role points');
+    if (!exists) throw new Error('User not found');
+    if (exists.role === 'employee') throw new Error('Employees cannot earn or spend points');
+    throw new Error(`Insufficient points: has ${exists.points || 0}, needs ${amount}`);
   }
+  if (prevUser.role === 'employee') {
+    // Rollback
+    await User.findByIdAndUpdate(userId, { $inc: { points: amount } }, opts?.session ? { session: opts.session } : {});
+    throw new Error('Employees cannot earn or spend points');
+  }
+
+  const balanceBefore = prevUser.points || 0;
+  const balanceAfter = balanceBefore - amount;
 
   // Create transaction record
   const txData = {
@@ -205,21 +213,25 @@ export const expirePoints = async (): Promise<number> => {
     const amount = user.points || 0;
     if (amount <= 0) continue;
 
-    await User.findByIdAndUpdate(user._id, {
-      $set: { points: 0, pointsExpiry: undefined }
-    });
+    try {
+      await User.findByIdAndUpdate(user._id, {
+        $set: { points: 0, pointsExpiry: undefined }
+      });
 
-    await PointTransaction.create({
-      userId: user._id,
-      type: 'spend',
-      source: 'expiry',
-      amount,
-      balanceBefore: amount,
-      balanceAfter: 0,
-      description: 'Points expired'
-    });
+      await PointTransaction.create({
+        userId: user._id,
+        type: 'spend',
+        source: 'expiry',
+        amount,
+        balanceBefore: amount,
+        balanceAfter: 0,
+        description: 'Points expired'
+      });
 
-    count++;
+      count++;
+    } catch (err) {
+      console.error(`Points: Failed to expire points for user=${user._id}:`, err);
+    }
   }
 
   if (count > 0) {

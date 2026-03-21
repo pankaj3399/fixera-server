@@ -56,8 +56,9 @@ export const calculateLoyaltyStatus = async (
 ): Promise<LoyaltyCalculation> => {
   try {
     const config = await LoyaltyConfig.getCurrentConfig();
-    const currentTier = getCurrentTier(config.tiers, totalSpent);
-    const nextTierInfo = getNextTierInfo(config.tiers, totalSpent);
+    const activeTiers = config.tiers.filter(t => t.isActive !== false);
+    const currentTier = getCurrentTier(activeTiers, totalSpent);
+    const nextTierInfo = getNextTierInfo(activeTiers, totalSpent);
 
     return {
       level: currentTier.name,
@@ -104,8 +105,13 @@ export const updateUserLoyalty = async (
       return { user, leveledUp: false, oldLevel: user.loyaltyLevel || 'Bronze', newLevel: user.loyaltyLevel || 'Bronze' };
     }
 
+    const validAmount = Number(bookingAmount);
+    if (!Number.isFinite(validAmount) || validAmount <= 0) {
+      return { user, leveledUp: false, oldLevel: user.loyaltyLevel || 'Bronze', newLevel: user.loyaltyLevel || 'Bronze' };
+    }
+
     const oldLevel = user.loyaltyLevel || 'Bronze';
-    const newTotalSpent = (user.totalSpent || 0) + bookingAmount;
+    const newTotalSpent = (user.totalSpent || 0) + validAmount;
     const newTotalBookings = (user.totalBookings || 0) + 1;
 
     const newStatus = await calculateLoyaltyStatus(newTotalSpent);
