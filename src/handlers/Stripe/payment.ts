@@ -24,6 +24,7 @@ import {
 import { calculateVAT } from '../../utils/vat';
 import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
+import { deductPoints } from '../../utils/pointsSystem';
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
@@ -103,7 +104,8 @@ const clamp = (value: number, min: number, max: number): number => Math.min(Math
  */
 export const createPaymentIntent = async (
   bookingId: string,
-  userId: string
+  userId: string,
+  pointsToRedeem: number = 0
 ): Promise<{ success: boolean; clientSecret?: string; error?: any }> => {
   try {
     const booking = await Booking.findById(bookingId)
@@ -196,13 +198,14 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    // Calculate auto-discount
+    // Calculate auto-discount (includes points if requested)
     const discountBreakdown = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
       booking.quote.amount,
-      customer.totalSpent || 0
+      customer.totalSpent || 0,
+      pointsToRedeem
     );
 
     // Use discounted amount for VAT and payment calculations
@@ -246,7 +249,7 @@ export const createPaymentIntent = async (
     const stripeFee = calculateStripeFee(totalAmount, currency);
 
     if (discountBreakdown.totalDiscount > 0) {
-      console.log(`💰 Discount applied for booking ${booking._id}: loyalty=${discountBreakdown.loyaltyDiscount.amount}, repeat=${discountBreakdown.repeatBuyerDiscount.amount}, total=${discountBreakdown.totalDiscount}`);
+      console.log(`Discount applied for booking ${booking._id}: loyalty=${discountBreakdown.loyaltyDiscount.amount}, repeat=${discountBreakdown.repeatBuyerDiscount.amount}, points=${discountBreakdown.pointsDiscount.discountAmount}, total=${discountBreakdown.totalDiscount}`);
     }
 
     // Create Payment Intent with immediate charge
@@ -293,6 +296,8 @@ export const createPaymentIntent = async (
           loyaltyAmount: discountBreakdown.loyaltyDiscount.amount,
           repeatBuyerPercentage: discountBreakdown.repeatBuyerDiscount.percentage,
           repeatBuyerAmount: discountBreakdown.repeatBuyerDiscount.amount,
+          pointsRedeemed: discountBreakdown.pointsDiscount.pointsUsed,
+          pointsDiscountAmount: discountBreakdown.pointsDiscount.discountAmount,
           totalDiscount: discountBreakdown.totalDiscount,
           originalAmount: discountBreakdown.originalAmount,
         },
@@ -300,6 +305,23 @@ export const createPaymentIntent = async (
     };
     booking.status = 'payment_pending';
     await booking.save();
+
+    // Deduct points if any were used
+    if (discountBreakdown.pointsDiscount.pointsUsed > 0) {
+      try {
+        await deductPoints(
+          customer._id,
+          discountBreakdown.pointsDiscount.pointsUsed,
+          'redemption',
+          `Points redeemed for booking #${booking.bookingNumber}`,
+          { relatedBooking: booking._id }
+        );
+      } catch (pointsError: any) {
+        console.error('Failed to deduct points for booking:', pointsError);
+        // Points deduction failed — the payment intent was already created.
+        // Log it but don't block the payment. The discount was already applied.
+      }
+    }
 
     await Payment.findOneAndUpdate(
       { booking: booking._id },

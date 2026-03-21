@@ -114,16 +114,18 @@ export interface IUser extends Document {
     profileCompletedAt?: Date;
     professionalOnboardingCompletedAt?: Date;
     // Loyalty system fields
-    loyaltyPoints?: number;
     loyaltyLevel?: 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
     totalSpent?: number;
     totalBookings?: number;
     lastLoyaltyUpdate?: Date;
+    // Unified points system
+    points?: number;
+    pointsExpiry?: Date;
+    // Professional level
+    professionalLevel?: 'New' | 'Rising' | 'Level 1' | 'Level 2' | 'Expert';
     // Referral system fields
     referralCode?: string;
     referredBy?: Types.ObjectId;
-    referralCredits?: number;
-    referralCreditsExpiry?: Date;
     totalReferrals?: number;
     completedReferrals?: number;
     employee?: {
@@ -409,11 +411,6 @@ const UserSchema = new Schema({
         required: false
     },
     // Loyalty system fields
-    loyaltyPoints: {
-        type: Number,
-        default: 0,
-        min: 0
-    },
     loyaltyLevel: {
         type: String,
         enum: ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'],
@@ -433,6 +430,22 @@ const UserSchema = new Schema({
         type: Date,
         default: Date.now
     },
+    // Unified points system
+    points: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    pointsExpiry: {
+        type: Date,
+        required: false
+    },
+    // Professional level
+    professionalLevel: {
+        type: String,
+        enum: ['New', 'Rising', 'Level 1', 'Level 2', 'Expert'],
+        default: 'New'
+    },
     // Referral system fields
     referralCode: {
         type: String,
@@ -443,15 +456,6 @@ const UserSchema = new Schema({
     referredBy: {
         type: Schema.Types.ObjectId,
         ref: 'User',
-        required: false
-    },
-    referralCredits: {
-        type: Number,
-        default: 0,
-        min: 0
-    },
-    referralCreditsExpiry: {
-        type: Date,
         required: false
     },
     totalReferrals: {
@@ -609,17 +613,16 @@ UserSchema.pre("save", function (next) {
         this.set("customerType", undefined);
         this.set("companyAddress", undefined);
         this.set("location", undefined);
-        this.set("loyaltyPoints", undefined);
         this.set("loyaltyLevel", undefined);
         this.set("totalSpent", undefined);
         this.set("totalBookings", undefined);
         this.set("lastLoyaltyUpdate", undefined);
+        this.set("points", undefined);
+        this.set("pointsExpiry", undefined);
 
         // Referral fields
         this.set("referralCode", undefined);
         this.set("referredBy", undefined);
-        this.set("referralCredits", undefined);
-        this.set("referralCreditsExpiry", undefined);
         this.set("totalReferrals", undefined);
         this.set("completedReferrals", undefined);
 
@@ -631,7 +634,7 @@ UserSchema.pre("save", function (next) {
 
 UserSchema.index({ role: 1, professionalStatus: 1 });
 UserSchema.index({ role: 1 });
-UserSchema.index({ role: 1, loyaltyPoints: 1 });
+UserSchema.index({ role: 1, points: 1 });
 UserSchema.index({ role: 1, totalSpent: -1 });
 UserSchema.index({ 'employee.companyId': 1 });
 UserSchema.index({ email: 1 });

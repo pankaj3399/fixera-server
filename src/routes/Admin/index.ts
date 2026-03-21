@@ -16,7 +16,13 @@ import {
   updateLoyaltyConfig,
   recalculateCustomerTiers,
   getLoyaltyAnalytics,
-  testLoyaltySystem
+  getPointsConfig,
+  updatePointsConfig,
+  adjustUserPoints,
+  getPointsAnalytics,
+  getProfessionalLevelConfig,
+  updateProfessionalLevelConfig,
+  recalculateProfessionalLevels
 } from "../../handlers/Admin/loyaltyManagement";
 import {
   getAllServiceConfigurations,
@@ -58,11 +64,18 @@ adminRouter.route('/professionals/:professionalId/id-changes').put(reviewIdChang
 adminRouter.route('/stats/approvals').get(getApprovalStats);
 
 // Loyalty system management routes
-adminRouter.route('/loyalty/config').get(getLoyaltyConfig);
-adminRouter.route('/loyalty/config').put(updateLoyaltyConfig);
+adminRouter.route('/loyalty/config').get(getLoyaltyConfig).put(updateLoyaltyConfig);
 adminRouter.route('/loyalty/recalculate').post(recalculateCustomerTiers);
 adminRouter.route('/loyalty/analytics').get(getLoyaltyAnalytics);
-adminRouter.route('/loyalty/test').post(testLoyaltySystem);
+
+// Points system management routes
+adminRouter.route('/points/config').get(getPointsConfig).put(updatePointsConfig);
+adminRouter.route('/points/analytics').get(getPointsAnalytics);
+adminRouter.route('/points/adjust').post(adjustUserPoints);
+
+// Professional level management routes
+adminRouter.route('/professional-levels/config').get(getProfessionalLevelConfig).put(updateProfessionalLevelConfig);
+adminRouter.route('/professional-levels/recalculate').post(recalculateProfessionalLevels);
 
 // Referral system management routes
 adminRouter.route('/referral/config').get(getReferralConfig);

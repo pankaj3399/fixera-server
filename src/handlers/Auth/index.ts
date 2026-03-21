@@ -320,7 +320,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       // Referral fields
       referralCode: user.referralCode,
       referredBy: user.referredBy,
-      referralCredits: user.referralCredits || 0,
+      points: user.points || 0,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     };
@@ -546,8 +546,8 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       // Referral fields
       referralCode: user.referralCode,
       referredBy: user.referredBy,
-      referralCredits: user.referralCredits || 0,
-      referralCreditsExpiry: user.referralCreditsExpiry,
+      points: user.points || 0,
+      pointsExpiry: user.pointsExpiry,
       totalReferrals: user.totalReferrals || 0,
       completedReferrals: user.completedReferrals || 0,
       createdAt: user.createdAt,

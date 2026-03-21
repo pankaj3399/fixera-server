@@ -1,0 +1,295 @@
+import mongoose from 'mongoose';
+import User from '../models/user';
+import Booking from '../models/booking';
+import PointTransaction from '../models/pointTransaction';
+import ProfessionalLevelConfig, { ProfessionalLevelName } from '../models/professionalLevelConfig';
+import { deductPoints } from './pointsSystem';
+
+export interface ProfessionalMetrics {
+  completedBookings: number;
+  daysActive: number;
+  avgRating: number;
+  onTimePercentage: number;
+  responseRate: number;
+  boostedBookings: number; // extra credits from points
+}
+
+export interface ProfessionalLevelInfo {
+  currentLevel: ProfessionalLevelName;
+  metrics: ProfessionalMetrics;
+  effectiveBookings: number; // completedBookings + boostedBookings
+  nextLevel?: {
+    name: ProfessionalLevelName;
+    missingCriteria: string[];
+    progress: number; // percentage toward next level
+  };
+  perks: {
+    badge: string;
+    commissionReduction: number;
+    searchRankingBoost: number;
+  };
+  color: string;
+  icon: string;
+}
+
+/**
+ * Gather performance metrics for a professional from their bookings.
+ */
+export const getProfessionalMetrics = async (
+  professionalId: mongoose.Types.ObjectId | string
+): Promise<ProfessionalMetrics> => {
+  const user = await User.findById(professionalId).select('createdAt');
+  if (!user) {
+    throw new Error('Professional not found');
+  }
+
+  // Days since account creation
+  const daysActive = Math.floor(
+    (Date.now() - new Date(user.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  // Completed bookings count
+  const completedBookings = await Booking.countDocuments({
+    professional: professionalId,
+    status: 'completed'
+  });
+
+  // Average rating from customer reviews
+  const ratingAgg = await Booking.aggregate([
+    {
+      $match: {
+        professional: new mongoose.Types.ObjectId(professionalId.toString()),
+        status: 'completed',
+        'customerReview.rating': { $exists: true }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        avgCommunication: { $avg: '$customerReview.communicationLevel' },
+        avgValue: { $avg: '$customerReview.valueOfDelivery' },
+        avgQuality: { $avg: '$customerReview.qualityOfService' },
+        count: { $sum: 1 }
+      }
+    }
+  ]);
+
+  let avgRating = 0;
+  if (ratingAgg.length > 0) {
+    const agg = ratingAgg[0];
+    avgRating = ((agg.avgCommunication || 0) + (agg.avgValue || 0) + (agg.avgQuality || 0)) / 3;
+    avgRating = Math.round(avgRating * 10) / 10;
+  }
+
+  // On-time percentage: bookings completed without late status changes
+  // For now, use completion rate as proxy (completed / (completed + cancelled by professional))
+  const totalAssigned = await Booking.countDocuments({
+    professional: professionalId,
+    status: { $in: ['completed', 'cancelled', 'in_progress', 'booked'] }
+  });
+  const onTimePercentage = totalAssigned > 0 ? Math.round((completedBookings / totalAssigned) * 100) : 100;
+
+  // Response rate: quoted / total RFQs received
+  const totalRfqs = await Booking.countDocuments({
+    professional: professionalId,
+    status: { $in: ['quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled'] }
+  });
+  const respondedRfqs = await Booking.countDocuments({
+    professional: professionalId,
+    status: { $in: ['quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed'] }
+  });
+  const responseRate = totalRfqs > 0 ? Math.round((respondedRfqs / totalRfqs) * 100) : 100;
+
+  // Points boost: count how many booking credits this professional has purchased
+  const boostTxns = await PointTransaction.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(professionalId.toString()),
+        source: 'boost',
+        type: 'spend'
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        totalPointsSpent: { $sum: '$amount' }
+      }
+    }
+  ]);
+
+  // Will compute boostedBookings using the level config's pointsBoostRatio
+  const totalBoostPointsSpent = boostTxns.length > 0 ? boostTxns[0].totalPointsSpent : 0;
+
+  return {
+    completedBookings,
+    daysActive,
+    avgRating,
+    onTimePercentage,
+    responseRate,
+    boostedBookings: totalBoostPointsSpent // raw points spent, converted later
+  };
+};
+
+/**
+ * Calculate the professional's current level based on their metrics.
+ */
+export const calculateProfessionalLevel = async (
+  professionalId: mongoose.Types.ObjectId | string
+): Promise<ProfessionalLevelInfo> => {
+  const config = await ProfessionalLevelConfig.getCurrentConfig();
+  const metrics = await getProfessionalMetrics(professionalId);
+  const activeLevels = config.levels.filter(l => l.isActive).sort((a, b) => a.order - b.order);
+
+  if (activeLevels.length === 0) {
+    throw new Error('No active professional levels configured');
+  }
+
+  // Find the highest level where ALL criteria are met
+  let currentLevelIndex = 0;
+  for (let i = activeLevels.length - 1; i >= 0; i--) {
+    const level = activeLevels[i];
+    const c = level.criteria;
+
+    // Calculate effective bookings (real + boosted)
+    const boostedBookings = level.pointsBoostRatio > 0
+      ? Math.floor(metrics.boostedBookings / level.pointsBoostRatio)
+      : 0;
+    const effectiveBookings = metrics.completedBookings + boostedBookings;
+
+    const meetsAll =
+      effectiveBookings >= c.minCompletedBookings &&
+      metrics.daysActive >= c.minDaysActive &&
+      metrics.avgRating >= c.minAvgRating &&
+      metrics.onTimePercentage >= c.minOnTimePercentage &&
+      metrics.responseRate >= c.minResponseRate;
+
+    if (meetsAll) {
+      currentLevelIndex = i;
+      break;
+    }
+  }
+
+  const currentLevel = activeLevels[currentLevelIndex];
+  const boostedBookings = currentLevel.pointsBoostRatio > 0
+    ? Math.floor(metrics.boostedBookings / currentLevel.pointsBoostRatio)
+    : 0;
+  const effectiveBookings = metrics.completedBookings + boostedBookings;
+
+  // Next level info
+  let nextLevel: ProfessionalLevelInfo['nextLevel'] = undefined;
+  if (currentLevelIndex < activeLevels.length - 1) {
+    const next = activeLevels[currentLevelIndex + 1];
+    const nc = next.criteria;
+
+    const nextBoosted = next.pointsBoostRatio > 0
+      ? Math.floor(metrics.boostedBookings / next.pointsBoostRatio)
+      : 0;
+    const nextEffective = metrics.completedBookings + nextBoosted;
+
+    const missingCriteria: string[] = [];
+    if (nextEffective < nc.minCompletedBookings) {
+      missingCriteria.push(`${nc.minCompletedBookings - nextEffective} more completed bookings`);
+    }
+    if (metrics.daysActive < nc.minDaysActive) {
+      missingCriteria.push(`${nc.minDaysActive - metrics.daysActive} more days active`);
+    }
+    if (metrics.avgRating < nc.minAvgRating) {
+      missingCriteria.push(`Rating ${metrics.avgRating} → ${nc.minAvgRating} needed`);
+    }
+    if (metrics.onTimePercentage < nc.minOnTimePercentage) {
+      missingCriteria.push(`On-time ${metrics.onTimePercentage}% → ${nc.minOnTimePercentage}% needed`);
+    }
+    if (metrics.responseRate < nc.minResponseRate) {
+      missingCriteria.push(`Response rate ${metrics.responseRate}% → ${nc.minResponseRate}% needed`);
+    }
+
+    // Progress: percentage of criteria met (simple average)
+    const criteriaCount = 5;
+    let metCount = criteriaCount - missingCriteria.length;
+    const progress = Math.round((metCount / criteriaCount) * 100);
+
+    nextLevel = {
+      name: next.name as ProfessionalLevelName,
+      missingCriteria,
+      progress
+    };
+  }
+
+  return {
+    currentLevel: currentLevel.name as ProfessionalLevelName,
+    metrics: {
+      ...metrics,
+      boostedBookings
+    },
+    effectiveBookings,
+    nextLevel,
+    perks: {
+      badge: currentLevel.perks.badge,
+      commissionReduction: currentLevel.perks.commissionReduction,
+      searchRankingBoost: currentLevel.perks.searchRankingBoost
+    },
+    color: currentLevel.color,
+    icon: currentLevel.icon
+  };
+};
+
+/**
+ * Recalculate and persist a professional's level.
+ * Called after booking completion or points boost.
+ */
+export const updateProfessionalLevel = async (
+  professionalId: mongoose.Types.ObjectId | string
+): Promise<{ levelChanged: boolean; oldLevel: string; newLevel: string }> => {
+  const user = await User.findById(professionalId);
+  if (!user || user.role !== 'professional') {
+    return { levelChanged: false, oldLevel: 'New', newLevel: 'New' };
+  }
+
+  const oldLevel = user.professionalLevel || 'New';
+  const levelInfo = await calculateProfessionalLevel(professionalId);
+
+  if (oldLevel !== levelInfo.currentLevel) {
+    user.professionalLevel = levelInfo.currentLevel;
+    await user.save();
+    console.log(`Professional Level: ${user.email} ${oldLevel} → ${levelInfo.currentLevel}`);
+  }
+
+  return {
+    levelChanged: oldLevel !== levelInfo.currentLevel,
+    oldLevel,
+    newLevel: levelInfo.currentLevel
+  };
+};
+
+/**
+ * Professional uses points to boost their booking count toward level requirements.
+ */
+export const applyPointsBoost = async (
+  professionalId: mongoose.Types.ObjectId | string,
+  pointsToSpend: number
+): Promise<{ boostedBookings: number; newLevel: string; levelChanged: boolean }> => {
+  const config = await ProfessionalLevelConfig.getCurrentConfig();
+  // Use the first active level's boost ratio as reference
+  const activeLevel = config.levels.find(l => l.isActive);
+  const boostRatio = activeLevel?.pointsBoostRatio || 100;
+
+  const boostedBookings = Math.floor(pointsToSpend / boostRatio);
+  if (boostedBookings < 1) {
+    throw new Error(`Need at least ${boostRatio} points for 1 booking credit boost`);
+  }
+
+  // Only spend exact multiple
+  const actualPointsSpent = boostedBookings * boostRatio;
+
+  await deductPoints(
+    professionalId as mongoose.Types.ObjectId,
+    actualPointsSpent,
+    'boost',
+    `Boosted ${boostedBookings} booking credits toward professional level`
+  );
+
+  // Recalculate level
+  const { levelChanged, newLevel } = await updateProfessionalLevel(professionalId);
+
+  return { boostedBookings, newLevel, levelChanged };
+};

@@ -1,11 +1,13 @@
 /**
  * Discount Engine
- * Calculates auto-applied discounts based on loyalty tier and repeat-buyer settings
+ * Calculates auto-applied discounts based on loyalty tier, repeat-buyer settings, and points redemption
  */
 
 import LoyaltyConfig from '../models/loyaltyConfig';
 import Booking from '../models/booking';
 import Project from '../models/project';
+import PointsConfig from '../models/pointsConfig';
+import User from '../models/user';
 import { getCurrentTier } from './loyaltySystem';
 
 export interface LoyaltyDiscountInfo {
@@ -22,9 +24,16 @@ export interface RepeatBuyerDiscountInfo {
   capped: boolean;
 }
 
+export interface PointsDiscountInfo {
+  pointsUsed: number;
+  discountAmount: number;
+  conversionRate: number;
+}
+
 export interface DiscountBreakdown {
   loyaltyDiscount: LoyaltyDiscountInfo;
   repeatBuyerDiscount: RepeatBuyerDiscountInfo;
+  pointsDiscount: PointsDiscountInfo;
   totalDiscount: number;
   originalAmount: number;
   finalAmount: number;
@@ -41,9 +50,10 @@ const MINIMUM_PAYMENT_AMOUNT = 0.50; // Stripe minimum in EUR
  * Hybrid model:
  * - Platform absorbs loyalty discount -> professional gets full payout as if no loyalty discount
  * - Professional absorbs repeat-buyer discount -> professional payout reduced by their discount
+ * - Platform absorbs points discount -> same as loyalty, professional unaffected
  *
  * Customer pays: originalAmount - totalDiscount
- * Platform commission: calculated on (originalAmount - repeatBuyerDiscount) then minus loyaltyDiscount
+ * Platform commission: calculated on (originalAmount - repeatBuyerDiscount) then minus loyaltyDiscount minus pointsDiscount
  * Professional payout: calculated on (originalAmount - repeatBuyerDiscount)
  */
 export function calculateDiscountedPayouts(
@@ -54,7 +64,7 @@ export function calculateDiscountedPayouts(
   platformCommission: number;
   professionalPayout: number;
 } {
-  const { originalAmount, finalAmount, loyaltyDiscount, repeatBuyerDiscount } = discount;
+  const { originalAmount, finalAmount, loyaltyDiscount, repeatBuyerDiscount, pointsDiscount } = discount;
 
   // The amount the professional's world sees (before platform commission)
   // = original amount minus the repeat-buyer discount they offered
@@ -66,9 +76,9 @@ export function calculateDiscountedPayouts(
   // Professional payout = their base amount minus commission
   const professionalPayout = roundToTwo(professionalBaseAmount - platformCommissionOnBase);
 
-  // Platform commission after absorbing loyalty discount
-  // Platform earns: platformCommissionOnBase - loyaltyDiscount.amount
-  const platformCommission = roundToTwo(platformCommissionOnBase - loyaltyDiscount.amount);
+  // Platform commission after absorbing loyalty discount and points discount
+  const platformAbsorbed = roundToTwo(loyaltyDiscount.amount + pointsDiscount.discountAmount);
+  const platformCommission = roundToTwo(platformCommissionOnBase - platformAbsorbed);
 
   return {
     customerPays: finalAmount,
@@ -78,22 +88,25 @@ export function calculateDiscountedPayouts(
 }
 
 /**
- * Calculate auto-discount for a booking based on loyalty tier and repeat-buyer config
+ * Calculate auto-discount for a booking based on loyalty tier, repeat-buyer config, and optional points
  */
 export const calculateAutoDiscount = async (
   customerId: string,
   professionalId: string,
   projectId: string | null,
   quoteAmount: number,
-  customerTotalSpent: number
+  customerTotalSpent: number,
+  pointsToRedeem: number = 0
 ): Promise<DiscountBreakdown> => {
   const emptyLoyalty: LoyaltyDiscountInfo = { percentage: 0, amount: 0, tier: 'Bronze', capped: false };
   const emptyRepeat: RepeatBuyerDiscountInfo = { percentage: 0, amount: 0, previousBookings: 0, capped: false };
+  const emptyPoints: PointsDiscountInfo = { pointsUsed: 0, discountAmount: 0, conversionRate: 1 };
 
   if (quoteAmount <= 0) {
     return {
       loyaltyDiscount: emptyLoyalty,
       repeatBuyerDiscount: emptyRepeat,
+      pointsDiscount: emptyPoints,
       totalDiscount: 0,
       originalAmount: quoteAmount,
       finalAmount: quoteAmount,
@@ -143,7 +156,6 @@ export const calculateAutoDiscount = async (
       const project = await Project.findById(projectId).select('repeatBuyerDiscount professionalId');
 
       if (project?.repeatBuyerDiscount?.enabled && project.repeatBuyerDiscount.percentage > 0) {
-        // Use the project's own professionalId for the booking count
         const projectProfessionalId = project.professionalId?.toString();
         if (!projectProfessionalId || projectProfessionalId !== professionalId) {
           // Professional doesn't own this project — skip repeat discount
@@ -179,8 +191,44 @@ export const calculateAutoDiscount = async (
     }
   }
 
-  // 3. Combine discounts (additive)
-  const rawTotal = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount);
+  // 3. Calculate points discount
+  let pointsDiscount: PointsDiscountInfo = { ...emptyPoints };
+  if (pointsToRedeem > 0) {
+    try {
+      const pointsConfig = await PointsConfig.getCurrentConfig();
+      pointsDiscount.conversionRate = pointsConfig.conversionRate;
+
+      if (pointsConfig.isEnabled) {
+        const user = await User.findById(customerId).select('points pointsExpiry');
+
+        if (user && (user.points || 0) > 0) {
+          // Check expiry
+          const isExpired = user.pointsExpiry && new Date() > user.pointsExpiry;
+          if (!isExpired) {
+            const available = user.points || 0;
+            let redeemable = Math.min(pointsToRedeem, available);
+
+            if (redeemable >= pointsConfig.minRedemptionPoints) {
+              let discountAmount = roundToTwo(redeemable * pointsConfig.conversionRate);
+
+              // Will be clamped below with the total — just set for now
+              pointsDiscount = {
+                pointsUsed: redeemable,
+                discountAmount,
+                conversionRate: pointsConfig.conversionRate,
+              };
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Discount Engine: Failed to calculate points discount:', error);
+      throw error;
+    }
+  }
+
+  // 4. Combine discounts (additive)
+  const rawTotal = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount);
   let finalAmount = roundToTwo(Math.max(MINIMUM_PAYMENT_AMOUNT, quoteAmount - rawTotal));
 
   // If clamped to minimum, reconcile component amounts proportionally
@@ -189,16 +237,21 @@ export const calculateAutoDiscount = async (
     const scale = totalDiscount / rawTotal;
     loyaltyDiscount.amount = roundToTwo(loyaltyDiscount.amount * scale);
     repeatBuyerDiscount.amount = roundToTwo(repeatBuyerDiscount.amount * scale);
-    // Ensure rounding doesn't drift
-    totalDiscount = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount);
+    pointsDiscount.discountAmount = roundToTwo(pointsDiscount.discountAmount * scale);
+    // Recalculate points used based on scaled discount
+    if (pointsDiscount.conversionRate > 0) {
+      pointsDiscount.pointsUsed = Math.ceil(pointsDiscount.discountAmount / pointsDiscount.conversionRate);
+    }
+    totalDiscount = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount);
     finalAmount = roundToTwo(quoteAmount - totalDiscount);
   }
 
   if (totalDiscount > 0) {
     console.log(
-      `💰 Discount Engine: Quote €${quoteAmount} → ` +
+      `Discount Engine: Quote €${quoteAmount} → ` +
       `Loyalty (${loyaltyDiscount.tier} ${loyaltyDiscount.percentage}%): -€${loyaltyDiscount.amount} | ` +
       `Repeat (${repeatBuyerDiscount.percentage}%): -€${repeatBuyerDiscount.amount} | ` +
+      `Points (${pointsDiscount.pointsUsed}pts): -€${pointsDiscount.discountAmount} | ` +
       `Total discount: -€${totalDiscount} → Final: €${finalAmount}`
     );
   }
@@ -206,6 +259,7 @@ export const calculateAutoDiscount = async (
   return {
     loyaltyDiscount,
     repeatBuyerDiscount,
+    pointsDiscount,
     totalDiscount,
     originalAmount: quoteAmount,
     finalAmount,

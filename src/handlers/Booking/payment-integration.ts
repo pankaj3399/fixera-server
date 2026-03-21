@@ -7,6 +7,7 @@ import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
+import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 
 const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'rfq',
@@ -49,7 +50,7 @@ const isTransitionAllowed = (current: BookingStatus, requested: BookingStatus): 
 export const respondToQuoteWithPayment = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
-    const { action } = req.body; // 'accept' or 'reject'
+    const { action, pointsToRedeem } = req.body; // 'accept' or 'reject', optional pointsToRedeem
     const userId = (req as any).user?._id?.toString();
 
     if (!userId) {
@@ -98,8 +99,8 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
       booking.status = 'quote_accepted';
       await booking.save();
 
-      // Create Payment Intent
-      const paymentResult = await createPaymentIntent(booking._id.toString(), userId);
+      // Create Payment Intent (with optional points redemption)
+      const paymentResult = await createPaymentIntent(booking._id.toString(), userId, parseInt(pointsToRedeem) || 0);
 
       if (!paymentResult.success) {
         // Revert status if payment intent creation fails
@@ -230,6 +231,15 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           console.error('Error processing referral completion:', e);
         }
 
+        // Update professional's level after booking completion
+        if (booking.professional) {
+          try {
+            await updateProfessionalLevel(booking.professional);
+          } catch (e) {
+            console.error('Error updating professional level:', e);
+          }
+        }
+
         return res.json({
           success: true,
           data: {
@@ -259,6 +269,15 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           await processReferralCompletion(booking.customer, booking._id, bookingAmount);
         } catch (e) {
           console.error('Error processing referral completion:', e);
+        }
+
+        // Update professional's level after booking completion
+        if (booking.professional) {
+          try {
+            await updateProfessionalLevel(booking.professional);
+          } catch (e) {
+            console.error('Error updating professional level:', e);
+          }
         }
 
         return res.json({
@@ -379,7 +398,8 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       });
     }
 
-    const paymentResult = await createPaymentIntent(booking._id.toString(), userId);
+    const { pointsToRedeem: pts } = req.body || {};
+    const paymentResult = await createPaymentIntent(booking._id.toString(), userId, parseInt(pts) || 0);
     if (!paymentResult.success) {
       return res.status(400).json({
         success: false,

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import ReferralConfig from '../../models/referralConfig';
 import Referral from '../../models/referral';
 import User from '../../models/user';
+import { deductPoints } from '../../utils/pointsSystem';
 
 /**
  * GET /api/admin/referral/config
@@ -82,7 +83,7 @@ export const getReferralAnalytics = async (req: Request, res: Response, next: Ne
       expiredReferrals,
       revokedReferrals,
       totalCreditsIssued,
-      totalCurrentCredits,
+      totalCurrentPoints,
       topReferrers
     ] = await Promise.all([
       Referral.countDocuments(),
@@ -96,8 +97,8 @@ export const getReferralAnalytics = async (req: Request, res: Response, next: Ne
         { $group: { _id: null, total: { $sum: '$referrerRewardAmount' } } }
       ]),
       User.aggregate([
-        { $match: { referralCredits: { $gt: 0 } } },
-        { $group: { _id: null, total: { $sum: '$referralCredits' } } }
+        { $match: { points: { $gt: 0 } } },
+        { $group: { _id: null, total: { $sum: '$points' } } }
       ]),
       Referral.aggregate([
         { $group: { _id: '$referrer', total: { $sum: 1 }, completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } } } },
@@ -139,8 +140,8 @@ export const getReferralAnalytics = async (req: Request, res: Response, next: Ne
         expiredReferrals,
         revokedReferrals,
         conversionRate: parseFloat(conversionRate),
-        totalCreditsIssued: totalCreditsIssued[0]?.total || 0,
-        currentCreditsBalance: totalCurrentCredits[0]?.total || 0,
+        totalPointsIssued: totalCreditsIssued[0]?.total || 0,
+        currentPointsBalance: totalCurrentPoints[0]?.total || 0,
         topReferrers
       }
     });
@@ -212,29 +213,24 @@ export const revokeReferral = async (req: Request, res: Response, next: NextFunc
       return res.status(400).json({ success: false, msg: 'Referral is already revoked' });
     }
 
-    // If referral was completed, claw back the credits safely
+    // If referral was completed, claw back the points safely
     if (referral.status === 'completed' && referral.referrerRewardAmount > 0) {
-      const updated = await User.findOneAndUpdate(
-        {
-          _id: referral.referrer,
-          referralCredits: { $gte: referral.referrerRewardAmount }
-        },
-        {
-          $inc: {
-            referralCredits: -referral.referrerRewardAmount,
-            completedReferrals: -1
-          }
-        },
-        { new: true }
-      );
-
-      if (!updated) {
-        // Insufficient credits — set to 0 and still decrement completedReferrals
-        await User.findByIdAndUpdate(referral.referrer, {
-          $set: { referralCredits: 0 },
-          $inc: { completedReferrals: -1 }
-        });
+      try {
+        await deductPoints(
+          referral.referrer,
+          referral.referrerRewardAmount,
+          'admin-adjustment',
+          `Referral revoked: points clawed back`,
+          { metadata: { relatedReferral: referral._id } }
+        );
+      } catch {
+        // User may not have enough points — set to 0
+        await User.findByIdAndUpdate(referral.referrer, { $set: { points: 0 } });
       }
+
+      await User.findByIdAndUpdate(referral.referrer, {
+        $inc: { completedReferrals: -1 }
+      });
     }
 
     referral.status = 'revoked';

@@ -199,6 +199,7 @@ async function testPurePayoutCalculation() {
   const discount: DiscountBreakdown = {
     loyaltyDiscount: { tier: 'Gold', percentage: 5, amount: 25, capped: false },
     repeatBuyerDiscount: { percentage: 10, amount: 50, previousBookings: 3, capped: false },
+    pointsDiscount: { pointsUsed: 0, discountAmount: 0, conversionRate: 1 },
     totalDiscount: 75,
     originalAmount: 500,
     finalAmount: 425,
@@ -229,6 +230,7 @@ async function testPurePayoutNoDiscount() {
   const discount: DiscountBreakdown = {
     loyaltyDiscount: { tier: 'Bronze', percentage: 0, amount: 0, capped: false },
     repeatBuyerDiscount: { percentage: 0, amount: 0, previousBookings: 0, capped: false },
+    pointsDiscount: { pointsUsed: 0, discountAmount: 0, conversionRate: 1 },
     totalDiscount: 0,
     originalAmount: 1000,
     finalAmount: 1000,
@@ -247,6 +249,7 @@ async function testPurePayoutOnlyLoyalty() {
   const discount: DiscountBreakdown = {
     loyaltyDiscount: { tier: 'Platinum', percentage: 10, amount: 100, capped: false },
     repeatBuyerDiscount: { percentage: 0, amount: 0, previousBookings: 0, capped: false },
+    pointsDiscount: { pointsUsed: 0, discountAmount: 0, conversionRate: 1 },
     totalDiscount: 100,
     originalAmount: 1000,
     finalAmount: 900,
@@ -267,6 +270,7 @@ async function testPurePayoutOnlyRepeat() {
   const discount: DiscountBreakdown = {
     loyaltyDiscount: { tier: 'Bronze', percentage: 0, amount: 0, capped: false },
     repeatBuyerDiscount: { percentage: 5, amount: 50, previousBookings: 3, capped: false },
+    pointsDiscount: { pointsUsed: 0, discountAmount: 0, conversionRate: 1 },
     totalDiscount: 50,
     originalAmount: 1000,
     finalAmount: 950,

@@ -7,7 +7,7 @@ import { GetCurrentUser } from "../../handlers";
 import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handlers/User/validateVat";
 import { uploadIdProof, updateProfessionalProfile, submitForVerification, updatePhone, updateCustomerProfile, updateIdInfo } from "../../handlers/User/profileManagement";
 import { upload } from "../../utils/s3Upload";
-import { getLoyaltyStatus, addSpending, getLeaderboard } from "../../handlers/User/loyaltyManagement";
+import { getLoyaltyStatus, addSpending, getLeaderboard, getUserPointsBalance, getUserPointsHistory, getProfessionalLevelStatus, boostProfessionalLevel } from "../../handlers/User/loyaltyManagement";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
 import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
 import {
@@ -60,6 +60,14 @@ userRouter.route("/id-info").put(updateIdInfo)
 userRouter.route("/loyalty/status").get(getLoyaltyStatus)
 userRouter.route("/loyalty/add-spending").post(addSpending)
 userRouter.route("/loyalty/leaderboard").get(getLeaderboard)
+
+// Points Routes
+userRouter.route("/points/balance").get(getUserPointsBalance)
+userRouter.route("/points/history").get(getUserPointsHistory)
+
+// Professional Level Routes
+userRouter.route("/professional-level").get(getProfessionalLevelStatus)
+userRouter.route("/professional-level/boost").post(boostProfessionalLevel)
 
 // Referral Routes
 userRouter.route("/referral/stats").get(getReferralStats)

@@ -142,6 +142,8 @@ export interface IBooking extends Document {
       loyaltyAmount: number;
       repeatBuyerPercentage: number;
       repeatBuyerAmount: number;
+      pointsRedeemed: number;
+      pointsDiscountAmount: number;
       totalDiscount: number;
       originalAmount: number;
     };
@@ -491,6 +493,8 @@ const BookingSchema = new Schema({
       loyaltyAmount: { type: Number, default: 0 },
       repeatBuyerPercentage: { type: Number, default: 0 },
       repeatBuyerAmount: { type: Number, default: 0 },
+      pointsRedeemed: { type: Number, default: 0 },
+      pointsDiscountAmount: { type: Number, default: 0 },
       totalDiscount: { type: Number, default: 0 },
       originalAmount: { type: Number, default: 0 },
     }

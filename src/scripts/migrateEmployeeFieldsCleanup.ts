@@ -43,7 +43,8 @@ const FIELDS_TO_UNSET = {
   // Customer-only fields
   customerType: "",
   location: "",
-  loyaltyPoints: "",
+  points: "",
+  pointsExpiry: "",
   loyaltyLevel: "",
   totalSpent: "",
   totalBookings: "",

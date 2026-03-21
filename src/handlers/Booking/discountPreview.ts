@@ -8,13 +8,14 @@ import Booking from '../../models/booking';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
 
 /**
- * GET /api/bookings/:bookingId/discount-preview
+ * GET /api/bookings/:bookingId/discount-preview?pointsToRedeem=50
  * Returns the discount breakdown for a quoted booking
  */
 export const getDiscountPreview = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
     const userId = (req as any).user?._id?.toString();
+    const pointsToRedeem = parseInt(req.query.pointsToRedeem as string) || 0;
 
     if (!userId) {
       return res.status(401).json({
@@ -24,7 +25,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'totalSpent')
+      .populate('customer', 'totalSpent points pointsExpiry')
       .populate('project', 'repeatBuyerDiscount professionalId');
 
     if (!booking) {
@@ -75,12 +76,17 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       professionalId,
       projectId,
       booking.quote.amount,
-      customer.totalSpent || 0
+      customer.totalSpent || 0,
+      pointsToRedeem
     );
 
     return res.json({
       success: true,
-      data: { discount }
+      data: {
+        discount,
+        availablePoints: customer.points || 0,
+        pointsExpiry: customer.pointsExpiry || null,
+      }
     });
 
   } catch (error: any) {

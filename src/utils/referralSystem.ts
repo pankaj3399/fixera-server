@@ -2,6 +2,7 @@ import User from '../models/user';
 import Referral from '../models/referral';
 import ReferralConfig from '../models/referralConfig';
 import mongoose from 'mongoose';
+import { addPoints } from './pointsSystem';
 
 /**
  * Generate a unique referral code for a user.
@@ -169,21 +170,20 @@ export const processReferralCompletion = async (
     return { completed: true };
   }
 
-  // Issue reward to referrer — use $max for expiry so we never shorten an existing later expiry
-  const creditExpiryDate = new Date();
-  creditExpiryDate.setMonth(creditExpiryDate.getMonth() + config.creditExpiryMonths);
+  // Issue points reward to referrer
+  await addPoints(
+    referral.referrer,
+    config.referrerRewardAmount,
+    'referral',
+    `Referral reward: referred user completed first booking`,
+    { relatedReferral: referral._id as mongoose.Types.ObjectId, relatedBooking: bookingId }
+  );
 
   await User.findByIdAndUpdate(referral.referrer, {
-    $inc: {
-      referralCredits: config.referrerRewardAmount,
-      completedReferrals: 1
-    },
-    $max: {
-      referralCreditsExpiry: creditExpiryDate
-    }
+    $inc: { completedReferrals: 1 }
   });
 
-  console.log(`Referral completed: referrer=${referral.referrer} earned €${config.referrerRewardAmount} for referred user=${userId}`);
+  console.log(`Referral completed: referrer=${referral.referrer} earned ${config.referrerRewardAmount} points for referred user=${userId}`);
 
   return { completed: true };
 };
@@ -192,7 +192,7 @@ export const processReferralCompletion = async (
  * Get referral stats for a user (for dashboard display).
  */
 export const getUserReferralStats = async (userId: mongoose.Types.ObjectId) => {
-  const user = await User.findById(userId).select('referralCode referralCredits referralCreditsExpiry totalReferrals completedReferrals name');
+  const user = await User.findById(userId).select('referralCode points pointsExpiry totalReferrals completedReferrals name');
   if (!user) return null;
 
   const referrals = await Referral.find({ referrer: userId })
@@ -202,18 +202,18 @@ export const getUserReferralStats = async (userId: mongoose.Types.ObjectId) => {
 
   const pendingCount = referrals.filter(r => r.status === 'pending').length;
   const completedCount = referrals.filter(r => r.status === 'completed').length;
-  const totalCreditsEarned = referrals
+  const totalPointsEarned = referrals
     .filter(r => r.status === 'completed')
     .reduce((sum, r) => sum + r.referrerRewardAmount, 0);
 
   return {
     referralCode: user.referralCode,
-    referralCredits: user.referralCredits || 0,
-    referralCreditsExpiry: user.referralCreditsExpiry,
+    points: user.points || 0,
+    pointsExpiry: user.pointsExpiry,
     totalReferrals: user.totalReferrals || 0,
     pendingReferrals: pendingCount,
     completedReferrals: completedCount,
-    totalCreditsEarned,
+    totalPointsEarned,
     referrals: referrals.map(r => ({
       _id: r._id,
       referredUser: r.referredUser,
