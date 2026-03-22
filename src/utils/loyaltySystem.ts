@@ -22,12 +22,13 @@ export interface LoyaltyCalculation {
 
 // Get current tier based on total spending amount
 export const getCurrentTier = (tiers: ILoyaltyTier[], totalSpent: number): ILoyaltyTier => {
-  for (let i = tiers.length - 1; i >= 0; i--) {
-    if (totalSpent >= tiers[i].minSpendingAmount) {
-      return tiers[i];
+  const orderedTiers = tiers.slice().sort((a, b) => a.minSpendingAmount - b.minSpendingAmount);
+  for (let i = orderedTiers.length - 1; i >= 0; i--) {
+    if (totalSpent >= orderedTiers[i].minSpendingAmount) {
+      return orderedTiers[i];
     }
   }
-  return tiers[0];
+  return orderedTiers[0];
 };
 
 // Get next tier information
@@ -36,9 +37,10 @@ export const getNextTierInfo = (tiers: ILoyaltyTier[], totalSpent: number): {
   amountNeeded?: number;
   progress?: number;
 } => {
-  const currentTier = getCurrentTier(tiers, totalSpent);
-  const currentIndex = tiers.findIndex(tier => tier.name === currentTier.name);
-  const nextTier = currentIndex < tiers.length - 1 ? tiers[currentIndex + 1] : null;
+  const orderedTiers = tiers.slice().sort((a, b) => a.minSpendingAmount - b.minSpendingAmount);
+  const currentTier = getCurrentTier(orderedTiers, totalSpent);
+  const currentIndex = orderedTiers.findIndex(tier => tier.name === currentTier.name);
+  const nextTier = currentIndex < orderedTiers.length - 1 ? orderedTiers[currentIndex + 1] : null;
 
   if (!nextTier) {
     return {};
@@ -92,47 +94,68 @@ export const calculateLoyaltyStatus = async (
  */
 export const updateUserLoyalty = async (
   userId: string,
-  bookingAmount: number
+  bookingAmount: number,
+  maxRetries: number = 3
 ): Promise<{ user: IUser | null; leveledUp: boolean; oldLevel: string; newLevel: string }> => {
-  try {
+  const validAmount = Number(bookingAmount);
+  if (!Number.isFinite(validAmount) || validAmount <= 0) {
     const user = await User.findById(userId);
-    if (!user) {
-      console.error(`Loyalty: User not found: ${userId}`);
+    return { user, leveledUp: false, oldLevel: user?.loyaltyLevel || 'Bronze', newLevel: user?.loyaltyLevel || 'Bronze' };
+  }
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const user = await User.findById(userId);
+      if (!user) {
+        console.error(`Loyalty: User not found: ${userId}`);
+        return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
+      }
+
+      if (user.role !== 'customer') {
+        return { user, leveledUp: false, oldLevel: user.loyaltyLevel || 'Bronze', newLevel: user.loyaltyLevel || 'Bronze' };
+      }
+
+      const oldLevel = user.loyaltyLevel || 'Bronze';
+      const newTotalSpent = (user.totalSpent || 0) + validAmount;
+      const newTotalBookings = (user.totalBookings || 0) + 1;
+
+      const newStatus = await calculateLoyaltyStatus(newTotalSpent);
+      const newLevel = toValidLoyaltyLevel(newStatus.level);
+      const leveledUp = oldLevel !== newLevel;
+
+      const result = await User.findOneAndUpdate(
+        { _id: userId, __v: user.__v },
+        {
+          $inc: { totalSpent: validAmount, totalBookings: 1, __v: 1 },
+          $set: {
+            loyaltyLevel: newLevel,
+            lastLoyaltyUpdate: new Date()
+          }
+        },
+        { new: true }
+      );
+
+      if (!result) {
+        // Version conflict — another update happened concurrently, retry
+        if (attempt < maxRetries - 1) {
+          continue;
+        }
+        console.error(`Loyalty: Update failed after ${maxRetries} retries due to concurrent modifications for user ${userId}`);
+        return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
+      }
+
+      if (leveledUp) {
+        console.log(`Loyalty: Level up! ${result.email} ${oldLevel} → ${newLevel}`);
+      }
+
+      return { user: result, leveledUp, oldLevel, newLevel };
+    } catch (error) {
+      console.error('Loyalty: Update failed:', error);
       return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
     }
-
-    if (user.role !== 'customer') {
-      return { user, leveledUp: false, oldLevel: user.loyaltyLevel || 'Bronze', newLevel: user.loyaltyLevel || 'Bronze' };
-    }
-
-    const validAmount = Number(bookingAmount);
-    if (!Number.isFinite(validAmount) || validAmount <= 0) {
-      return { user, leveledUp: false, oldLevel: user.loyaltyLevel || 'Bronze', newLevel: user.loyaltyLevel || 'Bronze' };
-    }
-
-    const oldLevel = user.loyaltyLevel || 'Bronze';
-    const newTotalSpent = (user.totalSpent || 0) + validAmount;
-    const newTotalBookings = (user.totalBookings || 0) + 1;
-
-    const newStatus = await calculateLoyaltyStatus(newTotalSpent);
-    const leveledUp = oldLevel !== newStatus.level;
-
-    user.loyaltyLevel = toValidLoyaltyLevel(newStatus.level);
-    user.totalSpent = newTotalSpent;
-    user.totalBookings = newTotalBookings;
-    user.lastLoyaltyUpdate = new Date();
-
-    await user.save();
-
-    if (leveledUp) {
-      console.log(`Loyalty: Level up! ${user.email} ${oldLevel} → ${newStatus.level}`);
-    }
-
-    return { user, leveledUp, oldLevel, newLevel: newStatus.level };
-  } catch (error) {
-    console.error('Loyalty: Update failed:', error);
-    return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
   }
+
+  return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
 };
 
 // Get loyalty benefits for a user

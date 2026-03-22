@@ -227,6 +227,26 @@ export const updatePointsConfig = async (req: Request, res: Response, next: Next
     const userId = (req as any).admin?._id;
     const { isEnabled, conversionRate, expiryMonths, minRedemptionPoints } = req.body;
 
+    // Validate fields
+    if (isEnabled !== undefined && typeof isEnabled !== 'boolean') {
+      return res.status(400).json({ success: false, msg: "isEnabled must be a boolean" });
+    }
+    if (conversionRate !== undefined) {
+      if (typeof conversionRate !== 'number' || !Number.isFinite(conversionRate) || conversionRate <= 0) {
+        return res.status(400).json({ success: false, msg: "conversionRate must be a positive number" });
+      }
+    }
+    if (expiryMonths !== undefined) {
+      if (typeof expiryMonths !== 'number' || !Number.isInteger(expiryMonths) || expiryMonths < 0) {
+        return res.status(400).json({ success: false, msg: "expiryMonths must be a non-negative integer" });
+      }
+    }
+    if (minRedemptionPoints !== undefined) {
+      if (typeof minRedemptionPoints !== 'number' || !Number.isInteger(minRedemptionPoints) || minRedemptionPoints < 0) {
+        return res.status(400).json({ success: false, msg: "minRedemptionPoints must be a non-negative integer" });
+      }
+    }
+
     const config = await PointsConfig.getCurrentConfig();
 
     if (isEnabled !== undefined) config.isEnabled = isEnabled;
