@@ -10,6 +10,8 @@ import { processReferralCompletion } from '../../utils/referralSystem';
 
 const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'rfq',
+  'rfq_accepted',
+  'draft_quote',
   'quoted',
   'quote_accepted',
   'quote_rejected',
@@ -23,10 +25,12 @@ const BOOKING_STATUS_VALUES: BookingStatus[] = [
 ];
 
 const ALLOWED_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
-  rfq: ['quoted', 'cancelled'],
+  rfq: ['rfq_accepted', 'quoted', 'cancelled'],
+  rfq_accepted: ['quoted', 'cancelled'],
+  draft_quote: ['quoted', 'cancelled'],
   quoted: ['quote_accepted', 'quote_rejected', 'cancelled'],
   quote_accepted: ['payment_pending', 'booked', 'cancelled'],
-  quote_rejected: [],
+  quote_rejected: ['quoted'],
   payment_pending: ['booked', 'cancelled'],
   booked: ['in_progress', 'completed', 'cancelled', 'dispute'],
   in_progress: ['completed', 'cancelled', 'dispute'],

@@ -1199,3 +1199,304 @@ export const sendBookingNotificationEmail = async (
     return false;
   }
 };
+
+// ============================================================
+// RFQ & Quotation Emails
+// ============================================================
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+const buildBookingLink = (bookingId: string) =>
+  `${FRONTEND_URL}/bookings/${escapeHtml(bookingId)}`;
+
+const buildEmailButton = (href: string, label: string, color = '#667eea') => `
+  <div style="text-align: center; margin: 25px 0;">
+    <a href="${href}" style="background: ${color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+      ${escapeHtml(label)}
+    </a>
+  </div>
+`;
+
+const sendEmail = async (to: string, subject: string, htmlContent: string): Promise<boolean> => {
+  try {
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email: to }];
+    sendSmtpEmail.subject = subject;
+    sendSmtpEmail.htmlContent = htmlContent;
+    sendSmtpEmail.sender = {
+      name: 'Fixera Team',
+      email: process.env.FROM_EMAIL || 'anafariya@gmail.com',
+    };
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error(`Failed to send email "${subject}" to ${to}:`, error);
+    return false;
+  }
+};
+
+// Professional receives RFQ notification
+export const sendRfqReceivedEmail = async (
+  profEmail: string, profName: string, customerName: string, serviceType: string, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('New Request for Quote')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          You have received a new Request for Quote from <strong>${escapeHtml(customerName)}</strong> for <strong>${escapeHtml(serviceType)}</strong>.
+        </p>
+        <p style="color: #666; line-height: 1.6;">
+          Please review the details and respond within a reasonable timeframe.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Request')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, 'New Request for Quote - Fixera', content);
+};
+
+// Customer notified that professional accepted RFQ
+export const sendRfqAcceptedEmail = async (
+  custEmail: string, custName: string, profName: string, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Your Request Has Been Accepted')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          Great news! <strong>${escapeHtml(profName)}</strong> has accepted your request and is preparing a detailed quotation for you.
+        </p>
+        <p style="color: #666; line-height: 1.6;">
+          You will receive the quotation within 4 working days. We'll notify you as soon as it's ready.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Booking')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(custEmail, 'Your Request Has Been Accepted - Fixera', content);
+};
+
+// Customer notified that professional rejected RFQ
+export const sendRfqRejectedEmail = async (
+  custEmail: string, custName: string, profName: string, reason: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Request Update')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          Unfortunately, <strong>${escapeHtml(profName)}</strong> is unable to take on your request at this time.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+        </div>
+        <p style="color: #666; line-height: 1.6;">
+          Don't worry — you can search for other professionals on Fixera who can help with your project.
+        </p>
+        ${buildEmailButton(`${FRONTEND_URL}/search`, 'Find Other Professionals')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(custEmail, 'Request Update - Fixera', content);
+};
+
+// Customer receives quotation
+export const sendQuotationReceivedEmail = async (
+  custEmail: string, custName: string, profName: string, quotationNumber: string, amount: number, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('New Quotation Received')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(profName)}</strong> has submitted a detailed quotation for your request.
+        </p>
+        <div style="background: #fff; border: 2px solid #667eea; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+          <p style="color: #666; margin: 0 0 5px 0; font-size: 14px;">Quotation ${escapeHtml(quotationNumber)}</p>
+          <p style="font-size: 28px; font-weight: bold; color: #667eea; margin: 0;">&euro;${amount.toFixed(2)}</p>
+        </div>
+        <p style="color: #666; line-height: 1.6;">
+          Review the full details including scope, warranty, materials, and payment schedule.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'Review Quotation')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(custEmail, `Quotation ${quotationNumber} Received - Fixera`, content);
+};
+
+// Customer receives updated quotation
+export const sendQuotationUpdatedEmail = async (
+  custEmail: string, custName: string, profName: string, quotationNumber: string, version: number, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Quotation Updated')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(profName)}</strong> has updated quotation <strong>${escapeHtml(quotationNumber)}</strong> (version ${version}).
+        </p>
+        <p style="color: #666; line-height: 1.6;">
+          Please review the updated details and changes.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'Review Updated Quotation')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(custEmail, `Quotation ${quotationNumber} Updated - Fixera`, content);
+};
+
+// Professional notified that customer accepted quotation
+export const sendQuotationAcceptedEmail = async (
+  profEmail: string, profName: string, custName: string, quotationNumber: string, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Quotation Accepted!')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${escapeHtml(profName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(custName)}</strong> has accepted your quotation <strong>${escapeHtml(quotationNumber)}</strong>. Payment is being processed.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Booking', '#4CAF50')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, `Quotation ${quotationNumber} Accepted - Fixera`, content);
+};
+
+// Professional notified that customer rejected quotation
+export const sendQuotationRejectedEmail = async (
+  profEmail: string, profName: string, custName: string, quotationNumber: string, reason: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Quotation Feedback')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(custName)}</strong> has requested changes to quotation <strong>${escapeHtml(quotationNumber)}</strong>.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Feedback:</strong> ${escapeHtml(reason)}</p>
+        </div>
+        <p style="color: #666; line-height: 1.6;">
+          You can revise and resubmit your quotation based on the customer's feedback.
+        </p>
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, `Quotation Feedback - ${quotationNumber} - Fixera`, content);
+};
+
+// Professional receives RFQ deadline reminder
+export const sendRfqDeadlineReminderEmail = async (
+  profEmail: string, profName: string, daysRemaining: number, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Quotation Deadline Reminder')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          This is a reminder that you have <strong>${daysRemaining} working day${daysRemaining !== 1 ? 's' : ''}</strong> remaining to submit your quotation.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;">
+            If no quotation is submitted by the deadline, the request will be automatically cancelled.
+          </p>
+        </div>
+        ${buildEmailButton(buildBookingLink(bookingId), 'Submit Quotation')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, 'Quotation Deadline Reminder - Fixera', content);
+};
+
+// Both parties notified about expired RFQ deadline
+export const sendRfqDeadlineExpiredEmail = async (
+  profEmail: string, profName: string, custEmail: string, custName: string, bookingId: string
+): Promise<boolean> => {
+  // Send to professional
+  const profContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Quotation Deadline Expired')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          The deadline to submit your quotation has passed and the request has been automatically cancelled.
+        </p>
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  const profResult = await sendEmail(profEmail, 'Quotation Deadline Expired - Fixera', profContent);
+  if (!profResult) {
+    console.error(`[Email] Failed to send RFQ deadline expired email to professional: ${profEmail}`);
+  }
+
+  // Send to customer
+  const custContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Request Update')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          Unfortunately, the professional did not submit a quotation within the required timeframe. Your request has been cancelled.
+        </p>
+        <p style="color: #666; line-height: 1.6;">
+          You can search for other professionals on Fixera who can help with your project.
+        </p>
+        ${buildEmailButton(`${FRONTEND_URL}/search`, 'Find Other Professionals')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  const custResult = await sendEmail(custEmail, 'Request Update - Fixera', custContent);
+  if (!custResult) {
+    console.error(`[Email] Failed to send RFQ deadline expired email to customer: ${custEmail}`);
+  }
+  return profResult && custResult;
+};
+
+// Customer receives direct quotation from professional
+export const sendDirectQuotationEmail = async (
+  custEmail: string, custName: string, profName: string, quotationNumber: string, amount: number, bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('You Received a Quotation')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(profName)}</strong> has sent you a quotation.
+        </p>
+        <div style="background: #fff; border: 2px solid #667eea; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+          <p style="color: #666; margin: 0 0 5px 0; font-size: 14px;">Quotation ${escapeHtml(quotationNumber)}</p>
+          <p style="font-size: 28px; font-weight: bold; color: #667eea; margin: 0;">&euro;${amount.toFixed(2)}</p>
+        </div>
+        <p style="color: #666; line-height: 1.6;">
+          Review the full details and accept or request changes.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'Review Quotation')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(custEmail, `Quotation from ${profName} - Fixera`, content);
+};

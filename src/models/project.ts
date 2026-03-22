@@ -362,9 +362,11 @@ const MaterialSchema = new Schema<IMaterial>({
 });
 
 // Execution Duration Schema
+// NOTE: value/unit not required at schema level to allow draft auto-save
+// before the wizard is complete. Submit-time validation enforces completeness.
 const ExecutionDurationSchema = new Schema<IExecutionDuration>({
-  value: { type: Number, required: true, min: 0 },
-  unit: { type: String, enum: ["hours", "days"], required: true },
+  value: { type: Number, min: 0 },
+  unit: { type: String, enum: ["hours", "days"] },
   range: {
     min: { type: Number, min: 0 },
     max: { type: Number, min: 0 },
@@ -372,20 +374,20 @@ const ExecutionDurationSchema = new Schema<IExecutionDuration>({
 });
 
 const PreparationDurationSchema = new Schema<IPreparationDuration>({
-  value: { type: Number, required: true, min: 0 },
-  unit: { type: String, enum: ["hours", "days"], required: true },
+  value: { type: Number, min: 0 },
+  unit: { type: String, enum: ["hours", "days"] },
 });
 
 // Buffer Schema
 const BufferSchema = new Schema<IBuffer>({
-  value: { type: Number, required: true, min: 0 },
-  unit: { type: String, enum: ["hours", "days"], required: true },
+  value: { type: Number, min: 0 },
+  unit: { type: String, enum: ["hours", "days"] },
 });
 
 // Intake Duration Schema
 const IntakeDurationSchema = new Schema<IIntakeDuration>({
-  value: { type: Number, required: true, min: 0 },
-  unit: { type: String, enum: ["hours", "days"], required: true },
+  value: { type: Number, min: 0 },
+  unit: { type: String, enum: ["hours", "days"] },
   buffer: { type: Number, min: 0 },
 });
 
@@ -420,8 +422,8 @@ const SubprojectSchema = new Schema<ISubproject>({
   included: [IncludedItemSchema],
   materialsIncluded: { type: Boolean, default: false },
   materials: [MaterialSchema],
-  preparationDuration: { type: PreparationDurationSchema, required: true },
-  executionDuration: { type: ExecutionDurationSchema, required: true },
+  preparationDuration: { type: PreparationDurationSchema },
+  executionDuration: { type: ExecutionDurationSchema },
   buffer: BufferSchema,
   intakeDuration: IntakeDurationSchema,
   warrantyPeriod: {
@@ -663,9 +665,33 @@ ProjectSchema.index({ category: 1, service: 1 });
 ProjectSchema.index({ status: 1 });
 ProjectSchema.index({ "distance.location": "2dsphere" });
 
-// Pre-save middleware for auto-save timestamp
+// Strip empty/invalid location before save so the 2dsphere index doesn't choke
+function sanitizeLocation(doc: any) {
+  const coords = doc?.distance?.location?.coordinates;
+  if (!coords || (Array.isArray(coords) && coords.length !== 2)) {
+    if (doc.distance?.location) {
+      doc.distance.location = undefined;
+    }
+  }
+}
+
+// Pre-save middleware
 ProjectSchema.pre("save", function (next) {
   this.autoSaveTimestamp = new Date();
+  sanitizeLocation(this);
+  next();
+});
+
+// Pre-findOneAndUpdate middleware
+ProjectSchema.pre("findOneAndUpdate", function (next) {
+  const update = this.getUpdate() as any;
+  if (update) {
+    sanitizeLocation(update);
+    // Also handle $set wrapper
+    if (update.$set) {
+      sanitizeLocation(update.$set);
+    }
+  }
   next();
 });
 
