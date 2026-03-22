@@ -2,11 +2,11 @@ import { Request, Response, NextFunction } from "express";
 import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
-import { 
-  calculateLoyaltyStatusV2, 
-  updateUserLoyaltyV2, 
-  getUserLoyaltyBenefits 
-} from "../../utils/loyaltySystemV2";
+import {
+  calculateLoyaltyStatus,
+  updateUserLoyalty,
+  getUserLoyaltyBenefits
+} from "../../utils/loyaltySystem";
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import mongoose from 'mongoose';
 
@@ -50,8 +50,8 @@ export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFu
       });
     }
 
-    // Calculate current loyalty status using V2 system (based on spending)
-    const loyaltyStatus = await calculateLoyaltyStatusV2(user.totalSpent || 0, user.loyaltyPoints || 0, user.totalBookings || 0);
+    // Calculate current loyalty status based on spending, points, and bookings
+    const loyaltyStatus = await calculateLoyaltyStatus(user.totalSpent || 0, user.loyaltyPoints || 0, user.totalBookings || 0);
     const benefits = await getUserLoyaltyBenefits((user._id as mongoose.Types.ObjectId).toString());
 
     console.log(`🏆 Loyalty: Retrieved status for ${user.email} - ${loyaltyStatus.level} (${loyaltyStatus.points} points)`);
@@ -138,8 +138,8 @@ export const addSpending = async (req: Request, res: Response, next: NextFunctio
 
     const oldLevel = user.loyaltyLevel || 'Bronze';
 
-    // Update loyalty using V2 system
-    const result = await updateUserLoyaltyV2((user._id as mongoose.Types.ObjectId).toString(), amount, bookingCompleted);
+    // Update user loyalty
+    const result = await updateUserLoyalty((user._id as mongoose.Types.ObjectId).toString(), amount, bookingCompleted);
 
     if (!result.user) {
       return res.status(500).json({

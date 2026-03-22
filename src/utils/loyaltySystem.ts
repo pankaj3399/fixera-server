@@ -1,190 +1,363 @@
 import User, { IUser } from "../models/user";
+import LoyaltyConfig, { ILoyaltyConfig, ILoyaltyTier } from "../models/loyaltyConfig";
+
+type LoyaltyLevel = 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
+const VALID_LOYALTY_LEVELS: Set<string> = new Set(['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']);
+
+function toValidLoyaltyLevel(level: string): LoyaltyLevel {
+  if (VALID_LOYALTY_LEVELS.has(level)) {
+    return level as LoyaltyLevel;
+  }
+  console.warn(`Loyalty: Unknown tier "${level}" — defaulting to Bronze`);
+  return 'Bronze';
+}
 
 export interface LoyaltyCalculation {
   points: number;
-  level: 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
-  nextLevelPoints?: number;
-  nextLevel?: string;
-  progress?: number; // percentage to next level
+  level: string;
+  tierInfo: ILoyaltyTier;
+  nextTier?: ILoyaltyTier;
+  nextTierPoints?: number;
+  progress?: number; // percentage to next tier
+  pointsToNextTier?: number;
 }
 
-// Points earning rates
-export const LOYALTY_RATES = {
-  SPENDING_MULTIPLIER: 1, // 1 point per $1 spent
-  BOOKING_BONUS: 50, // 50 points per completed booking
-  
-  // Level thresholds (points required)
-  LEVELS: {
-    Bronze: 0,
-    Silver: 500,
-    Gold: 1500,
-    Platinum: 3000
+export interface PointsEarned {
+  fromSpending: number;
+  fromBooking: number;
+  total: number;
+  bookingAmount: number;
+  tierUsed: string;
+}
+
+// Calculate loyalty points based on current tier configuration
+export const calculateLoyaltyPoints = async (
+  bookingAmount: number,
+  totalSpent: number = 0,
+  includeBookingBonus: boolean = true
+): Promise<PointsEarned> => {
+  try {
+    const config = await LoyaltyConfig.getCurrentConfig();
+
+    if (!config.globalSettings.isEnabled) {
+      return {
+        fromSpending: 0,
+        fromBooking: 0,
+        total: 0,
+        bookingAmount,
+        tierUsed: 'Disabled'
+      };
+    }
+
+    // Check minimum booking amount
+    if (bookingAmount < config.globalSettings.minBookingAmount) {
+      return {
+        fromSpending: 0,
+        fromBooking: 0,
+        total: 0,
+        bookingAmount,
+        tierUsed: 'Below Minimum'
+      };
+    }
+
+    // Find current tier based on total spending
+    const currentTier = getCurrentTier(config.tiers, totalSpent);
+
+    // Apply rounding rule
+    const roundedSpendingPoints = applyRoundingRule(
+      bookingAmount * (currentTier.pointsPercentage / 100),
+      config.globalSettings.roundingRule
+    );
+
+    // Booking bonus points
+    const bookingPoints = includeBookingBonus ? currentTier.bookingBonus : 0;
+
+    const totalPoints = roundedSpendingPoints + bookingPoints;
+
+    console.log(`🏆 Loyalty: Calculated points - Amount: $${bookingAmount}, Tier: ${currentTier.name} (${currentTier.pointsPercentage}%), Spending: ${roundedSpendingPoints}pts, Booking: ${bookingPoints}pts, Total: ${totalPoints}pts`);
+
+    return {
+      fromSpending: roundedSpendingPoints,
+      fromBooking: bookingPoints,
+      total: totalPoints,
+      bookingAmount,
+      tierUsed: currentTier.name
+    };
+
+  } catch (error) {
+    console.error('❌ Loyalty: Points calculation failed:', error);
+    return {
+      fromSpending: 0,
+      fromBooking: 0,
+      total: 0,
+      bookingAmount,
+      tierUsed: 'Error'
+    };
   }
 };
 
-// Calculate loyalty points based on spending and bookings
-export const calculateLoyaltyPoints = (totalSpent: number, totalBookings: number): number => {
-  const spendingPoints = Math.floor(totalSpent * LOYALTY_RATES.SPENDING_MULTIPLIER);
-  const bookingPoints = totalBookings * LOYALTY_RATES.BOOKING_BONUS;
-  
-  const totalPoints = spendingPoints + bookingPoints;
-  
-  console.log(`🏆 Loyalty: Calculated points - Spending: $${totalSpent} = ${spendingPoints}pts, Bookings: ${totalBookings} = ${bookingPoints}pts, Total: ${totalPoints}pts`);
-  
-  return totalPoints;
-};
-
-// Determine loyalty level based on points
-export const getLoyaltyLevel = (points: number): 'Bronze' | 'Silver' | 'Gold' | 'Platinum' => {
-  if (points >= LOYALTY_RATES.LEVELS.Platinum) return 'Platinum';
-  if (points >= LOYALTY_RATES.LEVELS.Gold) return 'Gold';
-  if (points >= LOYALTY_RATES.LEVELS.Silver) return 'Silver';
-  return 'Bronze';
-};
-
-// Get next level information
-export const getNextLevelInfo = (currentPoints: number): { nextLevel: string; pointsNeeded: number; progress: number } | null => {
-  const currentLevel = getLoyaltyLevel(currentPoints);
-  
-  let nextLevel: string;
-  let nextLevelPoints: number;
-  
-  switch (currentLevel) {
-    case 'Bronze':
-      nextLevel = 'Silver';
-      nextLevelPoints = LOYALTY_RATES.LEVELS.Silver;
-      break;
-    case 'Silver':
-      nextLevel = 'Gold';
-      nextLevelPoints = LOYALTY_RATES.LEVELS.Gold;
-      break;
-    case 'Gold':
-      nextLevel = 'Platinum';
-      nextLevelPoints = LOYALTY_RATES.LEVELS.Platinum;
-      break;
-    case 'Platinum':
-      return null; // Already at max level
+// Get current tier based on total spending amount
+export const getCurrentTier = (tiers: ILoyaltyTier[], totalSpent: number): ILoyaltyTier => {
+  // Find the highest tier the user qualifies for
+  for (let i = tiers.length - 1; i >= 0; i--) {
+    if (totalSpent >= tiers[i].minSpendingAmount) {
+      return tiers[i];
+    }
   }
-  
-  const pointsNeeded = nextLevelPoints - currentPoints;
-  const progress = Math.min(100, Math.round((currentPoints / nextLevelPoints) * 100));
-  
+
+  // Default to first tier if no match
+  return tiers[0];
+};
+
+// Get next tier information
+export const getNextTierInfo = (tiers: ILoyaltyTier[], totalSpent: number): {
+  nextTier?: ILoyaltyTier;
+  amountNeeded?: number;
+  progress?: number;
+} => {
+  const currentTier = getCurrentTier(tiers, totalSpent);
+
+  // Find next tier
+  const currentIndex = tiers.findIndex(tier => tier.name === currentTier.name);
+  const nextTier = currentIndex < tiers.length - 1 ? tiers[currentIndex + 1] : null;
+
+  if (!nextTier) {
+    return {}; // Already at max tier
+  }
+
+  const amountNeeded = nextTier.minSpendingAmount - totalSpent;
+  const progress = Math.min(100, Math.round((totalSpent / nextTier.minSpendingAmount) * 100));
+
   return {
-    nextLevel,
-    pointsNeeded,
+    nextTier,
+    amountNeeded,
     progress
   };
 };
 
-// Full loyalty calculation with all info
-export const calculateLoyaltyStatus = (totalSpent: number, totalBookings: number): LoyaltyCalculation => {
-  const points = calculateLoyaltyPoints(totalSpent, totalBookings);
-  const level = getLoyaltyLevel(points);
-  const nextLevelInfo = getNextLevelInfo(points);
-  
-  return {
-    points,
-    level,
-    nextLevelPoints: nextLevelInfo?.pointsNeeded,
-    nextLevel: nextLevelInfo?.nextLevel,
-    progress: nextLevelInfo?.progress
-  };
+// Apply rounding rule to points
+const applyRoundingRule = (points: number, rule: 'floor' | 'ceil' | 'round'): number => {
+  switch (rule) {
+    case 'ceil':
+      return Math.ceil(points);
+    case 'round':
+      return Math.round(points);
+    case 'floor':
+    default:
+      return Math.floor(points);
+  }
+};
+
+// Full loyalty calculation with tier info
+export const calculateLoyaltyStatus = async (
+  totalSpent: number = 0,
+  currentPoints: number = 0,
+  totalBookings: number = 0
+): Promise<LoyaltyCalculation> => {
+  try {
+    const config = await LoyaltyConfig.getCurrentConfig();
+    const currentTier = getCurrentTier(config.tiers, totalSpent);
+    const nextTierInfo = getNextTierInfo(config.tiers, totalSpent);
+
+    return {
+      points: currentPoints,
+      level: currentTier.name,
+      tierInfo: currentTier,
+      nextTier: nextTierInfo.nextTier,
+      nextTierPoints: nextTierInfo.nextTier?.minSpendingAmount,
+      pointsToNextTier: nextTierInfo.amountNeeded,
+      progress: nextTierInfo.progress
+    };
+
+  } catch (error) {
+    console.error('❌ Loyalty: Status calculation failed:', error);
+
+    // Fallback to Bronze tier
+    return {
+      points: currentPoints,
+      level: 'Bronze',
+      tierInfo: {
+        name: 'Bronze',
+        minSpendingAmount: 0,
+        pointsPercentage: 1,
+        bookingBonus: 25,
+        benefits: ['Standard customer support'],
+        color: '#CD7F32',
+        icon: 'bronze-medal',
+        isActive: true,
+        order: 1
+      } as ILoyaltyTier
+    };
+  }
 };
 
 // Update user's loyalty status
-export const updateUserLoyalty = async (userId: string, additionalSpending: number = 0, additionalBookings: number = 0): Promise<IUser | null> => {
+export const updateUserLoyalty = async (
+  userId: string,
+  bookingAmount: number,
+  includeBookingBonus: boolean = true
+): Promise<{ user: IUser | null; pointsEarned: PointsEarned; leveledUp: boolean; oldLevel: string }> => {
   try {
     const user = await User.findById(userId);
     if (!user) {
       console.error(`❌ Loyalty: User not found: ${userId}`);
-      return null;
+      return {
+        user: null,
+        pointsEarned: {
+          fromSpending: 0,
+          fromBooking: 0,
+          total: 0,
+          bookingAmount,
+          tierUsed: 'User Not Found'
+        },
+        leveledUp: false,
+        oldLevel: 'Unknown'
+      };
     }
 
-    // Only update for customers (not professionals or admins)
+    // Only update for customers
     if (user.role !== 'customer') {
       console.log(`ℹ️ Loyalty: Skipping loyalty update for ${user.role}: ${user.email}`);
-      return user;
+      return {
+        user,
+        pointsEarned: {
+          fromSpending: 0,
+          fromBooking: 0,
+          total: 0,
+          bookingAmount,
+          tierUsed: 'Non-Customer'
+        },
+        leveledUp: false,
+        oldLevel: user.loyaltyLevel || 'Bronze'
+      };
     }
 
-    // Update totals
-    const newTotalSpent = (user.totalSpent || 0) + additionalSpending;
-    const newTotalBookings = (user.totalBookings || 0) + additionalBookings;
-    
-    // Calculate new loyalty status
-    const loyaltyStatus = calculateLoyaltyStatus(newTotalSpent, newTotalBookings);
-    
-    // Check if level changed
+    const currentPoints = user.loyaltyPoints || 0;
+    const currentTotalSpent = user.totalSpent || 0;
     const oldLevel = user.loyaltyLevel || 'Bronze';
-    const levelChanged = oldLevel !== loyaltyStatus.level;
-    
+
+    // Calculate points earned from this booking (based on current tier from total spending)
+    const pointsEarned = await calculateLoyaltyPoints(
+      bookingAmount,
+      currentTotalSpent,
+      includeBookingBonus
+    );
+
+    // Update user totals
+    const newTotalPoints = currentPoints + pointsEarned.total;
+    const newTotalSpent = (user.totalSpent || 0) + bookingAmount;
+    const newTotalBookings = (user.totalBookings || 0) + (includeBookingBonus ? 1 : 0);
+
+    // Calculate new tier (based on spending amount, not points)
+    const newLoyaltyStatus = await calculateLoyaltyStatus(
+      newTotalSpent,
+      newTotalPoints,
+      newTotalBookings
+    );
+
+    const leveledUp = oldLevel !== newLoyaltyStatus.level;
+
     // Update user
+    user.loyaltyPoints = newTotalPoints;
+    user.loyaltyLevel = toValidLoyaltyLevel(newLoyaltyStatus.level);
     user.totalSpent = newTotalSpent;
     user.totalBookings = newTotalBookings;
-    user.loyaltyPoints = loyaltyStatus.points;
-    user.loyaltyLevel = loyaltyStatus.level;
     user.lastLoyaltyUpdate = new Date();
-    
+
     await user.save();
-    
-    if (levelChanged) {
-      console.log(`🎉 Loyalty: Level up! ${user.email} promoted from ${oldLevel} to ${loyaltyStatus.level}`);
+
+    if (leveledUp) {
+      console.log(`🎉 Loyalty: Level up! ${user.email} promoted from ${oldLevel} to ${newLoyaltyStatus.level}`);
     }
-    
-    console.log(`🏆 Loyalty: Updated ${user.email} - Spent: $${newTotalSpent}, Bookings: ${newTotalBookings}, Points: ${loyaltyStatus.points}, Level: ${loyaltyStatus.level}`);
-    
-    return user;
+
+    console.log(`🏆 Loyalty: Updated ${user.email} - Booking: $${bookingAmount}, Points Earned: ${pointsEarned.total}, Total Points: ${newTotalPoints}, Level: ${newLoyaltyStatus.level}`);
+
+    return {
+      user,
+      pointsEarned,
+      leveledUp,
+      oldLevel
+    };
+
   } catch (error) {
     console.error('❌ Loyalty: Update failed:', error);
-    return null;
+    return {
+      user: null,
+      pointsEarned: {
+        fromSpending: 0,
+        fromBooking: 0,
+        total: 0,
+        bookingAmount,
+        tierUsed: 'Error'
+      },
+      leveledUp: false,
+      oldLevel: 'Unknown'
+    };
   }
 };
 
-// Recalculate all users' loyalty (for admin/maintenance)
-export const recalculateAllLoyalty = async (): Promise<{ updated: number; errors: number }> => {
+// Get loyalty benefits for a user
+export const getUserLoyaltyBenefits = async (userId: string): Promise<string[]> => {
   try {
-    const customers = await User.find({ role: 'customer' });
-    let updated = 0;
-    let errors = 0;
-    
-    console.log(`🔄 Loyalty: Recalculating loyalty for ${customers.length} customers...`);
-    
-    for (const customer of customers) {
-      try {
-        const loyaltyStatus = calculateLoyaltyStatus(customer.totalSpent || 0, customer.totalBookings || 0);
-        
-        customer.loyaltyPoints = loyaltyStatus.points;
-        customer.loyaltyLevel = loyaltyStatus.level;
-        customer.lastLoyaltyUpdate = new Date();
-        
-        await customer.save();
-        updated++;
-      } catch (error) {
-        console.error(`❌ Loyalty: Failed to update ${customer.email}:`, error);
-        errors++;
-      }
+    const user = await User.findById(userId);
+    if (!user || user.role !== 'customer') {
+      return [];
     }
-    
-    console.log(`✅ Loyalty: Recalculation complete - Updated: ${updated}, Errors: ${errors}`);
-    
-    return { updated, errors };
+
+    const loyaltyStatus = await calculateLoyaltyStatus(user.totalSpent || 0, user.loyaltyPoints || 0);
+    return loyaltyStatus.tierInfo.benefits;
+
   } catch (error) {
-    console.error('❌ Loyalty: Recalculation failed:', error);
-    return { updated: 0, errors: 1 };
+    console.error('❌ Loyalty: Benefits lookup failed:', error);
+    return [];
   }
 };
 
-// Get loyalty level benefits (for future use)
-export const getLoyaltyBenefits = (level: string): string[] => {
-  switch (level) {
-    case 'Bronze':
-      return ['Standard customer support', 'Basic booking features'];
-    case 'Silver':
-      return ['5% discount on services', 'Priority customer support', 'Early access to new professionals'];
-    case 'Gold':
-      return ['10% discount on services', 'Free service call fees', 'Dedicated account manager', 'Monthly loyalty rewards'];
-    case 'Platinum':
-      return ['15% discount on services', 'Free cancellations', 'Premium support line', 'Exclusive seasonal offers', 'VIP badge'];
-    default:
-      return [];
+// Preview what a booking would earn without writing to DB
+export const previewBookingPoints = async (userId: string, bookingAmount: number): Promise<any> => {
+  const user = await User.findById(userId);
+  if (!user || user.role !== 'customer') {
+    return { success: false, error: 'User not found or not a customer' };
   }
+
+  const currentTotalSpent = user.totalSpent || 0;
+  const pointsEarned = await calculateLoyaltyPoints(bookingAmount, currentTotalSpent, true);
+
+  const newTotalSpent = currentTotalSpent + bookingAmount;
+  const newTotalPoints = (user.loyaltyPoints || 0) + pointsEarned.total;
+  const projectedStatus = await calculateLoyaltyStatus(newTotalSpent, newTotalPoints, (user.totalBookings || 0) + 1);
+
+  return {
+    success: true,
+    data: {
+      pointsEarned,
+      wouldLevelUp: (user.loyaltyLevel || 'Bronze') !== projectedStatus.level,
+      currentLevel: user.loyaltyLevel || 'Bronze',
+      projectedLevel: projectedStatus.level,
+      currentPoints: user.loyaltyPoints || 0,
+      projectedPoints: newTotalPoints,
+      currentSpent: currentTotalSpent,
+      projectedSpent: newTotalSpent,
+    }
+  };
+};
+
+// Apply booking points — mutates user in DB (admin testing only)
+export const simulateBookingPoints = async (userId: string, bookingAmount: number): Promise<any> => {
+  if (process.env.NODE_ENV === 'production') {
+    return { success: false, error: 'simulateBookingPoints is disabled in production' };
+  }
+
+  const result = await updateUserLoyalty(userId, bookingAmount, true);
+  return {
+    success: true,
+    data: {
+      pointsEarned: result.pointsEarned,
+      leveledUp: result.leveledUp,
+      oldLevel: result.oldLevel,
+      newLevel: result.user?.loyaltyLevel,
+      totalPoints: result.user?.loyaltyPoints,
+      totalSpent: result.user?.totalSpent
+    }
+  };
 };

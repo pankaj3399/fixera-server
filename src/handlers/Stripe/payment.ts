@@ -24,7 +24,7 @@ import {
 import { calculateVAT } from '../../utils/vat';
 import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
-import { calculateDiscountedPayouts } from '../../utils/discountSystem';
+import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const customerId = (booking.customer as any)?._id || booking.customer;
@@ -240,23 +240,7 @@ export const createPaymentIntent = async (
     }
 
     // Use hybrid discount absorption model
-    const discountedPayouts = calculateDiscountedPayouts({
-      loyaltyDiscount: {
-        tierName: discountBreakdown.loyaltyDiscount.tier,
-        percentage: discountBreakdown.loyaltyDiscount.percentage,
-        amount: discountBreakdown.loyaltyDiscount.amount,
-        absorbedBy: 'platform',
-      },
-      repeatBuyerDiscount: {
-        percentage: discountBreakdown.repeatBuyerDiscount.percentage,
-        amount: discountBreakdown.repeatBuyerDiscount.amount,
-        completedBookings: discountBreakdown.repeatBuyerDiscount.previousBookings,
-        absorbedBy: 'professional',
-      },
-      totalDiscount: discountBreakdown.totalDiscount,
-      originalAmount: discountBreakdown.originalAmount,
-      discountedAmount: discountBreakdown.finalAmount,
-    }, commissionPercent);
+    const discountedPayouts = calculateDiscountedPayouts(discountBreakdown, commissionPercent);
     const platformCommission = discountedPayouts.platformCommission;
     const professionalPayout = discountedPayouts.professionalPayout;
     const stripeFee = calculateStripeFee(totalAmount, currency);

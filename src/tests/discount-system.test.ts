@@ -3,7 +3,7 @@
  *
  * Tests:
  * 1. calculateDiscountedPayouts — pure math (no DB)
- * 2. calculateDiscountBreakdown — with real DB data
+ * 2. calculateAutoDiscount — with real DB data
  * 3. Discount preview API handler logic
  * 4. Edge cases (caps, minimum payment, disabled loyalty, no project)
  *
@@ -19,7 +19,7 @@ import User from '../models/user';
 import LoyaltyConfig from '../models/loyaltyConfig';
 import Project from '../models/project';
 import Booking from '../models/booking';
-import { calculateDiscountBreakdown, calculateDiscountedPayouts, IDiscountBreakdown } from '../utils/discountSystem';
+import { calculateAutoDiscount, calculateDiscountedPayouts, DiscountBreakdown } from '../utils/discountEngine';
 
 // ─── Test helpers ─────────────────────────────────────────────────
 
@@ -53,6 +53,10 @@ let testBookingId: any;
 
 const TEST_EMAIL_PREFIX = `discount-test-${Date.now()}`;
 
+// Customer totalSpent values used in fixtures
+const GOLD_CUSTOMER_TOTAL_SPENT = 6000;
+const BRONZE_CUSTOMER_TOTAL_SPENT = 100;
+
 async function createTestFixtures() {
   console.log('\n📦 Creating test fixtures...');
 
@@ -65,7 +69,7 @@ async function createTestFixtures() {
     role: 'customer',
     customerType: 'individual',
     loyaltyLevel: 'Gold',
-    totalSpent: 6000,
+    totalSpent: GOLD_CUSTOMER_TOTAL_SPENT,
     totalBookings: 10,
     location: {
       type: 'Point',
@@ -192,12 +196,12 @@ async function testPurePayoutCalculation() {
   console.log('\n═══ Test 1: calculateDiscountedPayouts (pure math) ═══');
 
   // Scenario: €500 quote, 5% loyalty (€25), 10% repeat (€50), 15% commission
-  const discount: IDiscountBreakdown = {
-    loyaltyDiscount: { tierName: 'Gold', percentage: 5, amount: 25, absorbedBy: 'platform' },
-    repeatBuyerDiscount: { percentage: 10, amount: 50, completedBookings: 3, absorbedBy: 'professional' },
+  const discount: DiscountBreakdown = {
+    loyaltyDiscount: { tier: 'Gold', percentage: 5, amount: 25, capped: false },
+    repeatBuyerDiscount: { percentage: 10, amount: 50, previousBookings: 3, capped: false },
     totalDiscount: 75,
     originalAmount: 500,
-    discountedAmount: 425,
+    finalAmount: 425,
   };
 
   const result = calculateDiscountedPayouts(discount, 15);
@@ -222,12 +226,12 @@ async function testPurePayoutCalculation() {
 async function testPurePayoutNoDiscount() {
   console.log('\n═══ Test 2: calculateDiscountedPayouts (no discount) ═══');
 
-  const discount: IDiscountBreakdown = {
-    loyaltyDiscount: { tierName: 'Bronze', percentage: 0, amount: 0, absorbedBy: 'platform' },
-    repeatBuyerDiscount: { percentage: 0, amount: 0, completedBookings: 0, absorbedBy: 'professional' },
+  const discount: DiscountBreakdown = {
+    loyaltyDiscount: { tier: 'Bronze', percentage: 0, amount: 0, capped: false },
+    repeatBuyerDiscount: { percentage: 0, amount: 0, previousBookings: 0, capped: false },
     totalDiscount: 0,
     originalAmount: 1000,
-    discountedAmount: 1000,
+    finalAmount: 1000,
   };
 
   const result = calculateDiscountedPayouts(discount, 10);
@@ -240,12 +244,12 @@ async function testPurePayoutNoDiscount() {
 async function testPurePayoutOnlyLoyalty() {
   console.log('\n═══ Test 3: calculateDiscountedPayouts (loyalty only) ═══');
 
-  const discount: IDiscountBreakdown = {
-    loyaltyDiscount: { tierName: 'Platinum', percentage: 10, amount: 100, absorbedBy: 'platform' },
-    repeatBuyerDiscount: { percentage: 0, amount: 0, completedBookings: 0, absorbedBy: 'professional' },
+  const discount: DiscountBreakdown = {
+    loyaltyDiscount: { tier: 'Platinum', percentage: 10, amount: 100, capped: false },
+    repeatBuyerDiscount: { percentage: 0, amount: 0, previousBookings: 0, capped: false },
     totalDiscount: 100,
     originalAmount: 1000,
-    discountedAmount: 900,
+    finalAmount: 900,
   };
 
   const result = calculateDiscountedPayouts(discount, 10);
@@ -260,12 +264,12 @@ async function testPurePayoutOnlyLoyalty() {
 async function testPurePayoutOnlyRepeat() {
   console.log('\n═══ Test 4: calculateDiscountedPayouts (repeat only) ═══');
 
-  const discount: IDiscountBreakdown = {
-    loyaltyDiscount: { tierName: 'Bronze', percentage: 0, amount: 0, absorbedBy: 'platform' },
-    repeatBuyerDiscount: { percentage: 5, amount: 50, completedBookings: 3, absorbedBy: 'professional' },
+  const discount: DiscountBreakdown = {
+    loyaltyDiscount: { tier: 'Bronze', percentage: 0, amount: 0, capped: false },
+    repeatBuyerDiscount: { percentage: 5, amount: 50, previousBookings: 3, capped: false },
     totalDiscount: 50,
     originalAmount: 1000,
-    discountedAmount: 950,
+    finalAmount: 950,
   };
 
   const result = calculateDiscountedPayouts(discount, 10);
@@ -277,14 +281,15 @@ async function testPurePayoutOnlyRepeat() {
 }
 
 async function testDiscountBreakdownWithDB() {
-  console.log('\n═══ Test 5: calculateDiscountBreakdown (DB integration) ═══');
+  console.log('\n═══ Test 5: calculateAutoDiscount (DB integration) ═══');
 
   const quoteAmount = 500;
-  const discount = await calculateDiscountBreakdown(
-    testCustomerId,
-    testProfessionalId,
-    testProjectId,
-    quoteAmount
+  const discount = await calculateAutoDiscount(
+    testCustomerId.toString(),
+    testProfessionalId.toString(),
+    testProjectId.toString(),
+    quoteAmount,
+    GOLD_CUSTOMER_TOTAL_SPENT
   );
 
   console.log('  Discount breakdown:', JSON.stringify(discount, null, 2));
@@ -293,32 +298,33 @@ async function testDiscountBreakdownWithDB() {
   const expectedLoyaltyRaw = roundToTwo((quoteAmount * goldTierDiscount) / 100);
   const expectedLoyalty = goldTierMaxCap && expectedLoyaltyRaw > goldTierMaxCap ? goldTierMaxCap : expectedLoyaltyRaw;
 
-  assert(discount.loyaltyDiscount.tierName === 'Gold', 'Loyalty tier is Gold');
+  assert(discount.loyaltyDiscount.tier === 'Gold', 'Loyalty tier is Gold');
   assertClose(discount.loyaltyDiscount.percentage, goldTierDiscount, `Loyalty percentage is ${goldTierDiscount}%`);
   assertClose(discount.loyaltyDiscount.amount, expectedLoyalty, `Loyalty discount amount is €${expectedLoyalty}`);
 
   // Repeat: 10% of 500 = 50, cap 50 → 50, customer has 3 completed bookings (min 2)
   assertClose(discount.repeatBuyerDiscount.percentage, 10, 'Repeat percentage is 10%');
   assertClose(discount.repeatBuyerDiscount.amount, 50, 'Repeat discount amount is €50 (capped)');
-  assert(discount.repeatBuyerDiscount.completedBookings >= 2, `Customer has ${discount.repeatBuyerDiscount.completedBookings} completed bookings (>= 2)`);
+  assert(discount.repeatBuyerDiscount.previousBookings >= 2, `Customer has ${discount.repeatBuyerDiscount.previousBookings} completed bookings (>= 2)`);
 
   // Total
   const expectedTotal = expectedLoyalty + 50;
   const expectedDiscounted = quoteAmount - expectedTotal;
   assertClose(discount.totalDiscount, expectedTotal, `Total discount is €${expectedTotal}`);
   assertClose(discount.originalAmount, quoteAmount, 'Original amount is €500');
-  assertClose(discount.discountedAmount, expectedDiscounted, `Discounted amount is €${expectedDiscounted}`);
+  assertClose(discount.finalAmount, expectedDiscounted, `Discounted amount is €${expectedDiscounted}`);
 }
 
 async function testDiscountCapHit() {
   console.log('\n═══ Test 6: Discount cap enforcement ═══');
 
   const quoteAmount = 5000;
-  const discount = await calculateDiscountBreakdown(
-    testCustomerId,
-    testProfessionalId,
-    testProjectId,
-    quoteAmount
+  const discount = await calculateAutoDiscount(
+    testCustomerId.toString(),
+    testProfessionalId.toString(),
+    testProjectId.toString(),
+    quoteAmount,
+    GOLD_CUSTOMER_TOTAL_SPENT
   );
 
   // Loyalty: goldTierDiscount% of 5000, capped at goldTierMaxCap
@@ -336,7 +342,7 @@ async function testDiscountCapHit() {
 
   const expectedTotal = expectedLoyaltyCapped + 50;
   assertClose(discount.totalDiscount, expectedTotal, `Total discount is €${expectedTotal}`);
-  assertClose(discount.discountedAmount, quoteAmount - expectedTotal, `Discounted amount is €${quoteAmount - expectedTotal}`);
+  assertClose(discount.finalAmount, quoteAmount - expectedTotal, `Discounted amount is €${quoteAmount - expectedTotal}`);
 }
 
 async function testNoRepeatDiscountBelowMinBookings() {
@@ -350,17 +356,18 @@ async function testNoRepeatDiscountBelowMinBookings() {
     role: 'customer',
     customerType: 'individual',
     loyaltyLevel: 'Gold',
-    totalSpent: 6000,
+    totalSpent: GOLD_CUSTOMER_TOTAL_SPENT,
     location: { type: 'Point', coordinates: [4.3517, 50.8503] },
   });
 
   try {
     const quoteAmount = 500;
-    const discount = await calculateDiscountBreakdown(
-      freshCustomer._id,
-      testProfessionalId,
-      testProjectId,
-      quoteAmount
+    const discount = await calculateAutoDiscount(
+      freshCustomer._id.toString(),
+      testProfessionalId.toString(),
+      testProjectId.toString(),
+      quoteAmount,
+      GOLD_CUSTOMER_TOTAL_SPENT
     );
 
     const expectedLoyalty = Math.min(
@@ -370,8 +377,8 @@ async function testNoRepeatDiscountBelowMinBookings() {
 
     assertClose(discount.loyaltyDiscount.amount, expectedLoyalty, `Fresh customer gets loyalty discount (€${expectedLoyalty})`);
     assertClose(discount.repeatBuyerDiscount.amount, 0, 'Fresh customer gets NO repeat discount');
-    assert(discount.repeatBuyerDiscount.completedBookings === 0, 'Fresh customer has 0 completed bookings');
-    assertClose(discount.discountedAmount, quoteAmount - expectedLoyalty, `Discounted amount is €${quoteAmount - expectedLoyalty} (loyalty only)`);
+    assert(discount.repeatBuyerDiscount.previousBookings === 0, 'Fresh customer has 0 completed bookings');
+    assertClose(discount.finalAmount, quoteAmount - expectedLoyalty, `Discounted amount is €${quoteAmount - expectedLoyalty} (loyalty only)`);
   } finally {
     await User.findByIdAndDelete(freshCustomer._id);
   }
@@ -388,22 +395,23 @@ async function testBronzeTierNoDiscount() {
     role: 'customer',
     customerType: 'individual',
     loyaltyLevel: 'Bronze',
-    totalSpent: 100,
+    totalSpent: BRONZE_CUSTOMER_TOTAL_SPENT,
     location: { type: 'Point', coordinates: [4.3517, 50.8503] },
   });
 
   try {
-    const discount = await calculateDiscountBreakdown(
-      bronzeCustomer._id,
-      testProfessionalId,
-      undefined, // no project = no repeat discount
-      500
+    const discount = await calculateAutoDiscount(
+      bronzeCustomer._id.toString(),
+      testProfessionalId.toString(),
+      null, // no project = no repeat discount
+      500,
+      BRONZE_CUSTOMER_TOTAL_SPENT
     );
 
     assertClose(discount.loyaltyDiscount.amount, 0, 'Bronze gets 0% loyalty discount');
     assertClose(discount.repeatBuyerDiscount.amount, 0, 'No repeat discount without project');
     assertClose(discount.totalDiscount, 0, 'Total discount is €0');
-    assertClose(discount.discountedAmount, 500, 'Discounted amount equals original (€500)');
+    assertClose(discount.finalAmount, 500, 'Discounted amount equals original (€500)');
   } finally {
     await User.findByIdAndDelete(bronzeCustomer._id);
   }
@@ -419,14 +427,15 @@ async function testMinimumPaymentThreshold() {
   // €0.60 quote, Gold 5% = €0.03, repeat 10% = €0.06 → total discount €0.09 → €0.51 (still above)
   // €0.50 quote, 5% = 0.025 → 0.03, 10% = 0.05 → total 0.08 → 0.42 → clamped to 0.50
 
-  const discount = await calculateDiscountBreakdown(
-    testCustomerId,
-    testProfessionalId,
-    testProjectId,
-    0.50
+  const discount = await calculateAutoDiscount(
+    testCustomerId.toString(),
+    testProfessionalId.toString(),
+    testProjectId.toString(),
+    0.50,
+    GOLD_CUSTOMER_TOTAL_SPENT
   );
 
-  assert(discount.discountedAmount >= 0.50, `Discounted amount is >= €0.50 (got €${discount.discountedAmount})`);
+  assert(discount.finalAmount >= 0.50, `Discounted amount is >= €0.50 (got €${discount.finalAmount})`);
 }
 
 async function testProjectWithDisabledRepeatDiscount() {
@@ -459,11 +468,12 @@ async function testProjectWithDisabledRepeatDiscount() {
 
   try {
     const quoteAmount = 500;
-    const discount = await calculateDiscountBreakdown(
-      testCustomerId,
-      testProfessionalId,
-      noDiscountProject._id as any,
-      quoteAmount
+    const discount = await calculateAutoDiscount(
+      testCustomerId.toString(),
+      testProfessionalId.toString(),
+      (noDiscountProject._id as any).toString(),
+      quoteAmount,
+      GOLD_CUSTOMER_TOTAL_SPENT
     );
 
     const expectedLoyalty = Math.min(
@@ -473,7 +483,7 @@ async function testProjectWithDisabledRepeatDiscount() {
 
     assertClose(discount.loyaltyDiscount.amount, expectedLoyalty, `Still gets loyalty discount (€${expectedLoyalty})`);
     assertClose(discount.repeatBuyerDiscount.amount, 0, 'No repeat discount (disabled on project)');
-    assertClose(discount.discountedAmount, quoteAmount - expectedLoyalty, `Discounted amount €${quoteAmount - expectedLoyalty}`);
+    assertClose(discount.finalAmount, quoteAmount - expectedLoyalty, `Discounted amount €${quoteAmount - expectedLoyalty}`);
   } finally {
     await Project.findByIdAndDelete(noDiscountProject._id);
   }
@@ -486,18 +496,19 @@ async function testBookingModelStoresDiscount() {
   assert(!!booking, 'Test booking exists');
 
   // Simulate storing discount in payment.discount (flat shape)
-  const discount = await calculateDiscountBreakdown(
-    testCustomerId,
-    testProfessionalId,
-    testProjectId,
-    500
+  const discount = await calculateAutoDiscount(
+    testCustomerId.toString(),
+    testProfessionalId.toString(),
+    testProjectId.toString(),
+    500,
+    GOLD_CUSTOMER_TOTAL_SPENT
   );
 
   if (!booking!.payment) {
     booking!.payment = { amount: 500, currency: 'EUR' } as any;
   }
   (booking!.payment as any).discount = {
-    loyaltyTier: discount.loyaltyDiscount.tierName,
+    loyaltyTier: discount.loyaltyDiscount.tier,
     loyaltyPercentage: discount.loyaltyDiscount.percentage,
     loyaltyAmount: discount.loyaltyDiscount.amount,
     repeatBuyerPercentage: discount.repeatBuyerDiscount.percentage,
