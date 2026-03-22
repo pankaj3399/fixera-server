@@ -216,10 +216,17 @@ export const calculateProfessionalLevel = async (
  * Called after booking completion or points boost.
  */
 export const updateProfessionalLevel = async (
-  professionalId: mongoose.Types.ObjectId | string
+  professionalId: mongoose.Types.ObjectId | string,
+  opts?: { session?: mongoose.ClientSession }
 ): Promise<{ levelChanged: boolean; oldLevel: string; newLevel: string }> => {
-  const user = await User.findById(professionalId);
-  if (!user || user.role !== 'professional') {
+  const findOpts = opts?.session ? { session: opts.session } : {};
+  const user = await User.findById(professionalId, null, findOpts);
+  if (!user) {
+    console.warn(`Professional Level: User not found for professionalId=${professionalId}, skipping level update`);
+    return { levelChanged: false, oldLevel: 'New', newLevel: 'New' };
+  }
+  if (user.role !== 'professional') {
+    console.warn(`Professional Level: User ${professionalId} has role="${user.role}", expected "professional", skipping level update`);
     return { levelChanged: false, oldLevel: 'New', newLevel: 'New' };
   }
 
@@ -228,7 +235,7 @@ export const updateProfessionalLevel = async (
 
   if (oldLevel !== levelInfo.currentLevel) {
     user.professionalLevel = levelInfo.currentLevel;
-    await user.save();
+    await user.save(opts?.session ? { session: opts.session } : {});
     console.log(`Professional Level: ${user.email} ${oldLevel} → ${levelInfo.currentLevel}`);
   }
 
@@ -246,10 +253,18 @@ export const applyPointsBoost = async (
   professionalId: mongoose.Types.ObjectId | string,
   pointsToSpend: number
 ): Promise<{ boostedBookings: number; newLevel: string; levelChanged: boolean }> => {
-  const config = await ProfessionalLevelConfig.getCurrentConfig();
-  // Use the first active level's boost ratio as reference
-  const activeLevel = config.levels.find(l => l.isActive);
-  const boostRatio = activeLevel?.pointsBoostRatio || 100;
+  const [config, professional] = await Promise.all([
+    ProfessionalLevelConfig.getCurrentConfig(),
+    User.findById(professionalId).select('professionalLevel')
+  ]);
+  if (!professional) {
+    throw new Error('Professional not found');
+  }
+
+  // Use the professional's current level to determine boost ratio
+  const currentLevelName = professional.professionalLevel || 'New';
+  const currentLevel = config.levels.find(l => l.isActive && l.name === currentLevelName);
+  const boostRatio = currentLevel?.pointsBoostRatio || 100;
 
   const boostedBookings = Math.floor(pointsToSpend / boostRatio);
   if (boostedBookings < 1) {
@@ -275,7 +290,7 @@ export const applyPointsBoost = async (
       );
 
       // Recalculate level within same transaction
-      const result = await updateProfessionalLevel(professionalId);
+      const result = await updateProfessionalLevel(professionalId, { session });
       levelChanged = result.levelChanged;
       newLevel = result.newLevel;
     });

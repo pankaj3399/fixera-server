@@ -96,22 +96,17 @@ export const deductPoints = async (
   if (opts?.session) updateOpts.session = opts.session;
 
   const prevUser = await User.findOneAndUpdate(
-    { _id: userId, points: { $gte: amount } },
+    { _id: userId, points: { $gte: amount }, role: { $ne: 'employee' } },
     { $inc: { points: -amount } },
     updateOpts
   );
 
   if (!prevUser) {
-    // Distinguish between user-not-found and insufficient balance
+    // Distinguish between user-not-found, employee, and insufficient balance
     const exists = await User.findById(userId).select('_id role points');
     if (!exists) throw new Error('User not found');
     if (exists.role === 'employee') throw new Error('Employees cannot earn or spend points');
     throw new Error(`Insufficient points: has ${exists.points || 0}, needs ${amount}`);
-  }
-  if (prevUser.role === 'employee') {
-    // Rollback
-    await User.findByIdAndUpdate(userId, { $inc: { points: amount } }, opts?.session ? { session: opts.session } : {});
-    throw new Error('Employees cannot earn or spend points');
   }
 
   const balanceBefore = prevUser.points || 0;
@@ -184,8 +179,8 @@ export const previewPointsRedemption = async (
   // Don't let discount exceed booking amount (leave at least €0.50 for Stripe)
   const maxDiscount = Math.max(0, bookingAmount - 0.50);
   if (discountAmount > maxDiscount) {
-    discountAmount = maxDiscount;
-    redeemable = Math.ceil(discountAmount / config.conversionRate);
+    redeemable = Math.floor(maxDiscount / config.conversionRate);
+    discountAmount = redeemable * config.conversionRate;
   }
 
   return {
