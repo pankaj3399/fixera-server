@@ -6,9 +6,13 @@ import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import mongoose from "mongoose";
 import { moderateText } from "../../utils/contentModeration";
-import { uploadToS3, generateFileName, validateImageFile } from "../../utils/s3Upload";
+import { uploadToS3, generateFileName, validateImageFile, deleteFromS3 } from "../../utils/s3Upload";
 
 const MAX_COMMENT_LENGTH = 1000;
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // Customer submits a review for the professional (3 categories + text + optional images)
 export const submitCustomerReview = async (req: Request, res: Response, next: NextFunction) => {
@@ -76,12 +80,25 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
       return res.status(400).json({ success: false, msg: "You have already reviewed this booking" });
     }
 
-    // Upload images to S3
+    // Upload images to S3 (with cleanup on failure)
     const imageUrls: string[] = [];
-    for (const file of files) {
-      const fileName = generateFileName(file.originalname, userId!, "reviews");
-      const result = await uploadToS3(file, fileName);
-      imageUrls.push(result.url);
+    const uploadedKeys: string[] = [];
+    try {
+      for (const file of files) {
+        const fileName = generateFileName(file.originalname, userId!, "reviews");
+        const result = await uploadToS3(file, fileName);
+        imageUrls.push(result.url);
+        uploadedKeys.push(result.key);
+      }
+    } catch (uploadError) {
+      // Clean up any already-uploaded files
+      for (const key of uploadedKeys) {
+        try { await deleteFromS3(key); } catch (cleanupErr) {
+          console.error("Failed to clean up orphaned S3 object:", key, cleanupErr);
+        }
+      }
+      console.error("Review image upload failed:", uploadError);
+      return res.status(500).json({ success: false, msg: "Failed to upload review images" });
     }
 
     booking.customerReview = {
@@ -357,7 +374,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
 
     // Search filter (matches comment text)
     if (search && typeof search === "string" && search.trim()) {
-      query["customerReview.comment"] = { $regex: search.trim(), $options: "i" };
+      query["customerReview.comment"] = { $regex: escapeRegex(search.trim()), $options: "i" };
     }
 
     // Base query for overall stats (unfiltered by search/rating/project)
@@ -368,7 +385,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
       "customerReview.isHidden": { $ne: true },
     };
 
-    const [reviews, totalCount, ratingStats] = await Promise.all([
+    const [reviews, totalCount, ratingStats, distinctProjects] = await Promise.all([
       Booking.find(query)
         .select("customerReview customer project createdAt")
         .populate("customer", "name profileImage")
@@ -390,6 +407,15 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
           },
         },
       ]),
+      // Stable list of all projects with reviews for this professional (for filter dropdown)
+      Booking.aggregate([
+        { $match: statsQuery },
+        { $group: { _id: "$project" } },
+        { $lookup: { from: "projects", localField: "_id", foreignField: "_id", as: "proj" } },
+        { $unwind: "$proj" },
+        { $project: { _id: "$proj._id", title: "$proj.title" } },
+        { $sort: { title: 1 } },
+      ]),
     ]);
 
     const stats = ratingStats[0] || {
@@ -408,6 +434,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
       data: {
         professional,
         reviews,
+        projects: distinctProjects,
         ratingsSummary: {
           overallAverage: Math.round(overallAvg * 10) / 10,
           avgCommunication: Math.round((stats.avgCommunication || 0) * 10) / 10,
@@ -494,7 +521,7 @@ export const getProjectReviews = async (req: Request, res: Response, next: NextF
 
     // Search filter (matches comment text)
     if (search && typeof search === "string" && search.trim()) {
-      query["customerReview.comment"] = { $regex: search.trim(), $options: "i" };
+      query["customerReview.comment"] = { $regex: escapeRegex(search.trim()), $options: "i" };
     }
 
     const activeStatuses = ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'payment_pending', 'booked', 'in_progress'];

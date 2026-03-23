@@ -40,6 +40,7 @@ export const hideReview = async (req: Request, res: Response, next: NextFunction
 // Unhide a customer review (admin only)
 export const unhideReview = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const adminId = req.user?._id;
     const { bookingId } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(bookingId)) {
@@ -55,10 +56,21 @@ export const unhideReview = async (req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ success: false, msg: "Review is not hidden" });
     }
 
-    booking.customerReview.isHidden = false;
-    booking.customerReview.hiddenBy = undefined;
-    booking.customerReview.hiddenAt = undefined;
-    await booking.save();
+    // Use atomic $set/$unset to properly remove fields and record audit trail
+    await Booking.updateOne(
+      { _id: bookingId },
+      {
+        $set: {
+          "customerReview.isHidden": false,
+          "customerReview.unhiddenBy": adminId,
+          "customerReview.unhiddenAt": new Date(),
+        },
+        $unset: {
+          "customerReview.hiddenBy": "",
+          "customerReview.hiddenAt": "",
+        },
+      }
+    );
 
     return res.status(200).json({ success: true, msg: "Review unhidden successfully" });
   } catch (error) {

@@ -248,6 +248,8 @@ export interface IBooking extends Document {
     isHidden?: boolean;
     hiddenBy?: Types.ObjectId;
     hiddenAt?: Date;
+    unhiddenBy?: Types.ObjectId;
+    unhiddenAt?: Date;
   };
   professionalReview?: {
     rating: number; // 1-5
@@ -733,6 +735,13 @@ const BookingSchema = new Schema({
     },
     hiddenAt: {
       type: Date
+    },
+    unhiddenBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    unhiddenAt: {
+      type: Date
     }
   },
   professionalReview: {
@@ -855,6 +864,7 @@ BookingSchema.index({ assignedTeamMembers: 1 });
 BookingSchema.index({ assignedTeamMembers: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ professional: 1, status: 1, scheduledStartDate: 1 });
 BookingSchema.index({ professional: 1, status: 1, 'customerReview.communicationLevel': 1 }); // Reviews query
+BookingSchema.index({ 'customerReview.isHidden': 1, 'customerReview.hiddenAt': -1 }); // Hidden reviews admin query
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ status: 1, rfqDeadline: 1 }); // RFQ deadline scheduler
 BookingSchema.index({ quotationNumber: 1 }); // Quotation lookup

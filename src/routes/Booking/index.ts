@@ -13,7 +13,7 @@ import { respondToQuoteWithPayment, ensurePaymentIntent, updateBookingStatusWith
 import { getDiscountPreview } from '../../handlers/Booking/discountPreview';
 import { submitCustomerReview, submitProfessionalReview, replyToCustomerReview } from '../../handlers/Booking/reviews';
 import { protect } from '../../middlewares/auth';
-import { upload } from '../../utils/s3Upload';
+import { uploadReviewImages } from '../../utils/s3Upload';
 
 const router = express.Router();
 
@@ -52,7 +52,7 @@ router.put('/:bookingId/status', updateBookingStatusWithPayment);
 router.post('/:bookingId/cancel', cancelBooking);
 
 // Reviews
-router.post('/:bookingId/customer-review', upload.array('images', 2), submitCustomerReview);
+router.post('/:bookingId/customer-review', uploadReviewImages.array('images', 2), submitCustomerReview);
 router.post('/:bookingId/professional-review', submitProfessionalReview);
 router.post('/:bookingId/customer-review/reply', replyToCustomerReview);
 
