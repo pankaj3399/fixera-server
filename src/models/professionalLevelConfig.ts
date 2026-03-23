@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema, Model } from 'mongoose';
 
-export type ProfessionalLevelName = 'New' | 'Rising' | 'Level 1' | 'Level 2' | 'Expert';
+export type ProfessionalLevelName = 'New' | 'Level 1' | 'Level 2' | 'Level 3' | 'Expert';
 
 export interface IProfessionalLevel {
   name: ProfessionalLevelName;
@@ -38,7 +38,7 @@ const professionalLevelSchema = new Schema({
   name: {
     type: String,
     required: true,
-    enum: ['New', 'Rising', 'Level 1', 'Level 2', 'Expert']
+    enum: ['New', 'Level 1', 'Level 2', 'Level 3', 'Expert']
   },
   order: {
     type: Number,
@@ -112,21 +112,21 @@ professionalLevelConfigSchema.statics.getCurrentConfig = async function(): Promi
       pointsBoostRatio: 100, isActive: true, color: '#6B7280', icon: 'user'
     },
     {
-      name: 'Rising', order: 2,
+      name: 'Level 1', order: 2,
       criteria: { minCompletedBookings: 5, minDaysActive: 60, minAvgRating: 4.0, minOnTimePercentage: 80, minResponseRate: 80 },
-      perks: { badge: 'rising-badge', commissionReduction: 1, searchRankingBoost: 1.1 },
+      perks: { badge: 'level-1-badge', commissionReduction: 1, searchRankingBoost: 1.1 },
       pointsBoostRatio: 100, isActive: true, color: '#10B981', icon: 'trending-up'
     },
     {
-      name: 'Level 1', order: 3,
+      name: 'Level 2', order: 3,
       criteria: { minCompletedBookings: 15, minDaysActive: 120, minAvgRating: 4.3, minOnTimePercentage: 85, minResponseRate: 90 },
-      perks: { badge: 'level-1-badge', commissionReduction: 2, searchRankingBoost: 1.2 },
+      perks: { badge: 'level-2-badge', commissionReduction: 2, searchRankingBoost: 1.2 },
       pointsBoostRatio: 100, isActive: true, color: '#3B82F6', icon: 'award'
     },
     {
-      name: 'Level 2', order: 4,
+      name: 'Level 3', order: 4,
       criteria: { minCompletedBookings: 40, minDaysActive: 250, minAvgRating: 4.5, minOnTimePercentage: 90, minResponseRate: 95 },
-      perks: { badge: 'top-professional', commissionReduction: 3, searchRankingBoost: 1.4 },
+      perks: { badge: 'level-3-badge', commissionReduction: 3, searchRankingBoost: 1.4 },
       pointsBoostRatio: 100, isActive: true, color: '#8B5CF6', icon: 'shield'
     },
     {
