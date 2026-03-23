@@ -122,7 +122,7 @@ export interface IUser extends Document {
     points?: number;
     pointsExpiry?: Date;
     // Professional level
-    professionalLevel?: 'New' | 'Rising' | 'Level 1' | 'Level 2' | 'Expert';
+    professionalLevel?: 'New' | 'Level 1' | 'Level 2' | 'Level 3' | 'Expert';
     // Referral system fields
     referralCode?: string;
     referredBy?: Types.ObjectId;
@@ -443,7 +443,7 @@ const UserSchema = new Schema({
     // Professional level
     professionalLevel: {
         type: String,
-        enum: ['New', 'Rising', 'Level 1', 'Level 2', 'Expert'],
+        enum: ['New', 'Level 1', 'Level 2', 'Level 3', 'Expert'],
         default: 'New'
     },
     // Referral system fields
