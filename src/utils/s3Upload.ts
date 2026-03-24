@@ -51,6 +51,24 @@ export const upload = multer({
   },
 });
 
+// Dedicated multer for review images (images only, 5MB limit)
+const reviewImageFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+  if (allowed.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only JPEG, PNG, and WebP images are allowed for reviews'));
+  }
+};
+
+export const uploadReviewImages = multer({
+  storage,
+  fileFilter: reviewImageFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit for review images
+  },
+});
+
 // Generate unique filename
 export const generateFileName = (originalName: string, userId: string, type: string): string => {
   const ext = path.extname(originalName);

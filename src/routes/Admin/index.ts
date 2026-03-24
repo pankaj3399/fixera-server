@@ -46,6 +46,11 @@ import {
   getPlatformSettings,
   updatePlatformSettings,
 } from "../../handlers/Admin/platformSettings";
+import {
+  hideReview,
+  unhideReview,
+  getHiddenReviews,
+} from "../../handlers/Admin/reviewModeration";
 
 const adminRouter = Router();
 
@@ -95,6 +100,11 @@ adminRouter.route('/service-configurations/:id').delete(deleteServiceConfigurati
 adminRouter.route('/service-configurations/:id/toggle-active').patch(toggleServiceConfigurationActive);
 adminRouter.route('/payments').get(getPayments);
 adminRouter.route('/payments/:paymentId/capture').post(capturePayment);
+
+// Review moderation routes
+adminRouter.route('/reviews/hidden').get(getHiddenReviews);
+adminRouter.route('/reviews/:bookingId/hide').put(hideReview);
+adminRouter.route('/reviews/:bookingId/unhide').put(unhideReview);
 
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);

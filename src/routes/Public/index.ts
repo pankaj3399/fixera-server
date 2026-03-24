@@ -9,7 +9,7 @@ import {
   getProjectTeamAvailability,
   getProjectWorkingHours,
 } from "../../handlers/Project";
-import { getProfessionalReviews } from "../../handlers/Booking/reviews";
+import { getProfessionalReviews, getProjectReviews } from "../../handlers/Booking/reviews";
 import { validateReferralCodePublic } from "../../handlers/User/referralManagement";
 
 // Public routes - accessible without authentication
@@ -55,5 +55,10 @@ publicRouter.route("/referral/validate/:code").get(schedulingRateLimiter, valida
 publicRouter
   .route("/professionals/:professionalId/reviews")
   .get(schedulingRateLimiter, getProfessionalReviews);
+
+// Project-specific reviews (public)
+publicRouter
+  .route("/projects/:projectId/reviews")
+  .get(schedulingRateLimiter, getProjectReviews);
 
 export default publicRouter;

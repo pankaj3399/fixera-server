@@ -7,7 +7,8 @@ import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngin
 
 export { getPopularServices } from "./getPopularServices";
 
-async function aggregateProfessionalRatings(
+export async function aggregateRatings(
+  groupField: "professional" | "project",
   ids: (string | Types.ObjectId)[]
 ): Promise<Map<string, { avgRating: number; totalReviews: number }>> {
   if (ids.length === 0) return new Map();
@@ -19,14 +20,15 @@ async function aggregateProfessionalRatings(
   const results = await Booking.aggregate([
     {
       $match: {
-        professional: { $in: objectIds },
+        [groupField]: { $in: objectIds },
         status: "completed",
         "customerReview.communicationLevel": { $exists: true },
+        "customerReview.isHidden": { $ne: true },
       },
     },
     {
       $group: {
-        _id: "$professional",
+        _id: `$${groupField}`,
         avgCommunication: { $avg: "$customerReview.communicationLevel" },
         avgValueOfDelivery: { $avg: "$customerReview.valueOfDelivery" },
         avgQualityOfService: { $avg: "$customerReview.qualityOfService" },
@@ -45,6 +47,18 @@ async function aggregateProfessionalRatings(
       ];
     })
   );
+}
+
+async function aggregateProfessionalRatings(
+  ids: (string | Types.ObjectId)[]
+): Promise<Map<string, { avgRating: number; totalReviews: number }>> {
+  return aggregateRatings("professional", ids);
+}
+
+export async function aggregateProjectRatings(
+  ids: (string | Types.ObjectId)[]
+): Promise<Map<string, { avgRating: number; totalReviews: number }>> {
+  return aggregateRatings("project", ids);
 }
 
 /**
@@ -576,8 +590,9 @@ async function searchProjects(
         .lean()
       : [];
 
-    // Aggregate ratings for project professionals
-    const projectRatingMap = await aggregateProfessionalRatings(professionalIds);
+    // Aggregate ratings per project (not per professional)
+    const projectIds = finalResults.map((p: any) => p._id).filter(Boolean);
+    const projectRatingMap = await aggregateProjectRatings(projectIds);
 
     // Create a lookup map for quick access
     const professionalMap = new Map(
@@ -602,7 +617,8 @@ async function searchProjects(
             return project;
           }
 
-          const profRatings = projectRatingMap.get(profId!) || { avgRating: 0, totalReviews: 0 };
+          const projectIdStr = project._id?.toString?.() || project._id;
+          const projectRatings = projectRatingMap.get(projectIdStr) || { avgRating: 0, totalReviews: 0 };
           const professionalSummary = {
             _id: professional._id,
             name: professional.name,
@@ -611,8 +627,8 @@ async function searchProjects(
             hourlyRate: professional.hourlyRate,
             currency: professional.currency,
             profileImage: professional.profileImage,
-            avgRating: profRatings.avgRating,
-            totalReviews: profRatings.totalReviews,
+            avgRating: projectRatings.avgRating,
+            totalReviews: projectRatings.totalReviews,
           };
 
           // Get main project availability - use first subproject
