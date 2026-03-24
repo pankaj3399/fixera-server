@@ -9,6 +9,12 @@ import {
   uploadChatImage,
   uploadChatFile,
   getConversationInfo,
+  toggleStar,
+  toggleArchive,
+  addLabel,
+  removeLabel,
+  reportMessage,
+  searchMessages,
 } from "../../handlers/Chat";
 import { protect } from "../../middlewares/auth";
 import { upload } from "../../utils/s3Upload";
@@ -57,5 +63,11 @@ router.post("/conversations/:conversationId/messages", chatSendLimiter, sendMess
 router.patch("/conversations/:conversationId/read", markConversationRead);
 router.post("/upload-image", chatUploadLimiter, upload.single("image"), uploadChatImage);
 router.post("/upload-file", chatUploadLimiter, upload.single("file"), uploadChatFile);
+router.patch("/conversations/:conversationId/star", toggleStar);
+router.patch("/conversations/:conversationId/archive", toggleArchive);
+router.post("/conversations/:conversationId/label", addLabel);
+router.delete("/conversations/:conversationId/label/:label", removeLabel);
+router.post("/messages/:messageId/report", reportMessage);
+router.get("/conversations/:conversationId/messages/search", searchMessages);
 
 export default router;

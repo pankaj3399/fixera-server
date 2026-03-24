@@ -36,6 +36,7 @@ export interface IChatMessage extends Document {
   attachments: IChatAttachment[];
   readBy: IChatMessageReadReceipt[];
   reviewMeta?: IReviewNotificationMeta;
+  replyTo?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -117,6 +118,11 @@ const ChatMessageSchema = new Schema<IChatMessage>(
         },
       },
     ],
+    replyTo: {
+      type: Schema.Types.ObjectId,
+      ref: "ChatMessage",
+      required: false,
+    },
   },
   { timestamps: true }
 );

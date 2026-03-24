@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Booking from "../../models/booking";
 import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
+import ChatReport from "../../models/chatReport";
 import User from "../../models/user";
 import { generateFileName, uploadToS3, validateImageFile, validateFile, validateVideoFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
 import type { IChatAttachment } from "../../models/chatMessage";
@@ -178,20 +179,41 @@ export const listMyConversations = async (
   const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 20;
   const skip = (page - 1) * limit;
+  const filter = typeof req.query.filter === "string" ? req.query.filter : "all";
 
-  const query =
+  const userOid = toObjectId(userId);
+  const baseQuery: Record<string, any> =
     userRole === "customer"
-      ? { customerId: toObjectId(userId) }
-      : { professionalId: toObjectId(userId) };
+      ? { customerId: userOid }
+      : { professionalId: userOid };
+
+  const unreadField = userRole === "customer" ? "customerUnreadCount" : "professionalUnreadCount";
+
+  if (filter === "archived") {
+    baseQuery.archivedBy = userOid;
+  } else if (filter === "starred") {
+    baseQuery.starredBy = userOid;
+    baseQuery.archivedBy = { $ne: userOid };
+  } else if (filter === "unread") {
+    baseQuery[unreadField] = { $gt: 0 };
+    baseQuery.archivedBy = { $ne: userOid };
+  } else if (filter.startsWith("label:")) {
+    const labelName = filter.slice(6);
+    baseQuery.labels = { $elemMatch: { userId: userOid, label: labelName } };
+    baseQuery.archivedBy = { $ne: userOid };
+  } else {
+    // "all" — exclude archived
+    baseQuery.archivedBy = { $ne: userOid };
+  }
 
   const [conversations, total] = await Promise.all([
-    Conversation.find(query)
+    Conversation.find(baseQuery)
       .populate("customerId", "name email businessInfo profileImage")
       .populate("professionalId", "name email businessInfo profileImage")
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit),
-    Conversation.countDocuments(query),
+    Conversation.countDocuments(baseQuery),
   ]);
 
   return res.status(200).json({
@@ -253,6 +275,11 @@ export const getConversationMessages = async (
 
   const messagesDesc = await ChatMessage.find(messageQuery)
     .populate("senderId", "name email businessInfo profileImage role")
+    .populate({
+      path: "replyTo",
+      select: "text senderId images createdAt",
+      populate: { path: "senderId", select: "name businessInfo" },
+    })
     .sort({ _id: -1 })
     .limit(limit);
 
@@ -394,6 +421,10 @@ export const sendMessage = async (req: Request, res: Response) => {
     senderRole = userRole === "professional" ? "professional" : "customer";
   }
 
+  const replyTo = typeof req.body.replyTo === "string" && mongoose.Types.ObjectId.isValid(req.body.replyTo)
+    ? req.body.replyTo
+    : undefined;
+
   const message = await ChatMessage.create({
     conversationId: toObjectId(conversationId),
     senderId: toObjectId(userId),
@@ -402,6 +433,7 @@ export const sendMessage = async (req: Request, res: Response) => {
     images,
     attachments,
     readBy: [{ userId: toObjectId(userId), readAt: new Date() }],
+    ...(replyTo ? { replyTo: toObjectId(replyTo) } : {}),
   });
 
   const preview = buildMessagePreview(text, images, attachments);
@@ -590,34 +622,48 @@ export const getConversationInfo = async (req: Request, res: Response) => {
   const customerId = getIdString(conversation.customerId);
   const professionalId = getIdString(conversation.professionalId);
 
-  const bookingStats = await Booking.aggregate([
-    {
-      $match: {
-        customer: toObjectId(customerId),
-        professional: toObjectId(professionalId),
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        totalBookings: { $sum: 1 },
-        completedBookings: {
-          $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-        },
-        avgCommunication: {
-          $avg: "$customerReview.communicationLevel",
-        },
-        avgValueOfDelivery: {
-          $avg: "$customerReview.valueOfDelivery",
-        },
-        avgQualityOfService: {
-          $avg: "$customerReview.qualityOfService",
-        },
-        avgProfessionalRating: {
-          $avg: "$professionalReview.rating",
+  const [bookingStats, pendingBookings, professional] = await Promise.all([
+    Booking.aggregate([
+      {
+        $match: {
+          customer: toObjectId(customerId),
+          professional: toObjectId(professionalId),
         },
       },
-    },
+      {
+        $group: {
+          _id: null,
+          totalBookings: { $sum: 1 },
+          completedBookings: {
+            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+          },
+          avgCommunication: {
+            $avg: "$customerReview.communicationLevel",
+          },
+          avgValueOfDelivery: {
+            $avg: "$customerReview.valueOfDelivery",
+          },
+          avgQualityOfService: {
+            $avg: "$customerReview.qualityOfService",
+          },
+          avgProfessionalRating: {
+            $avg: "$professionalReview.rating",
+          },
+        },
+      },
+    ]),
+    Booking.find({
+      customer: toObjectId(customerId),
+      professional: toObjectId(professionalId),
+      status: { $in: ["booked", "in_progress"] },
+    })
+      .select("bookingNumber rfqData.preferredStartDate quote.validUntil quote.estimatedDuration status createdAt")
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .lean(),
+    User.findById(professionalId)
+      .select("professionalLevel companyBlockedRanges companyBlockedDates blockedRanges blockedDates")
+      .lean(),
   ]);
 
   const stats = bookingStats[0] || {
@@ -635,6 +681,57 @@ export const getConversationInfo = async (req: Request, res: Response) => {
   const hasCustomerRatings = avgCom > 0 || avgVal > 0 || avgQual > 0;
   const avgCustomerRating = hasCustomerRatings ? (avgCom + avgVal + avgQual) / 3 : 0;
 
+  // Compute average response time (professional reply time to customer messages)
+  let avgResponseTimeMs = 0;
+  try {
+    const responseTimeAgg = await ChatMessage.aggregate([
+      { $match: { conversationId: toObjectId(conversationId) } },
+      { $sort: { _id: 1 } },
+      {
+        $group: {
+          _id: "$conversationId",
+          messages: {
+            $push: { senderRole: "$senderRole", createdAt: "$createdAt" },
+          },
+        },
+      },
+    ]);
+    if (responseTimeAgg.length > 0) {
+      const msgs = responseTimeAgg[0].messages as { senderRole: string; createdAt: Date }[];
+      const responseTimes: number[] = [];
+      for (let i = 1; i < msgs.length; i++) {
+        if (msgs[i].senderRole === "professional" && msgs[i - 1].senderRole === "customer") {
+          const diff = new Date(msgs[i].createdAt).getTime() - new Date(msgs[i - 1].createdAt).getTime();
+          if (diff > 0) responseTimes.push(diff);
+        }
+      }
+      if (responseTimes.length > 0) {
+        avgResponseTimeMs = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+      }
+    }
+  } catch {
+    // non-critical
+  }
+
+  // Check if professional is currently absent (company blocked ranges)
+  const now = new Date();
+  let absence: { from: string; to: string } | null = null;
+  const allBlockedRanges = [
+    ...(professional?.companyBlockedRanges || []),
+    ...(professional?.blockedRanges || []),
+  ];
+  for (const range of allBlockedRanges) {
+    const start = new Date(range.startDate);
+    const end = new Date(range.endDate);
+    if (start <= now && now <= end) {
+      absence = {
+        from: start.toISOString(),
+        to: end.toISOString(),
+      };
+      break;
+    }
+  }
+
   return res.status(200).json({
     success: true,
     data: {
@@ -647,7 +744,208 @@ export const getConversationInfo = async (req: Request, res: Response) => {
         avgValueOfDelivery: Math.round(avgVal * 10) / 10,
         avgQualityOfService: Math.round(avgQual * 10) / 10,
         avgProfessionalRating: Math.round((stats.avgProfessionalRating || 0) * 10) / 10,
+        professionalLevel: professional?.professionalLevel || "New",
+        avgResponseTimeMs: Math.round(avgResponseTimeMs),
+        pendingBookings: pendingBookings.map((b: any) => ({
+          bookingNumber: b.bookingNumber,
+          status: b.status,
+          preferredStartDate: b.rfqData?.preferredStartDate || null,
+          estimatedDuration: b.quote?.estimatedDuration || null,
+        })),
+        absence,
       },
     },
+  });
+};
+
+// --- Star / Archive / Label / Report / Search endpoints ---
+
+export const toggleStar = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { conversationId } = req.params;
+
+  if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
+  if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+    return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+  }
+
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) return res.status(404).json({ success: false, msg: "Conversation not found" });
+  if (!isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed" });
+  }
+
+  const userOid = toObjectId(userId);
+  const isStarred = conversation.starredBy.some((id) => id.toString() === userId);
+
+  if (isStarred) {
+    await Conversation.findByIdAndUpdate(conversationId, { $pull: { starredBy: userOid } });
+  } else {
+    await Conversation.findByIdAndUpdate(conversationId, { $addToSet: { starredBy: userOid } });
+  }
+
+  return res.status(200).json({ success: true, starred: !isStarred });
+};
+
+export const toggleArchive = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { conversationId } = req.params;
+
+  if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
+  if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+    return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+  }
+
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) return res.status(404).json({ success: false, msg: "Conversation not found" });
+  if (!isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed" });
+  }
+
+  const userOid = toObjectId(userId);
+  const isArchived = conversation.archivedBy.some((id) => id.toString() === userId);
+
+  if (isArchived) {
+    await Conversation.findByIdAndUpdate(conversationId, { $pull: { archivedBy: userOid } });
+  } else {
+    await Conversation.findByIdAndUpdate(conversationId, { $addToSet: { archivedBy: userOid } });
+  }
+
+  return res.status(200).json({ success: true, archived: !isArchived });
+};
+
+export const addLabel = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { conversationId } = req.params;
+  const { label, color } = req.body as { label?: string; color?: string };
+
+  if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
+  if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+    return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+  }
+  if (!label || typeof label !== "string" || label.trim().length === 0 || label.trim().length > 30) {
+    return res.status(400).json({ success: false, msg: "Label is required (max 30 chars)" });
+  }
+
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) return res.status(404).json({ success: false, msg: "Conversation not found" });
+  if (!isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed" });
+  }
+
+  const userOid = toObjectId(userId);
+  const trimmed = label.trim();
+
+  // Remove existing label with same name for this user, then add
+  await Conversation.findByIdAndUpdate(conversationId, {
+    $pull: { labels: { userId: userOid, label: trimmed } },
+  });
+  await Conversation.findByIdAndUpdate(conversationId, {
+    $push: { labels: { userId: userOid, label: trimmed, color: color || undefined } },
+  });
+
+  return res.status(200).json({ success: true, msg: "Label added" });
+};
+
+export const removeLabel = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { conversationId, label } = req.params;
+
+  if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
+  if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+    return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+  }
+
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) return res.status(404).json({ success: false, msg: "Conversation not found" });
+  if (!isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed" });
+  }
+
+  await Conversation.findByIdAndUpdate(conversationId, {
+    $pull: { labels: { userId: toObjectId(userId), label: decodeURIComponent(label) } },
+  });
+
+  return res.status(200).json({ success: true, msg: "Label removed" });
+};
+
+export const reportMessage = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { messageId } = req.params;
+  const { reason, description } = req.body as { reason?: string; description?: string };
+
+  if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
+  if (!messageId || !mongoose.Types.ObjectId.isValid(messageId)) {
+    return res.status(400).json({ success: false, msg: "Invalid messageId" });
+  }
+
+  const validReasons = ["spam", "harassment", "inappropriate", "scam", "other"];
+  if (!reason || !validReasons.includes(reason)) {
+    return res.status(400).json({ success: false, msg: "Valid reason is required" });
+  }
+
+  const message = await ChatMessage.findById(messageId);
+  if (!message) return res.status(404).json({ success: false, msg: "Message not found" });
+
+  const conversation = await Conversation.findById(message.conversationId);
+  if (!conversation || !isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed" });
+  }
+
+  // Prevent self-reporting
+  if (message.senderId.toString() === userId) {
+    return res.status(400).json({ success: false, msg: "Cannot report your own message" });
+  }
+
+  try {
+    await ChatReport.create({
+      messageId: toObjectId(messageId),
+      conversationId: message.conversationId,
+      reportedBy: toObjectId(userId),
+      reason: reason as any,
+      description: description?.trim().slice(0, 500),
+    });
+  } catch (error: any) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ success: false, msg: "You already reported this message" });
+    }
+    throw error;
+  }
+
+  return res.status(201).json({ success: true, msg: "Report submitted" });
+};
+
+export const searchMessages = async (req: Request, res: Response) => {
+  const userId = getRequestUserId(req);
+  const { conversationId } = req.params;
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+  if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
+  if (!conversationId || !mongoose.Types.ObjectId.isValid(conversationId)) {
+    return res.status(400).json({ success: false, msg: "Invalid conversationId" });
+  }
+  if (!q || q.length < 2) {
+    return res.status(400).json({ success: false, msg: "Search query must be at least 2 characters" });
+  }
+
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) return res.status(404).json({ success: false, msg: "Conversation not found" });
+  if (!isConversationParticipant(conversation, userId)) {
+    return res.status(403).json({ success: false, msg: "Not allowed" });
+  }
+
+  const escapedQ = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const results = await ChatMessage.find({
+    conversationId: toObjectId(conversationId),
+    text: { $regex: escapedQ, $options: "i" },
+  })
+    .populate("senderId", "name businessInfo profileImage")
+    .sort({ _id: -1 })
+    .limit(50)
+    .lean();
+
+  return res.status(200).json({
+    success: true,
+    data: { results, total: results.length },
   });
 };
