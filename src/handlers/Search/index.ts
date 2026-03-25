@@ -6,6 +6,7 @@ import Booking from "../../models/booking";
 import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngine";
 
 export { getPopularServices } from "./getPopularServices";
+export { getPopularProjects } from "./getPopularProjects";
 
 export async function aggregateRatings(
   groupField: "professional" | "project",
