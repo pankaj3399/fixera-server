@@ -541,7 +541,11 @@ const BookingSchema = new Schema({
   }],
   selectedSubprojectIndex: {
     type: Number,
-    min: 0
+    min: 0,
+    validate: {
+      validator: Number.isInteger,
+      message: 'selectedSubprojectIndex must be an integer',
+    },
   },
 
   // Location

@@ -106,13 +106,13 @@ export const getPopularProjects = async (req: Request, res: Response) => {
             }
           } else if (
             sp.pricing?.type === "unit" &&
-            sp.pricing.priceRange?.min != null
+            sp.pricing.amount != null
           ) {
             if (
               startingPrice === null ||
-              sp.pricing.priceRange.min < startingPrice
+              sp.pricing.amount < startingPrice
             ) {
-              startingPrice = sp.pricing.priceRange.min;
+              startingPrice = sp.pricing.amount;
               priceType = "unit";
             }
           }

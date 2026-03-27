@@ -18,7 +18,7 @@ export const normalizeWarrantyDuration = (
       ? Number.parseFloat(valueRaw)
       : Number.NaN;
 
-  if (!Number.isFinite(value) || value < 0) return null;
+  if (!Number.isFinite(value) || value <= 0) return null;
   if (unitRaw !== "months" && unitRaw !== "years") return null;
 
   return {

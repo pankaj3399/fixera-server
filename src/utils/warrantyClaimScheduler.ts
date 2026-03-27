@@ -23,6 +23,7 @@ interface LockDoc {
 
 export interface WarrantyClaimSchedulerHandle {
   stop: () => void;
+  ready: Promise<void>;
 }
 
 const getLocksCollection = () => {
@@ -37,8 +38,12 @@ const ensureLockIndexes = async () => {
   const locksCollection = getLocksCollection();
   await locksCollection
     .createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "warranty_claim_expiresAt_ttl" })
-    .catch(() => {
-      return null;
+    .catch((error) => {
+      console.warn(
+        `[Warranty Scheduler] Failed to create index "warranty_claim_expiresAt_ttl" on "${LOCK_COLLECTION}":`,
+        error
+      );
+      throw error;
     });
 };
 
@@ -153,20 +158,22 @@ export const startWarrantyClaimScheduler = (): WarrantyClaimSchedulerHandle => {
   let intervalHandle: NodeJS.Timeout | null = null;
   let stopped = false;
 
-  ensureLockIndexes()
-    .catch((error) => {
+  const ready = (async () => {
+    try {
+      await ensureLockIndexes();
+    } catch (error) {
       console.error("[Warranty Scheduler] Failed to initialize lock indexes:", error);
-    })
-    .finally(() => {
-      void runWithLock(ownerId);
+    }
 
-      if (!stopped) {
-        intervalHandle = setInterval(() => {
-          void runWithLock(ownerId);
-        }, RUN_INTERVAL_MS);
-        console.log("[Warranty Scheduler] Started, running every 12 hours");
-      }
-    });
+    await runWithLock(ownerId);
+
+    if (!stopped) {
+      intervalHandle = setInterval(() => {
+        void runWithLock(ownerId);
+      }, RUN_INTERVAL_MS);
+      console.log("[Warranty Scheduler] Started, running every 12 hours");
+    }
+  })();
 
   return {
     stop: () => {
@@ -176,5 +183,6 @@ export const startWarrantyClaimScheduler = (): WarrantyClaimSchedulerHandle => {
         intervalHandle = null;
       }
     },
+    ready,
   };
 };

@@ -8,13 +8,11 @@
  * Follows idExpiryScheduler.ts pattern with MongoDB distributed lock.
  */
 
-import mongoose, { Types } from 'mongoose';
+import mongoose from 'mongoose';
 import { randomUUID } from 'crypto';
 import os from 'os';
 import Booking from '../models/booking';
-
-// System user ID for automated actions
-const SYSTEM_USER_ID = new Types.ObjectId('000000000000000000000000');
+import { SYSTEM_USER_ID } from '../constants/system';
 import User from '../models/user';
 import { getWorkingDaysBetween } from './workingDays';
 import {

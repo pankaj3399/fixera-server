@@ -60,15 +60,17 @@ const ensureWarrantyCoverageSnapshot = async (booking: any) => {
 
   if (!duration && booking.project) {
     const project = await Project.findById(booking.project).select('subprojects');
-    const selectedIndex =
-      typeof booking.selectedSubprojectIndex === 'number' && booking.selectedSubprojectIndex >= 0
-        ? booking.selectedSubprojectIndex
-        : 0;
     const subprojects = Array.isArray((project as any)?.subprojects) ? (project as any).subprojects : [];
-    const selectedSubproject = subprojects[selectedIndex];
-    duration = normalizeWarrantyDuration(selectedSubproject?.warrantyPeriod);
-    if (duration) {
-      source = 'project_subproject';
+    if (
+      typeof booking.selectedSubprojectIndex === 'number' &&
+      booking.selectedSubprojectIndex >= 0 &&
+      booking.selectedSubprojectIndex < subprojects.length
+    ) {
+      const selectedSubproject = subprojects[booking.selectedSubprojectIndex];
+      duration = normalizeWarrantyDuration(selectedSubproject?.warrantyPeriod);
+      if (duration) {
+        source = 'project_subproject';
+      }
     }
   }
 

@@ -22,10 +22,10 @@ import {
   validateImageFile,
   validateVideoFile,
 } from "../../utils/s3Upload";
+import { SYSTEM_USER_ID } from "../../constants/system";
 
 const PROFESSIONAL_RESPONSE_DAYS = 5;
 const CUSTOMER_AUTO_CLOSE_DAYS = 7;
-const SYSTEM_USER_ID = new Types.ObjectId("000000000000000000000000");
 const ACTIVE_CLAIM_STATUSES: WarrantyClaimStatus[] = [
   "open",
   "proposal_sent",
@@ -52,7 +52,8 @@ const isAdmin = (req: Request) => getUserRole(req) === "admin";
 const ensureConversationLabel = async (
   conversationId: Types.ObjectId,
   userId: Types.ObjectId,
-  label: string
+  label: string,
+  session?: mongoose.ClientSession
 ) => {
   await Conversation.findByIdAndUpdate(conversationId, [
     {
@@ -78,7 +79,7 @@ const ensureConversationLabel = async (
         },
       },
     },
-  ]);
+  ], session ? { session } : undefined);
 };
 
 const ensureWarrantyChatContext = async ({
@@ -92,70 +93,93 @@ const ensureWarrantyChatContext = async ({
   actorId?: Types.ObjectId;
   text: string;
 }) => {
-  let conversation = await Conversation.findOne({
-    customerId,
-    professionalId,
-  });
-
-  if (!conversation) {
-    conversation = await Conversation.create({
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    let conversation = await Conversation.findOne({
       customerId,
       professionalId,
-      initiatedBy: actorId || customerId,
-    });
-  }
+    }).session(session);
 
-  await Conversation.findByIdAndUpdate(conversation._id, {
-    $pull: { archivedBy: { $in: [customerId, professionalId] } },
-    $set: { status: "active" },
-  });
+    if (!conversation) {
+      const [created] = await Conversation.create(
+        [{ customerId, professionalId, initiatedBy: actorId || customerId }],
+        { session }
+      );
+      conversation = created;
+    }
 
-  await Promise.all([
-    ensureConversationLabel(conversation._id, customerId, "Warranty Claim Discussion"),
-    ensureConversationLabel(
+    await Conversation.findByIdAndUpdate(
       conversation._id,
-      professionalId,
-      "Warranty Claim Discussion"
-    ),
-  ]);
+      {
+        $pull: { archivedBy: { $in: [customerId, professionalId] } },
+        $set: { status: "active" },
+      },
+      { session }
+    );
 
-  const senderId = actorId || SYSTEM_USER_ID;
-  await ChatMessage.create({
-    conversationId: conversation._id,
-    senderId,
-    senderRole: "system",
-    messageType: "text",
-    text,
-    readBy: actorId ? [{ userId: actorId, readAt: new Date() }] : [],
-  });
+    await Promise.all([
+      ensureConversationLabel(conversation._id, customerId, "Warranty Claim Discussion", session),
+      ensureConversationLabel(
+        conversation._id,
+        professionalId,
+        "Warranty Claim Discussion",
+        session
+      ),
+    ]);
 
-  const actorIsCustomer = actorId?.toString() === customerId.toString();
-  const actorIsProfessional = actorId?.toString() === professionalId.toString();
-  const setUpdate: Record<string, any> = {
-    lastMessageAt: new Date(),
-    lastMessagePreview: text.slice(0, 200),
-    lastMessageSenderId: senderId,
-  };
-  const incUpdate: Record<string, number> = {};
+    const senderId = actorId || SYSTEM_USER_ID;
+    await ChatMessage.create(
+      [
+        {
+          conversationId: conversation._id,
+          senderId,
+          senderRole: "system",
+          messageType: "text",
+          text,
+          readBy: actorId ? [{ userId: actorId, readAt: new Date() }] : [],
+        },
+      ],
+      { session }
+    );
 
-  if (actorIsCustomer) {
-    setUpdate.customerUnreadCount = 0;
-    incUpdate.professionalUnreadCount = 1;
-  } else if (actorIsProfessional) {
-    setUpdate.professionalUnreadCount = 0;
-    incUpdate.customerUnreadCount = 1;
-  } else {
-    // System-generated events (auto-escalation/auto-close/admin actions) should notify both sides.
-    incUpdate.customerUnreadCount = 1;
-    incUpdate.professionalUnreadCount = 1;
+    const actorIsCustomer = actorId?.toString() === customerId.toString();
+    const actorIsProfessional = actorId?.toString() === professionalId.toString();
+    const setUpdate: Record<string, any> = {
+      lastMessageAt: new Date(),
+      lastMessagePreview: text.slice(0, 200),
+      lastMessageSenderId: senderId,
+    };
+    const incUpdate: Record<string, number> = {};
+
+    if (actorIsCustomer) {
+      setUpdate.customerUnreadCount = 0;
+      incUpdate.professionalUnreadCount = 1;
+    } else if (actorIsProfessional) {
+      setUpdate.professionalUnreadCount = 0;
+      incUpdate.customerUnreadCount = 1;
+    } else {
+      incUpdate.customerUnreadCount = 1;
+      incUpdate.professionalUnreadCount = 1;
+    }
+
+    await Conversation.findByIdAndUpdate(
+      conversation._id,
+      {
+        $set: setUpdate,
+        ...(Object.keys(incUpdate).length ? { $inc: incUpdate } : {}),
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    return conversation;
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
   }
-
-  await Conversation.findByIdAndUpdate(conversation._id, {
-    $set: setUpdate,
-    ...(Object.keys(incUpdate).length ? { $inc: incUpdate } : {}),
-  });
-
-  return conversation;
 };
 
 const parseClaimStatus = (statusRaw: unknown): WarrantyClaimStatus | null => {
@@ -173,7 +197,11 @@ const parseClaimStatus = (statusRaw: unknown): WarrantyClaimStatus | null => {
   return null;
 };
 
-const normalizeWarrantyCoverage = async (booking: any) => {
+/**
+ * Ensures booking has a fully populated warrantyCoverage snapshot.
+ * May call booking.save() when coverage fields are missing (startsAt, endsAt, duration).
+ */
+const ensureWarrantyCoverage = async (booking: any) => {
   const duration = getBookingWarrantyDuration(booking);
   if (!duration || duration.value <= 0) return null;
 
@@ -251,6 +279,12 @@ export const uploadWarrantyEvidence = async (req: Request, res: Response) => {
           : validateFile;
         const validation = validator(file);
         if (!validation.valid) {
+          // Clean up any files already uploaded before returning error
+          await Promise.all(
+            uploaded.map((f) =>
+              deleteFromS3(f.key).catch(() => null)
+            )
+          );
           return res.status(400).json({ success: false, msg: validation.error || "Invalid file" });
         }
 
@@ -326,7 +360,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       });
     }
 
-    const warrantyCoverage = await normalizeWarrantyCoverage(booking);
+    const warrantyCoverage = await ensureWarrantyCoverage(booking);
     if (!warrantyCoverage || !warrantyCoverage.duration || warrantyCoverage.duration.value <= 0) {
       return res.status(400).json({
         success: false,
@@ -1068,7 +1102,7 @@ export const getAdminWarrantyAnalytics = async (req: Request, res: Response) => 
       {
         $project: {
           resolutionHours: {
-            $divide: [{ $subtract: ["$updatedAt", "$createdAt"] }, 1000 * 60 * 60],
+            $divide: [{ $subtract: ["$resolution.resolvedAt", "$createdAt"] }, 1000 * 60 * 60],
           },
         },
       },
@@ -1160,6 +1194,7 @@ export const autoEscalateWarrantyClaim = async (
   claim: IWarrantyClaim,
   note = "Auto-escalated: no professional response within 5 business days"
 ) => {
+  if (claim.status === "escalated" || claim.escalation?.autoEscalated) return;
   claim.status = "escalated";
   claim.escalation = {
     escalatedAt: new Date(),
@@ -1186,6 +1221,7 @@ export const autoCloseResolvedWarrantyClaim = async (
   claim: IWarrantyClaim,
   note = "Auto-closed: customer did not confirm resolution in time"
 ) => {
+  if (claim.status === "closed") return;
   claim.status = "closed";
   claim.resolution = {
     ...(claim.resolution || {
