@@ -372,7 +372,9 @@ export const getScheduleProposalsForProject = async (
     if (!project) return null;
 
     const mode: "hours" | "days" =
-      project.timeMode || project.executionDuration?.unit || "days";
+      project.timeMode === "hours" || project.executionDuration?.unit === "hours"
+        ? "hours"
+        : "days";
 
     const teamMembers = await fetchProjectTeamMembers(project);
     if (!teamMembers.length) {

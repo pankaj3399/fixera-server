@@ -125,6 +125,7 @@ export interface IBooking extends Document {
   lastReminderSentAt?: Date;
   customerRejectionReason?: string;
   milestonePayments?: IQuotationMilestone[];
+  selectedSubprojectIndex?: number;
 
   // Booking location (customer's location from their profile)
   location: {
@@ -211,6 +212,12 @@ export interface IBooking extends Document {
   scheduledEndTime?: string;
   actualStartDate?: Date;
   actualEndDate?: Date;
+  warrantyCoverage?: {
+    duration: { value: number; unit: 'months' | 'years' };
+    startsAt?: Date;
+    endsAt?: Date;
+    source?: 'quote' | 'project_subproject';
+  };
 
   // Team members (for project bookings)
   assignedTeamMembers?: Types.ObjectId[]; // References to User (employees)
@@ -532,6 +539,10 @@ const BookingSchema = new Schema({
     stripeClientSecret: { type: String },
     paidAt: { type: Date }
   }],
+  selectedSubprojectIndex: {
+    type: Number,
+    min: 0
+  },
 
   // Location
   location: {
@@ -661,6 +672,15 @@ const BookingSchema = new Schema({
   },
   actualStartDate: { type: Date },
   actualEndDate: { type: Date },
+  warrantyCoverage: {
+    duration: {
+      value: { type: Number, min: 0, required: false },
+      unit: { type: String, enum: ['months', 'years'], required: false }
+    },
+    startsAt: { type: Date },
+    endsAt: { type: Date },
+    source: { type: String, enum: ['quote', 'project_subproject'] }
+  },
 
   // Team members
   assignedTeamMembers: [{
@@ -869,6 +889,7 @@ BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ status: 1, rfqDeadline: 1 }); // RFQ deadline scheduler
 BookingSchema.index({ quotationNumber: 1 }); // Quotation lookup
 BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
+BookingSchema.index({ 'warrantyCoverage.endsAt': 1 });
 
 // Helper to parse HH:mm to minutes for comparison
 const parseTimeToMinutes = (time: string): number => {
@@ -942,7 +963,8 @@ BookingSchema.pre('save', async function(next) {
     const year = new Date().getFullYear();
     const db = mongoose.connection.db;
     if (db) {
-      const counter = await db.collection('counters').findOneAndUpdate(
+      const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
+      const counter = await countersCollection.findOneAndUpdate(
         { _id: `quotationNumber-${year}` },
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }

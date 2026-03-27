@@ -21,12 +21,15 @@ import bookingRouter from './routes/Booking';
 import quotationRouter from './routes/Quotation';
 import stripeRouter from './routes/Stripe';
 import chatRouter from './routes/Chat';
+import warrantyClaimRouter from './routes/WarrantyClaim';
 import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
 import { startRfqDeadlineScheduler } from './utils/rfqDeadlineScheduler';
+import { startWarrantyClaimScheduler } from './utils/warrantyClaimScheduler';
 
 const app: Express = express();
 let idExpirySchedulerHandle: { stop: () => void } | null = null;
 let rfqDeadlineSchedulerHandle: { stop: () => void } | null = null;
+let warrantyClaimSchedulerHandle: { stop: () => void } | null = null;
 
 // 🚨 Allow ALL origins but still allow credentials (cookies)
 app.use(cors({
@@ -69,6 +72,7 @@ app.use('/api/quotations', quotationRouter);
 app.use('/api/stripe', stripeRouter);
 app.use('/api/professional', professionalPaymentRouter);
 app.use('/api/chat', chatRouter);
+app.use('/api/warranty-claims', warrantyClaimRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);
@@ -100,14 +104,28 @@ const stopRfqDeadlineScheduler = () => {
   }
 };
 
+const stopWarrantyClaimScheduler = () => {
+  if (!warrantyClaimSchedulerHandle) return;
+
+  try {
+    warrantyClaimSchedulerHandle.stop();
+  } catch (error) {
+    console.error('Failed to stop warranty claim scheduler:', error);
+  } finally {
+    warrantyClaimSchedulerHandle = null;
+  }
+};
+
 process.on('SIGINT', () => {
   stopIdExpiryScheduler();
   stopRfqDeadlineScheduler();
+  stopWarrantyClaimScheduler();
 });
 
 process.on('SIGTERM', () => {
   stopIdExpiryScheduler();
   stopRfqDeadlineScheduler();
+  stopWarrantyClaimScheduler();
 });
 
 connectDB()
@@ -117,6 +135,7 @@ connectDB()
     });
     idExpirySchedulerHandle = startIdExpiryScheduler();
     rfqDeadlineSchedulerHandle = startRfqDeadlineScheduler();
+    warrantyClaimSchedulerHandle = startWarrantyClaimScheduler();
   })
   .catch((error) => {
     console.error('Failed to connect to MongoDB at startup:', error);
