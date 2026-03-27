@@ -3,8 +3,10 @@ import { protect } from "../../middlewares/auth";
 import { upload } from "../../utils/s3Upload";
 import {
   adminCloseWarrantyClaim,
+  attachClaimEvidence,
   confirmWarrantyResolution,
   declineWarrantyClaim,
+  deleteDraftClaim,
   escalateWarrantyClaim,
   getAdminWarrantyAnalytics,
   getWarrantyClaimByBooking,
@@ -32,6 +34,8 @@ router.post("/admin/:claimId/close", adminCloseWarrantyClaim);
 
 router.get("/booking/:bookingId", getWarrantyClaimByBooking);
 router.get("/:claimId", getWarrantyClaimById);
+router.post("/:claimId/evidence", upload.array("files", 10), attachClaimEvidence);
+router.delete("/:claimId", deleteDraftClaim);
 router.post("/:claimId/proposal", submitWarrantyProposal);
 router.post("/:claimId/decline", declineWarrantyClaim);
 router.post("/:claimId/proposal-response", respondToWarrantyProposal);

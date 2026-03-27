@@ -17,6 +17,7 @@ import {
 import {
   deleteFromS3,
   generateFileName,
+  parseS3KeyFromUrl,
   uploadToS3,
   validateFile,
   validateImageFile,
@@ -316,6 +317,123 @@ export const uploadWarrantyEvidence = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[WARRANTY] upload evidence error:", error);
     return res.status(500).json({ success: false, msg: "Failed to upload evidence" });
+  }
+};
+
+export const attachClaimEvidence = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    const { claimId } = req.params;
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Valid claimId is required" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) {
+      return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+    }
+    if (claim.customer.toString() !== userId) {
+      return res.status(403).json({ success: false, msg: "Not authorized for this claim" });
+    }
+
+    const files = (req.files as Express.Multer.File[]) || [];
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, msg: "No evidence files uploaded" });
+    }
+
+    const maxEvidence = 10;
+    const currentCount = claim.evidence?.length || 0;
+    if (currentCount + files.length > maxEvidence) {
+      return res.status(400).json({
+        success: false,
+        msg: `Cannot exceed ${maxEvidence} evidence files. Currently ${currentCount}, attempting to add ${files.length}.`,
+      });
+    }
+
+    const uploaded: Array<{ url: string; key: string }> = [];
+    try {
+      for (const file of files) {
+        const validator = file.mimetype.startsWith("image/")
+          ? validateImageFile
+          : file.mimetype.startsWith("video/")
+          ? validateVideoFile
+          : validateFile;
+        const validation = validator(file);
+        if (!validation.valid) {
+          await Promise.all(uploaded.map((f) => deleteFromS3(f.key).catch(() => null)));
+          return res.status(400).json({ success: false, msg: validation.error || "Invalid file" });
+        }
+
+        const fileName = generateFileName(file.originalname, userId, "warranty-claims");
+        const result = await uploadToS3(file, fileName);
+        uploaded.push({ url: result.url, key: result.key });
+      }
+    } catch (uploadError) {
+      await Promise.all(uploaded.map((f) => deleteFromS3(f.key).catch(() => null)));
+      throw uploadError;
+    }
+
+    const newUrls = uploaded.map((f) => f.url);
+    claim.evidence = [...(claim.evidence || []), ...newUrls];
+    await claim.save();
+
+    return res.status(200).json({
+      success: true,
+      msg: "Evidence attached to claim",
+      data: { urls: newUrls },
+    });
+  } catch (error: any) {
+    console.error("[WARRANTY] attach claim evidence error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to attach evidence" });
+  }
+};
+
+export const deleteDraftClaim = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    const { claimId } = req.params;
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Valid claimId is required" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) {
+      return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+    }
+    if (claim.customer.toString() !== userId) {
+      return res.status(403).json({ success: false, msg: "Not authorized for this claim" });
+    }
+    if (claim.status !== "open") {
+      return res.status(400).json({
+        success: false,
+        msg: "Only open claims can be deleted",
+      });
+    }
+
+    // Clean up any S3 evidence files
+    if (claim.evidence && claim.evidence.length > 0) {
+      await Promise.all(
+        claim.evidence.map((url) => {
+          const key = parseS3KeyFromUrl(url);
+          return key ? deleteFromS3(key).catch(() => null) : null;
+        })
+      );
+    }
+
+    await WarrantyClaim.findByIdAndDelete(claimId);
+
+    return res.status(200).json({ success: true, msg: "Draft claim deleted" });
+  } catch (error: any) {
+    console.error("[WARRANTY] delete draft claim error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to delete draft claim" });
   }
 };
 
