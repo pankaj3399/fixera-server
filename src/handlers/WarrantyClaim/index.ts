@@ -1194,26 +1194,37 @@ export const autoEscalateWarrantyClaim = async (
   claim: IWarrantyClaim,
   note = "Auto-escalated: no professional response within 5 business days"
 ) => {
-  if (claim.status === "escalated" || claim.escalation?.autoEscalated) return;
-  claim.status = "escalated";
-  claim.escalation = {
-    escalatedAt: new Date(),
-    escalatedBy: SYSTEM_USER_ID,
-    autoEscalated: true,
-    reason: "Professional response SLA missed",
-    note,
-  };
-  claim.statusHistory.push({
-    status: "escalated",
-    timestamp: new Date(),
-    updatedBy: SYSTEM_USER_ID,
-    note,
-  });
-  await claim.save();
+  // Atomically claim the transition so concurrent runs cannot duplicate it
+  const updated = await WarrantyClaim.findOneAndUpdate(
+    { _id: claim._id, status: "open" },
+    {
+      $set: {
+        status: "escalated",
+        escalation: {
+          escalatedAt: new Date(),
+          escalatedBy: SYSTEM_USER_ID,
+          autoEscalated: true,
+          reason: "Professional response SLA missed",
+          note,
+        },
+      },
+      $push: {
+        statusHistory: {
+          status: "escalated",
+          timestamp: new Date(),
+          updatedBy: SYSTEM_USER_ID,
+          note,
+        },
+      },
+    },
+    { new: true }
+  );
+  if (!updated) return;
+
   await ensureWarrantyChatContext({
-    customerId: claim.customer,
-    professionalId: claim.professional,
-    text: `Warranty claim ${claim.claimNumber} was auto-escalated to admin due to missed response SLA.`,
+    customerId: updated.customer,
+    professionalId: updated.professional,
+    text: `Warranty claim ${updated.claimNumber} was auto-escalated to admin due to missed response SLA.`,
   });
 };
 
@@ -1221,9 +1232,8 @@ export const autoCloseResolvedWarrantyClaim = async (
   claim: IWarrantyClaim,
   note = "Auto-closed: customer did not confirm resolution in time"
 ) => {
-  if (claim.status === "closed") return;
-  claim.status = "closed";
-  claim.resolution = {
+  // Build the resolution object, preserving any existing fields
+  const resolution = {
     ...(claim.resolution || {
       summary: "Resolved",
       resolvedAt: new Date(),
@@ -1231,16 +1241,31 @@ export const autoCloseResolvedWarrantyClaim = async (
     }),
     autoClosedAt: new Date(),
   };
-  claim.statusHistory.push({
-    status: "closed",
-    timestamp: new Date(),
-    updatedBy: SYSTEM_USER_ID,
-    note,
-  });
-  await claim.save();
+
+  // Atomically claim the transition so concurrent runs cannot duplicate it
+  const updated = await WarrantyClaim.findOneAndUpdate(
+    { _id: claim._id, status: "resolved" },
+    {
+      $set: {
+        status: "closed",
+        resolution,
+      },
+      $push: {
+        statusHistory: {
+          status: "closed",
+          timestamp: new Date(),
+          updatedBy: SYSTEM_USER_ID,
+          note,
+        },
+      },
+    },
+    { new: true }
+  );
+  if (!updated) return;
+
   await ensureWarrantyChatContext({
-    customerId: claim.customer,
-    professionalId: claim.professional,
-    text: `Warranty claim ${claim.claimNumber} was auto-closed after customer confirmation deadline.`,
+    customerId: updated.customer,
+    professionalId: updated.professional,
+    text: `Warranty claim ${updated.claimNumber} was auto-closed after customer confirmation deadline.`,
   });
 };
