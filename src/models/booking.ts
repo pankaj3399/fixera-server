@@ -678,8 +678,20 @@ const BookingSchema = new Schema({
   actualEndDate: { type: Date },
   warrantyCoverage: {
     duration: {
-      value: { type: Number, min: 0, required: false },
-      unit: { type: String, enum: ['months', 'years'], required: false }
+      value: {
+        type: Number,
+        min: 0,
+        required: function (this: any) {
+          return this?.warrantyCoverage?.duration?.unit != null;
+        },
+      },
+      unit: {
+        type: String,
+        enum: ['months', 'years'],
+        required: function (this: any) {
+          return this?.warrantyCoverage?.duration?.value != null;
+        },
+      },
     },
     startsAt: { type: Date },
     endsAt: { type: Date },

@@ -32,7 +32,7 @@ export const addWarrantyDuration = (
   duration: WarrantyDuration
 ): Date => {
   const end = new Date(startDate);
-  const roundedValue = Math.floor(duration.value);
+  const roundedValue = Math.round(duration.value);
   if (roundedValue <= 0) return end;
 
   if (duration.unit === "years") {
