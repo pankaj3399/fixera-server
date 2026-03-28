@@ -46,7 +46,6 @@ export const getPopularProjects = async (req: Request, res: Response) => {
       {
         $project: {
           title: 1,
-          description: 1,
           category: 1,
           service: 1,
           "media.images": 1,
@@ -54,7 +53,6 @@ export const getPopularProjects = async (req: Request, res: Response) => {
           "subprojects.pricing": 1,
           professionalId: 1,
           "distance.address": 1,
-          createdAt: 1,
         },
       },
     ]);
