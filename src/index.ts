@@ -21,12 +21,9 @@ import bookingRouter from './routes/Booking';
 import quotationRouter from './routes/Quotation';
 import stripeRouter from './routes/Stripe';
 import chatRouter from './routes/Chat';
-import { startIdExpiryScheduler } from './utils/idExpiryScheduler';
-import { startRfqDeadlineScheduler } from './utils/rfqDeadlineScheduler';
+import warrantyClaimRouter from './routes/WarrantyClaim';
 
 const app: Express = express();
-let idExpirySchedulerHandle: { stop: () => void } | null = null;
-let rfqDeadlineSchedulerHandle: { stop: () => void } | null = null;
 
 // 🚨 Allow ALL origins but still allow credentials (cookies)
 app.use(cors({
@@ -69,6 +66,7 @@ app.use('/api/quotations', quotationRouter);
 app.use('/api/stripe', stripeRouter);
 app.use('/api/professional', professionalPaymentRouter);
 app.use('/api/chat', chatRouter);
+app.use('/api/warranty-claims', warrantyClaimRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);
@@ -76,47 +74,11 @@ app.use(errorHandler);
 // Traditional server: connect once at startup, then listen
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
 
-const stopIdExpiryScheduler = () => {
-  if (!idExpirySchedulerHandle) return;
-
-  try {
-    idExpirySchedulerHandle.stop();
-  } catch (error) {
-    console.error('Failed to stop ID expiry scheduler:', error);
-  } finally {
-    idExpirySchedulerHandle = null;
-  }
-};
-
-const stopRfqDeadlineScheduler = () => {
-  if (!rfqDeadlineSchedulerHandle) return;
-
-  try {
-    rfqDeadlineSchedulerHandle.stop();
-  } catch (error) {
-    console.error('Failed to stop RFQ deadline scheduler:', error);
-  } finally {
-    rfqDeadlineSchedulerHandle = null;
-  }
-};
-
-process.on('SIGINT', () => {
-  stopIdExpiryScheduler();
-  stopRfqDeadlineScheduler();
-});
-
-process.on('SIGTERM', () => {
-  stopIdExpiryScheduler();
-  stopRfqDeadlineScheduler();
-});
-
 connectDB()
   .then(() => {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
-    idExpirySchedulerHandle = startIdExpiryScheduler();
-    rfqDeadlineSchedulerHandle = startRfqDeadlineScheduler();
   })
   .catch((error) => {
     console.error('Failed to connect to MongoDB at startup:', error);

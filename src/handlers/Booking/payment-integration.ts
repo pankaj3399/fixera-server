@@ -9,6 +9,11 @@ import Project from '../../models/project';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
+import {
+  addWarrantyDuration,
+  getBookingWarrantyDuration,
+  normalizeWarrantyDuration,
+} from '../../utils/warranty';
 
 const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'rfq',
@@ -47,6 +52,46 @@ const isValidBookingStatus = (value: string): value is BookingStatus =>
 
 const isTransitionAllowed = (current: BookingStatus, requested: BookingStatus): boolean =>
   current === requested || ALLOWED_TRANSITIONS[current]?.includes(requested) === true;
+
+const ensureWarrantyCoverageSnapshot = async (booking: any) => {
+  let source: 'quote' | 'project_subproject' = 'quote';
+  let duration = normalizeWarrantyDuration(booking.warrantyCoverage?.duration)
+    || getBookingWarrantyDuration(booking);
+
+  if (!duration && booking.project) {
+    const project = await Project.findById(booking.project).select('subprojects');
+    const subprojects = Array.isArray((project as any)?.subprojects) ? (project as any).subprojects : [];
+    if (
+      typeof booking.selectedSubprojectIndex === 'number' &&
+      booking.selectedSubprojectIndex >= 0 &&
+      booking.selectedSubprojectIndex < subprojects.length
+    ) {
+      const selectedSubproject = subprojects[booking.selectedSubprojectIndex];
+      duration = normalizeWarrantyDuration(selectedSubproject?.warrantyPeriod);
+      if (duration) {
+        source = 'project_subproject';
+      }
+    }
+  }
+
+  if (!duration) return;
+
+  const startsAt =
+    booking.warrantyCoverage?.startsAt instanceof Date
+      ? booking.warrantyCoverage.startsAt
+      : booking.actualEndDate || new Date();
+  const endsAt =
+    booking.warrantyCoverage?.endsAt instanceof Date
+      ? booking.warrantyCoverage.endsAt
+      : addWarrantyDuration(startsAt, duration);
+
+  booking.warrantyCoverage = {
+    duration,
+    startsAt,
+    endsAt,
+    source: booking.warrantyCoverage?.source || source,
+  };
+};
 
 /**
  * Enhanced respond to quote handler with payment integration
@@ -226,6 +271,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       if (isAlreadyCaptured) {
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
+        await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
 
         // Process referral completion for the customer
@@ -266,6 +312,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
+        await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
 
         // Process referral completion for the customer
