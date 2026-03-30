@@ -51,6 +51,8 @@ import {
   unhideReview,
   getHiddenReviews,
 } from "../../handlers/Admin/reviewModeration";
+import { runWarrantyClaimChecks } from "../../utils/warrantyClaimScheduler";
+import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineScheduler";
 
 const adminRouter = Router();
 
@@ -108,5 +110,26 @@ adminRouter.route('/reviews/:bookingId/unhide').put(unhideReview);
 
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);
+
+// Manual scheduler triggers
+adminRouter.route('/run-warranty-checks').post(async (_req, res) => {
+  try {
+    const result = await runWarrantyClaimChecks();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Manual warranty check failed:', error);
+    return res.status(500).json({ success: false, msg: 'Warranty check failed' });
+  }
+});
+
+adminRouter.route('/run-rfq-checks').post(async (_req, res) => {
+  try {
+    const result = await runRfqDeadlineCheck();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Manual RFQ check failed:', error);
+    return res.status(500).json({ success: false, msg: 'RFQ deadline check failed' });
+  }
+});
 
 export default adminRouter;

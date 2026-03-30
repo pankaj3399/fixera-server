@@ -9,6 +9,7 @@ import mongoose from "mongoose";
 import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
+import { sendIdExpiredEmail } from "../../utils/emailService";
 
 // Helper function to set secure cookie
 const setTokenCookie = (res: Response, token: string) => {
@@ -498,6 +499,24 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
         path: '/'
       });
       return res.status(200).json({ success: true, authenticated: false, user: null });
+    }
+
+    if (
+      user.role === "professional" &&
+      user.idExpirationDate &&
+      new Date(user.idExpirationDate) <= new Date() &&
+      !user.idExpiryEmailSentAt
+    ) {
+      sendIdExpiredEmail(user.email, user.name)
+        .then((sent) => {
+          if (sent) {
+            User.updateOne(
+              { _id: user._id },
+              { $set: { idExpiryEmailSentAt: new Date() } }
+            ).exec();
+          }
+        })
+        .catch((err) => console.error(`[ID Expiry] Failed for user ${user._id}:`, err));
     }
 
     // Build booking blocked ranges for professionals/employees

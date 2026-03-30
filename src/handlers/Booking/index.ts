@@ -349,6 +349,34 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         });
       }
 
+      if (typeof subprojectIndex === "number") {
+        bookingData.selectedSubprojectIndex = subprojectIndex;
+      }
+
+      if (
+        typeof subprojectIndex === "number" &&
+        Array.isArray(project.subprojects) &&
+        subprojectIndex >= 0 &&
+        subprojectIndex < project.subprojects.length
+      ) {
+        const selectedSubproject = project.subprojects[subprojectIndex] as any;
+        const warrantyValue = Number(selectedSubproject?.warrantyPeriod?.value || 0);
+        const warrantyUnit = selectedSubproject?.warrantyPeriod?.unit;
+        if (
+          Number.isFinite(warrantyValue) &&
+          warrantyValue >= 0 &&
+          (warrantyUnit === "months" || warrantyUnit === "years")
+        ) {
+          bookingData.warrantyCoverage = {
+            duration: {
+              value: warrantyValue,
+              unit: warrantyUnit,
+            },
+            source: "project_subproject",
+          };
+        }
+      }
+
       const wantsPaymentAtCheckout = paymentAtCheckoutRequested;
       if (wantsPaymentAtCheckout) {
         if (

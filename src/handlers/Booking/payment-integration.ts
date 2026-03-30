@@ -9,6 +9,11 @@ import Project from '../../models/project';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
+import {
+  addWarrantyDuration,
+  getBookingWarrantyDuration,
+  normalizeWarrantyDuration,
+} from '../../utils/warranty';
 
 const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'rfq',
@@ -58,6 +63,46 @@ const markMilestonesCompleted = (booking: any, completedAt: Date) => {
     milestone.startedAt = milestone.startedAt || booking.actualStartDate || completedAt;
     milestone.completedAt = milestone.completedAt || completedAt;
   });
+};
+
+const ensureWarrantyCoverageSnapshot = async (booking: any) => {
+  let source: 'quote' | 'project_subproject' = 'quote';
+  let duration = normalizeWarrantyDuration(booking.warrantyCoverage?.duration)
+    || getBookingWarrantyDuration(booking);
+
+  if (!duration && booking.project) {
+    const project = await Project.findById(booking.project).select('subprojects');
+    const subprojects = Array.isArray((project as any)?.subprojects) ? (project as any).subprojects : [];
+    if (
+      typeof booking.selectedSubprojectIndex === 'number' &&
+      booking.selectedSubprojectIndex >= 0 &&
+      booking.selectedSubprojectIndex < subprojects.length
+    ) {
+      const selectedSubproject = subprojects[booking.selectedSubprojectIndex];
+      duration = normalizeWarrantyDuration(selectedSubproject?.warrantyPeriod);
+      if (duration) {
+        source = 'project_subproject';
+      }
+    }
+  }
+
+  if (!duration) return;
+
+  const startsAt =
+    booking.warrantyCoverage?.startsAt instanceof Date
+      ? booking.warrantyCoverage.startsAt
+      : booking.actualEndDate || new Date();
+  const endsAt =
+    booking.warrantyCoverage?.endsAt instanceof Date
+      ? booking.warrantyCoverage.endsAt
+      : addWarrantyDuration(startsAt, duration);
+
+  booking.warrantyCoverage = {
+    duration,
+    startsAt,
+    endsAt,
+    source: booking.warrantyCoverage?.source || source,
+  }
 };
 
 /**
@@ -239,6 +284,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
         markMilestonesCompleted(booking, booking.actualEndDate);
+        await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
 
         // Process referral completion for the customer
@@ -280,6 +326,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
         markMilestonesCompleted(booking, booking.actualEndDate);
+        await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
 
         // Process referral completion for the customer
