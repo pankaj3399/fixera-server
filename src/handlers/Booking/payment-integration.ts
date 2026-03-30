@@ -273,7 +273,13 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       });
     }
 
-    // If status is changing to 'completed', enforce payment capture constraints.
+    if (requestedStatus === 'completed' && booking.status === 'completed') {
+      return res.json({
+        success: true,
+        data: { message: 'Booking is already completed', booking }
+      });
+    }
+
     if (requestedStatus === 'completed') {
       const paymentStatus = booking.payment?.status;
       const paymentStatusValue = paymentStatus ? String(paymentStatus) : '';

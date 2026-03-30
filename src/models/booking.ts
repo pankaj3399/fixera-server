@@ -980,9 +980,17 @@ BookingSchema.pre('save', async function(next) {
 
   if (this.isNew && !this.bookingNumber) {
     const year = new Date().getFullYear();
-    const BookingModel = (mongoose.models.Booking as mongoose.Model<IBooking>) || mongoose.model<IBooking>('Booking', BookingSchema);
-    const count = await BookingModel.countDocuments();
-    this.bookingNumber = `BK-${year}-${String(count + 1).padStart(6, '0')}`;
+    const db = mongoose.connection.db;
+    if (db) {
+      const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
+      const counter = await countersCollection.findOneAndUpdate(
+        { _id: `bookingNumber-${year}` },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after' }
+      );
+      const seq = counter?.seq ?? 1;
+      this.bookingNumber = `BK-${year}-${String(seq).padStart(6, '0')}`;
+    }
   }
 
   // Generate quotation number if quoteVersions exist and no quotationNumber yet

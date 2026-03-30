@@ -10,6 +10,22 @@ import {
 } from "../../utils/scheduleEngine";
 import { getPresignedUrl, parseS3KeyFromUrl } from "../../utils/s3Upload";
 
+const TRUSTED_S3_HOST_RE = new RegExp(
+  `^${(process.env.S3_BUCKET_NAME || 'fixera-uploads').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.s3\\.([a-z0-9-]+\\.)?amazonaws\\.com$`,
+  'i'
+);
+
+const ALLOWED_KEY_PREFIXES = [
+  'profile-images/',
+  'id-proofs/',
+  'certifications/',
+  'project-images/',
+  'project-videos/',
+  'project-attachments/',
+  'review-images/',
+  'warranty-claims/',
+];
+
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
   let parsedUrl: URL;
@@ -19,12 +35,16 @@ const presignMaybeS3Url = async (url?: string | null) => {
     return url;
   }
 
-  if (!/amazonaws\.com$/i.test(parsedUrl.hostname)) {
+  if (!TRUSTED_S3_HOST_RE.test(parsedUrl.hostname)) {
     return url;
   }
 
   const key = parseS3KeyFromUrl(url);
   if (!key) return url;
+
+  if (!ALLOWED_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+    return url;
+  }
 
   try {
     return await getPresignedUrl(key, 7 * 24 * 60 * 60);

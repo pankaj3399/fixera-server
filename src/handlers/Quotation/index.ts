@@ -201,16 +201,8 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const now = new Date();
     const versionNumber = 1;
 
-    // Generate quotation number before save to avoid double-save
-    if (!booking.quotationNumber) {
-      const year = new Date().getFullYear();
-      const count = await Booking.countDocuments({ quotationNumber: { $exists: true, $ne: null } });
-      booking.quotationNumber = `QT-${year}-${String(count + 1).padStart(6, '0')}`;
-    }
-
     const quoteVersion: any = {
       version: versionNumber,
-      quotationNumber: `${booking.quotationNumber}-v${versionNumber}`,
       scope,
       warrantyDuration,
       materialsIncluded: materialsIncluded || false,
@@ -219,7 +211,12 @@ export const submitQuotation = async (req: Request, res: Response) => {
       totalAmount,
       currency: currency || 'EUR',
       milestones: milestones ? milestones.map((m: any, i: number) => ({
-        ...m,
+        title: m.title,
+        description: m.description,
+        amount: m.amount,
+        currency: m.currency,
+        dueDate: m.dueDate,
+        deliverables: m.deliverables,
         order: i,
         status: 'pending',
         workStatus: 'pending',
@@ -243,6 +240,11 @@ export const submitQuotation = async (req: Request, res: Response) => {
     });
 
     await booking.save();
+
+    if (booking.quotationNumber && booking.quoteVersions?.[0]) {
+      booking.quoteVersions[0].quotationNumber = `${booking.quotationNumber}-v${versionNumber}`;
+      await booking.save();
+    }
 
     const customer = booking.customer as any;
     const professional = booking.professional as any;
@@ -352,7 +354,12 @@ export const editQuotation = async (req: Request, res: Response) => {
       totalAmount,
       currency: currency || 'EUR',
       milestones: milestones ? milestones.map((m: any, i: number) => ({
-        ...m,
+        title: m.title,
+        description: m.description,
+        amount: m.amount,
+        currency: m.currency,
+        dueDate: m.dueDate,
+        deliverables: m.deliverables,
         order: i,
         status: 'pending',
         workStatus: 'pending',
@@ -480,9 +487,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         customDueDate: m.customDueDate,
         order: m.order,
         status: 'pending' as const,
-        workStatus: m.workStatus || 'pending',
-        startedAt: m.startedAt,
-        completedAt: m.completedAt,
+        workStatus: 'pending',
       }));
     }
 
@@ -509,8 +514,8 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
     const paymentResult = await createPaymentIntent(booking._id.toString(), userId);
 
     if (!paymentResult.success) {
-      // Revert status
       booking.status = 'quoted';
+      booking.milestonePayments = [];
       booking.statusHistory.push({
         status: 'quoted',
         timestamp: new Date(),
@@ -726,8 +731,8 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the assigned professional can update milestone progress' } });
     }
 
-    if (!['booked', 'in_progress', 'completed'].includes(booking.status)) {
-      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Milestone progress can only be updated after booking confirmation' } });
+    if (!['booked', 'in_progress'].includes(booking.status)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Milestone progress can only be updated when booking is booked or in progress' } });
     }
 
     if (!booking.milestonePayments || milestoneIndex >= booking.milestonePayments.length) {
@@ -737,6 +742,10 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
     const milestone = booking.milestonePayments[milestoneIndex] as any;
     const previousMilestones = booking.milestonePayments.slice(0, milestoneIndex) as any[];
     const now = new Date();
+
+    if (milestone.workStatus === 'completed') {
+      return res.status(400).json({ success: false, error: { code: 'MILESTONE_ALREADY_COMPLETED', message: 'Completed milestones cannot be modified' } });
+    }
 
     if (action === 'start') {
       const hasIncompletePrevious = previousMilestones.some((item) => item.workStatus !== 'completed');
@@ -760,13 +769,13 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
     }
 
     if (action === 'complete') {
-      if (milestone.workStatus !== 'in_progress' && milestone.workStatus !== 'completed') {
+      if (milestone.workStatus !== 'in_progress') {
         return res.status(400).json({ success: false, error: { code: 'MILESTONE_NOT_STARTED', message: 'Start the milestone before marking it complete' } });
       }
 
       milestone.workStatus = 'completed';
       milestone.startedAt = milestone.startedAt || now;
-      milestone.completedAt = now;
+      milestone.completedAt = milestone.completedAt || now;
     }
 
     await booking.save();

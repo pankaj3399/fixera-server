@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import User from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
-import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile, validateImageFile, parseS3KeyFromUrl } from "../../utils/s3Upload";
+import { upload, uploadToS3, deleteFromS3, generateFileName, validateFile, validateImageFile, validateImageFileBuffer, parseS3KeyFromUrl } from "../../utils/s3Upload";
 import mongoose from 'mongoose';
 import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
 import { getCountryCode } from '../../utils/geocoding';
@@ -1033,23 +1033,31 @@ export const uploadProfileImage = async (req: Request, res: Response, next: Next
       return res.status(400).json({ success: false, msg: "No image file provided" });
     }
 
-    const validation = validateImageFile(file);
+    const validation = await validateImageFileBuffer(file);
     if (!validation.valid) {
       return res.status(400).json({ success: false, msg: validation.error });
     }
 
-    if (user.profileImage) {
-      const oldKey = parseS3KeyFromUrl(user.profileImage);
-      if (oldKey) {
-        try { await deleteFromS3(oldKey); } catch {}
-      }
+    if (validation.detectedMime) {
+      file.mimetype = validation.detectedMime;
     }
+
+    const oldProfileImage = user.profileImage;
 
     const fileName = generateFileName(file.originalname, user._id.toString(), 'profile-images');
     const result = await uploadToS3(file, fileName);
 
     user.profileImage = result.url;
     await user.save();
+
+    if (oldProfileImage) {
+      const oldKey = parseS3KeyFromUrl(oldProfileImage);
+      if (oldKey) {
+        try { await deleteFromS3(oldKey); } catch (err) {
+          console.error("Failed to delete old profile image from S3:", { key: oldKey, userId, error: err });
+        }
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -1079,7 +1087,9 @@ export const deleteProfileImage = async (req: Request, res: Response, next: Next
     if (user.profileImage) {
       const oldKey = parseS3KeyFromUrl(user.profileImage);
       if (oldKey) {
-        try { await deleteFromS3(oldKey); } catch {}
+        try { await deleteFromS3(oldKey); } catch (err) {
+          console.error("Failed to delete old profile image from S3:", { key: oldKey, userId, error: err });
+        }
       }
       user.profileImage = undefined;
       await user.save();

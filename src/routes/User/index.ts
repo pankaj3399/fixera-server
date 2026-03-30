@@ -6,7 +6,7 @@ import { protect } from "../../middlewares/auth";
 import { GetCurrentUser } from "../../handlers";
 import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handlers/User/validateVat";
 import { uploadIdProof, updateProfessionalProfile, submitForVerification, updatePhone, updateCustomerProfile, updateIdInfo, uploadProfileImage, deleteProfileImage } from "../../handlers/User/profileManagement";
-import { upload } from "../../utils/s3Upload";
+import { upload, uploadProfileImage as profileImageUpload } from "../../utils/s3Upload";
 import { getLoyaltyStatus, addSpending, getLeaderboard, getUserPointsBalance, getUserPointsHistory, getProfessionalLevelStatus, boostProfessionalLevel } from "../../handlers/User/loyaltyManagement";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
 import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
@@ -43,7 +43,7 @@ import { getReferralStats, generateUserReferralCode, addLateReferralCode } from 
 const userRouter = Router();
 
 const handleProfileImageUpload = (req: Request, res: Response, next: NextFunction) => {
-    upload.single('profileImage')(req, res, (error: any) => {
+    profileImageUpload.single('profileImage')(req, res, (error: any) => {
         if (error) {
             return res.status(400).json({
                 success: false,

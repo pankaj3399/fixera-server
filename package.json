@@ -31,6 +31,7 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
+    "file-type": "^16.5.4",
     "google-libphonenumber": "^3.2.44",
     "jsonwebtoken": "^9.0.2",
     "leo-profanity": "^1.9.0",

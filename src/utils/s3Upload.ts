@@ -4,6 +4,7 @@ import { Request } from 'express';
 import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
+import fileType from 'file-type';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -65,7 +66,24 @@ export const uploadReviewImages = multer({
   storage,
   fileFilter: reviewImageFilter,
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit for review images
+    fileSize: 5 * 1024 * 1024,
+  },
+});
+
+const profileImageFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+  if (allowed.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only JPEG, PNG, and WebP images are allowed for profile images'));
+  }
+};
+
+export const uploadProfileImage = multer({
+  storage,
+  fileFilter: profileImageFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024,
   },
 });
 
@@ -167,16 +185,34 @@ export const validateFile = (file: Express.Multer.File): { valid: boolean; error
   return { valid: true };
 };
 
-// Validate image file
+const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+
 export const validateImageFile = (file: Express.Multer.File): { valid: boolean; error?: string } => {
   if (file.size > 5 * 1024 * 1024) {
     return { valid: false, error: 'Image must be less than 5MB' };
   }
-  const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (!allowedImageTypes.includes(file.mimetype)) {
-    return { valid: false, error: 'Invalid image type' };
+  if (!ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
+    return { valid: false, error: 'Invalid image type. Only JPEG, PNG, and WebP are allowed' };
   }
   return { valid: true };
+};
+
+export const validateImageFileBuffer = async (
+  file: Express.Multer.File
+): Promise<{ valid: boolean; error?: string; detectedMime?: string }> => {
+  const sizeCheck = validateImageFile(file);
+  if (!sizeCheck.valid) return sizeCheck;
+
+  if (!file.buffer || file.buffer.length === 0) {
+    return { valid: false, error: 'Empty file buffer' };
+  }
+
+  const detected = await fileType.fromBuffer(file.buffer);
+  if (!detected || !ALLOWED_IMAGE_MIMES.includes(detected.mime)) {
+    return { valid: false, error: 'File content does not match an allowed image type (JPEG, PNG, WebP)' };
+  }
+
+  return { valid: true, detectedMime: detected.mime };
 };
 
 // Validate video file
