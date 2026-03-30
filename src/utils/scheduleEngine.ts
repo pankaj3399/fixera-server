@@ -328,7 +328,15 @@ const getProjectDurations = (project: any, subprojectIndex?: number) => {
       : null;
 
   const execution = subproject?.executionDuration || project.executionDuration;
-  if (!execution || typeof execution.value !== "number") {
+  const isRfqPackage = subproject?.pricing?.type === "rfq";
+  const executionValue =
+    typeof execution?.value === "number" && execution.value > 0
+      ? execution.value
+      : isRfqPackage
+      ? execution?.range?.max || execution?.range?.min
+      : execution?.range?.min || execution?.range?.max;
+
+  if (!execution || typeof executionValue !== "number" || executionValue <= 0) {
     return null;
   }
 
@@ -344,7 +352,7 @@ const getProjectDurations = (project: any, subprojectIndex?: number) => {
       : null;
 
   return {
-    execution: { value: execution.value, unit: execution.unit } as Duration,
+    execution: { value: executionValue, unit: execution.unit } as Duration,
     buffer: buffer
       ? ({ value: buffer.value, unit: buffer.unit } as Duration)
       : null,

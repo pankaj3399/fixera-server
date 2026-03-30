@@ -48,6 +48,18 @@ const isValidBookingStatus = (value: string): value is BookingStatus =>
 const isTransitionAllowed = (current: BookingStatus, requested: BookingStatus): boolean =>
   current === requested || ALLOWED_TRANSITIONS[current]?.includes(requested) === true;
 
+const markMilestonesCompleted = (booking: any, completedAt: Date) => {
+  if (!Array.isArray(booking.milestonePayments) || booking.milestonePayments.length === 0) {
+    return;
+  }
+
+  booking.milestonePayments.forEach((milestone: any) => {
+    milestone.workStatus = 'completed';
+    milestone.startedAt = milestone.startedAt || booking.actualStartDate || completedAt;
+    milestone.completedAt = milestone.completedAt || completedAt;
+  });
+};
+
 /**
  * Enhanced respond to quote handler with payment integration
  * Call this after customer accepts a quote
@@ -226,6 +238,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       if (isAlreadyCaptured) {
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
+        markMilestonesCompleted(booking, booking.actualEndDate);
         await booking.save();
 
         // Process referral completion for the customer
@@ -266,6 +279,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         booking.status = 'completed';
         booking.actualEndDate = booking.actualEndDate || new Date();
+        markMilestonesCompleted(booking, booking.actualEndDate);
         await booking.save();
 
         // Process referral completion for the customer

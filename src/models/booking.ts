@@ -49,8 +49,11 @@ export interface IQuotationMilestone {
   customDueDate?: Date;
   order: number;
   status: 'pending' | 'invoiced' | 'paid' | 'overdue';
+  workStatus?: 'pending' | 'in_progress' | 'completed';
   stripePaymentIntentId?: string;
   stripeClientSecret?: string;
+  startedAt?: Date;
+  completedAt?: Date;
   paidAt?: Date;
 }
 
@@ -486,8 +489,11 @@ const BookingSchema = new Schema({
       customDueDate: { type: Date },
       order: { type: Number, required: true },
       status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
+      workStatus: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
       stripePaymentIntentId: { type: String },
       stripeClientSecret: { type: String },
+      startedAt: { type: Date },
+      completedAt: { type: Date },
       paidAt: { type: Date }
     }],
     preparationDuration: {
@@ -528,8 +534,11 @@ const BookingSchema = new Schema({
     customDueDate: { type: Date },
     order: { type: Number, required: true },
     status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
+    workStatus: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
     stripePaymentIntentId: { type: String },
     stripeClientSecret: { type: String },
+    startedAt: { type: Date },
+    completedAt: { type: Date },
     paidAt: { type: Date }
   }],
 
@@ -932,7 +941,8 @@ BookingSchema.pre('save', async function(next) {
 
   if (this.isNew && !this.bookingNumber) {
     const year = new Date().getFullYear();
-    const count = await model('Booking').countDocuments();
+    const BookingModel = (mongoose.models.Booking as mongoose.Model<IBooking>) || mongoose.model<IBooking>('Booking', BookingSchema);
+    const count = await BookingModel.countDocuments();
     this.bookingNumber = `BK-${year}-${String(count + 1).padStart(6, '0')}`;
   }
 
@@ -942,7 +952,8 @@ BookingSchema.pre('save', async function(next) {
     const year = new Date().getFullYear();
     const db = mongoose.connection.db;
     if (db) {
-      const counter = await db.collection('counters').findOneAndUpdate(
+      const counters = db.collection<{ _id: string; seq: number }>('counters');
+      const counter = await counters.findOneAndUpdate(
         { _id: `quotationNumber-${year}` },
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }

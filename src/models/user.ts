@@ -111,6 +111,7 @@ export interface IUser extends Document {
         isHoliday?: boolean;
         createdAt?: Date;
     }[];
+    profileImage?: string;
     profileCompletedAt?: Date;
     professionalOnboardingCompletedAt?: Date;
     // Loyalty system fields
@@ -402,6 +403,10 @@ const UserSchema = new Schema({
         isHoliday: { type: Boolean, default: false },
         createdAt: { type: Date, default: Date.now }
     }],
+    profileImage: {
+        type: String,
+        required: false
+    },
     profileCompletedAt: {
         type: Date,
         required: false

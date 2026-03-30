@@ -1,11 +1,11 @@
-import { Router } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { VerifyPhone } from "../../handlers/User/verify/phone";
 import { VerifyPhoneCheck } from "../../handlers/User/verify/phone";
 import emailVerificationRoutes from "./verify/email";
 import { protect } from "../../middlewares/auth";
 import { GetCurrentUser } from "../../handlers";
 import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handlers/User/validateVat";
-import { uploadIdProof, updateProfessionalProfile, submitForVerification, updatePhone, updateCustomerProfile, updateIdInfo } from "../../handlers/User/profileManagement";
+import { uploadIdProof, updateProfessionalProfile, submitForVerification, updatePhone, updateCustomerProfile, updateIdInfo, uploadProfileImage, deleteProfileImage } from "../../handlers/User/profileManagement";
 import { upload } from "../../utils/s3Upload";
 import { getLoyaltyStatus, addSpending, getLeaderboard, getUserPointsBalance, getUserPointsHistory, getProfessionalLevelStatus, boostProfessionalLevel } from "../../handlers/User/loyaltyManagement";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
@@ -42,6 +42,18 @@ import { getReferralStats, generateUserReferralCode, addLateReferralCode } from 
 
 const userRouter = Router();
 
+const handleProfileImageUpload = (req: Request, res: Response, next: NextFunction) => {
+    upload.single('profileImage')(req, res, (error: any) => {
+        if (error) {
+            return res.status(400).json({
+                success: false,
+                msg: error.message || 'Invalid profile image upload'
+            });
+        }
+        next();
+    });
+};
+
 userRouter.use(protect)
 
 userRouter.route('/me').get(GetCurrentUser)
@@ -52,6 +64,7 @@ userRouter.route("/vat/validate").post(validateVAT)
 userRouter.route("/vat").put(updateUserVAT)
 userRouter.route("/vat/validate-and-populate").post(validateAndPopulateVAT) 
 userRouter.route("/id-proof").post(upload.single('idProof'), uploadIdProof)
+userRouter.route("/profile-image").post(handleProfileImageUpload, uploadProfileImage).delete(deleteProfileImage)
 userRouter.route("/professional-profile").put(updateProfessionalProfile)
 userRouter.route("/submit-for-verification").post(submitForVerification)
 userRouter.route("/phone").put(updatePhone)

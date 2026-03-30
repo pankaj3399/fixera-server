@@ -8,6 +8,60 @@ import {
   buildProjectScheduleWindow,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
+import { getPresignedUrl, parseS3KeyFromUrl } from "../../utils/s3Upload";
+
+const presignMaybeS3Url = async (url?: string | null) => {
+  if (!url) return url;
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return url;
+  }
+
+  if (!/amazonaws\.com$/i.test(parsedUrl.hostname)) {
+    return url;
+  }
+
+  const key = parseS3KeyFromUrl(url);
+  if (!key) return url;
+
+  try {
+    return await getPresignedUrl(key, 7 * 24 * 60 * 60);
+  } catch {
+    return url;
+  }
+};
+
+const presignBookingFiles = async (bookingDoc: any) => {
+  const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
+
+  if (Array.isArray(booking?.rfqData?.attachments) && booking.rfqData.attachments.length > 0) {
+    booking.rfqData.attachments = await Promise.all(
+      booking.rfqData.attachments.map((url: string) => presignMaybeS3Url(url))
+    );
+  }
+
+  if (Array.isArray(booking?.rfqData?.answers) && booking.rfqData.answers.length > 0) {
+    booking.rfqData.answers = await Promise.all(
+      booking.rfqData.answers.map(async (answer: any) => ({
+        ...answer,
+        answer: await presignMaybeS3Url(answer?.answer),
+      }))
+    );
+  }
+
+  if (Array.isArray(booking?.postBookingData) && booking.postBookingData.length > 0) {
+    booking.postBookingData = await Promise.all(
+      booking.postBookingData.map(async (answer: any) => ({
+        ...answer,
+        answer: await presignMaybeS3Url(answer?.answer),
+      }))
+    );
+  }
+
+  return booking;
+};
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -622,7 +676,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email businessInfo hourlyRate')
-      .populate('project', 'title description pricing category service team postBookingQuestions professionalId')
+      .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId')
       .populate('assignedTeamMembers', 'name email');
 
     if (!booking) {
@@ -646,9 +700,11 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
+    const bookingWithSignedFiles = await presignBookingFiles(booking);
+
     return res.status(200).json({
       success: true,
-      booking
+      booking: bookingWithSignedFiles
     });
 
   } catch (error: any) {

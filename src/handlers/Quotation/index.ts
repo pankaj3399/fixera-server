@@ -222,6 +222,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
         ...m,
         order: i,
         status: 'pending',
+        workStatus: 'pending',
       })) : [],
       preparationDuration,
       executionDuration,
@@ -354,6 +355,7 @@ export const editQuotation = async (req: Request, res: Response) => {
         ...m,
         order: i,
         status: 'pending',
+        workStatus: 'pending',
       })) : [],
       preparationDuration,
       executionDuration,
@@ -478,6 +480,9 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         customDueDate: m.customDueDate,
         order: m.order,
         status: 'pending' as const,
+        workStatus: m.workStatus || 'pending',
+        startedAt: m.startedAt,
+        completedAt: m.completedAt,
       }));
     }
 
@@ -691,6 +696,96 @@ export const getQuotationVersions = async (req: Request, res: Response) => {
 };
 
 /**
+ * Professional updates milestone work status
+ */
+export const updateMilestoneWorkStatus = async (req: Request, res: Response) => {
+  try {
+    const { bookingId, index } = req.params;
+    const { action } = req.body;
+    const milestoneIndex = parseInt(index, 10);
+    const userId = (req as any).user?._id?.toString();
+
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
+    }
+
+    if (isNaN(milestoneIndex) || milestoneIndex < 0) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_INDEX', message: 'Invalid milestone index' } });
+    }
+
+    if (!action || !['start', 'complete'].includes(action)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_ACTION', message: "Action must be 'start' or 'complete'" } });
+    }
+
+    const booking = await Booking.findById(bookingId).select('professional status actualStartDate milestonePayments statusHistory');
+    if (!booking) {
+      return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
+    }
+
+    if (booking.professional?.toString() !== userId) {
+      return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the assigned professional can update milestone progress' } });
+    }
+
+    if (!['booked', 'in_progress', 'completed'].includes(booking.status)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Milestone progress can only be updated after booking confirmation' } });
+    }
+
+    if (!booking.milestonePayments || milestoneIndex >= booking.milestonePayments.length) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_MILESTONE', message: 'Milestone not found' } });
+    }
+
+    const milestone = booking.milestonePayments[milestoneIndex] as any;
+    const previousMilestones = booking.milestonePayments.slice(0, milestoneIndex) as any[];
+    const now = new Date();
+
+    if (action === 'start') {
+      const hasIncompletePrevious = previousMilestones.some((item) => item.workStatus !== 'completed');
+      if (hasIncompletePrevious) {
+        return res.status(400).json({ success: false, error: { code: 'PREVIOUS_INCOMPLETE', message: 'Previous milestones must be completed first' } });
+      }
+
+      milestone.workStatus = 'in_progress';
+      milestone.startedAt = milestone.startedAt || now;
+
+      if (booking.status === 'booked') {
+        booking.status = 'in_progress';
+        booking.actualStartDate = booking.actualStartDate || now;
+        booking.statusHistory.push({
+          status: 'in_progress',
+          timestamp: now,
+          updatedBy: new mongoose.Types.ObjectId(userId),
+          note: `Milestone started: ${milestone.title}`,
+        });
+      }
+    }
+
+    if (action === 'complete') {
+      if (milestone.workStatus !== 'in_progress' && milestone.workStatus !== 'completed') {
+        return res.status(400).json({ success: false, error: { code: 'MILESTONE_NOT_STARTED', message: 'Start the milestone before marking it complete' } });
+      }
+
+      milestone.workStatus = 'completed';
+      milestone.startedAt = milestone.startedAt || now;
+      milestone.completedAt = now;
+    }
+
+    await booking.save();
+
+    return res.json({
+      success: true,
+      data: {
+        message: action === 'start' ? 'Milestone started successfully' : 'Milestone completed successfully',
+        milestone: booking.milestonePayments[milestoneIndex],
+        booking,
+      }
+    });
+  } catch (error: any) {
+    console.error('Error updating milestone work status:', error);
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to update milestone progress' } });
+  }
+};
+
+/**
  * Get milestone payment status for a booking
  */
 export const getMilestonePaymentStatus = async (req: Request, res: Response) => {
@@ -718,6 +813,9 @@ export const getMilestonePaymentStatus = async (req: Request, res: Response) => 
     const milestones = booking.milestonePayments || [];
     const totalAmount = milestones.reduce((sum, m) => sum + m.amount, 0);
     const paidAmount = milestones.filter(m => m.status === 'paid').reduce((sum, m) => sum + m.amount, 0);
+    const workCompletedAmount = milestones
+      .filter((m: any) => m.workStatus === 'completed')
+      .reduce((sum, m) => sum + m.amount, 0);
 
     return res.json({
       success: true,
@@ -727,6 +825,7 @@ export const getMilestonePaymentStatus = async (req: Request, res: Response) => 
         paidAmount,
         remainingAmount: totalAmount - paidAmount,
         progress: totalAmount > 0 ? Math.round((paidAmount / totalAmount) * 100) : 0,
+        workProgress: totalAmount > 0 ? Math.round((workCompletedAmount / totalAmount) * 100) : 0,
       }
     });
   } catch (error: any) {

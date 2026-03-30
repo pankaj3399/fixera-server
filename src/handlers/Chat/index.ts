@@ -666,7 +666,7 @@ export const getConversationInfo = async (req: Request, res: Response) => {
       professional: toObjectId(professionalId),
       status: { $in: ["booked", "in_progress"] },
     })
-      .select("bookingNumber rfqData.preferredStartDate quote.validUntil quote.estimatedDuration status createdAt")
+      .select("_id bookingNumber rfqData.preferredStartDate quote.validUntil quote.estimatedDuration status createdAt")
       .sort({ createdAt: -1 })
       .limit(10)
       .lean(),
@@ -761,6 +761,7 @@ export const getConversationInfo = async (req: Request, res: Response) => {
         professionalLevel: professional?.professionalLevel || "New",
         avgResponseTimeMs: Math.round(avgResponseTimeMs),
         pendingBookings: pendingBookings.map((b: any) => ({
+          bookingId: b._id?.toString?.() || null,
           bookingNumber: b.bookingNumber,
           status: b.status,
           preferredStartDate: b.rfqData?.preferredStartDate || null,

@@ -9,6 +9,7 @@ import {
   getQuotationVersions,
   getMilestonePaymentStatus,
   createMilestonePaymentIntent,
+  updateMilestoneWorkStatus,
 } from '../../handlers/Quotation';
 import { protect } from '../../middlewares/auth';
 
@@ -41,5 +42,6 @@ router.get('/:bookingId/versions', getQuotationVersions);
 // Milestone payment routes
 router.get('/:bookingId/milestones', getMilestonePaymentStatus);
 router.post('/:bookingId/milestones/:index/payment-intent', createMilestonePaymentIntent);
+router.patch('/:bookingId/milestones/:index/work-status', updateMilestoneWorkStatus);
 
 export default router;
