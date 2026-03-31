@@ -978,18 +978,19 @@ BookingSchema.pre('save', async function(next) {
   if (this.isNew && !this.bookingNumber) {
     const year = new Date().getFullYear();
     const db = mongoose.connection.db;
-    if (db) {
-      const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
-      const counter = await countersCollection.findOneAndUpdate(
-        { _id: `bookingNumber-${year}` },
-        { $inc: { seq: 1 } },
-        { upsert: true, returnDocument: 'after' }
-      );
-      if (!counter?.seq) {
-        throw new Error(`Failed to generate bookingNumber: counter upsert returned ${JSON.stringify(counter)}`);
-      }
-      this.bookingNumber = `BK-${year}-${String(counter.seq).padStart(6, '0')}`;
+    if (!db) {
+      throw new Error('Database unavailable: cannot generate bookingNumber');
     }
+    const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
+    const counter = await countersCollection.findOneAndUpdate(
+      { _id: `bookingNumber-${year}` },
+      { $inc: { seq: 1 } },
+      { upsert: true, returnDocument: 'after' }
+    );
+    if (!counter?.seq) {
+      throw new Error(`Failed to generate bookingNumber: counter upsert returned ${JSON.stringify(counter)}`);
+    }
+    this.bookingNumber = `BK-${year}-${String(counter.seq).padStart(6, '0')}`;
   }
 
   // Generate quotation number if quoteVersions exist and no quotationNumber yet
@@ -997,18 +998,19 @@ BookingSchema.pre('save', async function(next) {
   if (!this.quotationNumber && this.quoteVersions && this.quoteVersions.length > 0) {
     const year = new Date().getFullYear();
     const db = mongoose.connection.db;
-    if (db) {
-      const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
-      const counter = await countersCollection.findOneAndUpdate(
-        { _id: `quotationNumber-${year}` },
-        { $inc: { seq: 1 } },
-        { upsert: true, returnDocument: 'after' }
-      );
-      if (!counter?.seq) {
-        throw new Error(`Failed to generate quotationNumber: counter upsert returned ${JSON.stringify(counter)}`);
-      }
-      this.quotationNumber = `QT-${year}-${String(counter.seq).padStart(6, '0')}`;
+    if (!db) {
+      throw new Error('Database unavailable: cannot generate quotationNumber');
     }
+    const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
+    const counter = await countersCollection.findOneAndUpdate(
+      { _id: `quotationNumber-${year}` },
+      { $inc: { seq: 1 } },
+      { upsert: true, returnDocument: 'after' }
+    );
+    if (!counter?.seq) {
+      throw new Error(`Failed to generate quotationNumber: counter upsert returned ${JSON.stringify(counter)}`);
+    }
+    this.quotationNumber = `QT-${year}-${String(counter.seq).padStart(6, '0')}`;
   }
 
   // Initialize status history if empty

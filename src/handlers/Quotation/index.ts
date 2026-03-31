@@ -21,6 +21,24 @@ import {
   sendDirectQuotationEmail,
 } from '../../utils/emailService';
 
+const getNextQuotationNumber = async (): Promise<string> => {
+  const year = new Date().getFullYear();
+  const db = mongoose.connection.db;
+  if (!db) {
+    throw new Error('Database unavailable: cannot generate quotationNumber');
+  }
+  const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
+  const counter = await countersCollection.findOneAndUpdate(
+    { _id: `quotationNumber-${year}` },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: 'after' }
+  );
+  if (!counter?.seq) {
+    throw new Error(`Failed to generate quotationNumber: counter upsert returned ${JSON.stringify(counter)}`);
+  }
+  return `QT-${year}-${String(counter.seq).padStart(6, '0')}`;
+};
+
 /**
  * Professional accept/reject RFQ
  * Accept sets rfqDeadline = addWorkingDays(now, 4), status → rfq_accepted
@@ -237,12 +255,12 @@ export const submitQuotation = async (req: Request, res: Response) => {
       note: 'Quotation submitted by professional'
     });
 
-    await booking.save();
-
-    if (booking.quotationNumber && booking.quoteVersions?.[0]) {
-      booking.quoteVersions[0].quotationNumber = `${booking.quotationNumber}-v${versionNumber}`;
-      await booking.save();
+    if (!booking.quotationNumber) {
+      booking.quotationNumber = await getNextQuotationNumber();
     }
+    booking.quoteVersions[0].quotationNumber = `${booking.quotationNumber}-v${versionNumber}`;
+
+    await booking.save();
 
     const customer = booking.customer as any;
     const professional = booking.professional as any;
@@ -718,12 +736,17 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
       return res.status(400).json({ success: false, error: { code: 'INVALID_ACTION', message: "Action must be 'start' or 'complete'" } });
     }
 
-    const booking = await Booking.findById(bookingId).select('professional status actualStartDate milestonePayments statusHistory');
+    const booking = await Booking.findById(bookingId)
+      .select('professional status actualStartDate milestonePayments statusHistory bookingType project')
+      .populate('project', 'professionalId');
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
     }
 
-    if (booking.professional?.toString() !== userId) {
+    const isAuthorized = booking.bookingType === 'project'
+      ? (booking.project as any)?.professionalId?.toString() === userId
+      : booking.professional?.toString() === userId;
+    if (!isAuthorized) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the assigned professional can update milestone progress' } });
     }
 

@@ -4,7 +4,7 @@ import { Request } from 'express';
 import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
-import fileType from 'file-type';
+import { fromBuffer as fileTypeFromBuffer } from 'file-type';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -16,6 +16,8 @@ const s3Client = new S3Client({
 });
 
 const BUCKET_NAME = process.env.S3_BUCKET_NAME || 'fixera-uploads';
+
+const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -54,8 +56,7 @@ export const upload = multer({
 
 // Dedicated multer for review images (images only, 5MB limit)
 const reviewImageFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (allowed.includes(file.mimetype)) {
+  if (ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
     cb(null, true);
   } else {
     cb(new Error('Invalid file type. Only JPEG, PNG, and WebP images are allowed for reviews'));
@@ -71,8 +72,7 @@ export const uploadReviewImages = multer({
 });
 
 const profileImageFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (allowed.includes(file.mimetype)) {
+  if (ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
     cb(null, true);
   } else {
     cb(new Error('Invalid file type. Only JPEG, PNG, and WebP images are allowed for profile images'));
@@ -185,8 +185,6 @@ export const validateFile = (file: Express.Multer.File): { valid: boolean; error
   return { valid: true };
 };
 
-const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-
 export const validateImageFile = (file: Express.Multer.File): { valid: boolean; error?: string } => {
   if (file.size > 5 * 1024 * 1024) {
     return { valid: false, error: 'Image must be less than 5MB' };
@@ -207,11 +205,12 @@ export const validateImageFileBuffer = async (
     return { valid: false, error: 'Empty file buffer' };
   }
 
-  const detected = await fileType.fromBuffer(file.buffer);
+  const detected = await fileTypeFromBuffer(file.buffer);
   if (!detected || !ALLOWED_IMAGE_MIMES.includes(detected.mime)) {
     return { valid: false, error: 'File content does not match an allowed image type (JPEG, PNG, WebP)' };
   }
 
+  file.mimetype = detected.mime;
   return { valid: true, detectedMime: detected.mime };
 };
 
