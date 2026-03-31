@@ -212,9 +212,10 @@ export const validateImageBuffer = async (
 };
 
 export const validateImageFileBuffer = async (
-  file: Express.Multer.File
+  file: Express.Multer.File,
+  maxBytes: number = 5 * 1024 * 1024
 ): Promise<{ valid: boolean; error?: string; detectedMime?: string }> => {
-  const sizeCheck = ensureFileSizeUnder(file.size, 5 * 1024 * 1024);
+  const sizeCheck = ensureFileSizeUnder(file.size, maxBytes);
   if (!sizeCheck.valid) return sizeCheck;
 
   const bufferCheck = await validateImageBuffer(file.buffer);
@@ -241,8 +242,7 @@ export const validateCertificationFile = (file: Express.Multer.File): { valid: b
   if (file.size > 10 * 1024 * 1024) {
     return { valid: false, error: 'Certification must be less than 10MB' };
   }
-  const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png'];
-  if (!allowedTypes.includes(file.mimetype)) {
+  if (file.mimetype !== 'application/pdf' && !ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
     return { valid: false, error: 'Certification must be PDF or image' };
   }
   return { valid: true };
