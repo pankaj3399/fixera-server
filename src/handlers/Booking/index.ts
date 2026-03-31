@@ -64,10 +64,11 @@ const presignBookingFiles = async (bookingDoc: any) => {
 
   if (Array.isArray(booking?.rfqData?.answers) && booking.rfqData.answers.length > 0) {
     booking.rfqData.answers = await Promise.all(
-      booking.rfqData.answers.map(async (answer: any) => ({
-        ...answer,
-        answer: await presignMaybeS3Url(answer?.answer),
-      }))
+      booking.rfqData.answers.map(async (answer: any) =>
+        answer?.fieldType === 'file'
+          ? { ...answer, answer: await presignMaybeS3Url(answer?.answer) }
+          : answer
+      )
     );
   }
 

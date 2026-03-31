@@ -185,7 +185,7 @@ export const validateFile = (file: Express.Multer.File): { valid: boolean; error
   return { valid: true };
 };
 
-const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
 
 export const validateImageFile = (file: Express.Multer.File): { valid: boolean; error?: string } => {
   if (file.size > 5 * 1024 * 1024) {

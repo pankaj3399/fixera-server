@@ -102,7 +102,7 @@ const ensureWarrantyCoverageSnapshot = async (booking: any) => {
     startsAt,
     endsAt,
     source: booking.warrantyCoverage?.source || source,
-  }
+  };
 };
 
 /**

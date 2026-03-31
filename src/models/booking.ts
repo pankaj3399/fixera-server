@@ -985,8 +985,10 @@ BookingSchema.pre('save', async function(next) {
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }
       );
-      const seq = counter?.seq ?? 1;
-      this.bookingNumber = `BK-${year}-${String(seq).padStart(6, '0')}`;
+      if (!counter?.seq) {
+        throw new Error(`Failed to generate bookingNumber: counter upsert returned ${JSON.stringify(counter)}`);
+      }
+      this.bookingNumber = `BK-${year}-${String(counter.seq).padStart(6, '0')}`;
     }
   }
 
@@ -1002,8 +1004,10 @@ BookingSchema.pre('save', async function(next) {
         { $inc: { seq: 1 } },
         { upsert: true, returnDocument: 'after' }
       );
-      const seq = counter?.seq ?? 1;
-      this.quotationNumber = `QT-${year}-${String(seq).padStart(6, '0')}`;
+      if (!counter?.seq) {
+        throw new Error(`Failed to generate quotationNumber: counter upsert returned ${JSON.stringify(counter)}`);
+      }
+      this.quotationNumber = `QT-${year}-${String(counter.seq).padStart(6, '0')}`;
     }
   }
 

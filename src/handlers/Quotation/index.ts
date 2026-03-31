@@ -6,7 +6,7 @@
 
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
-import Booking, { IQuoteVersion } from '../../models/booking';
+import Booking, { IQuoteVersion, IQuotationMilestone } from '../../models/booking';
 import User from '../../models/user';
 import Conversation from '../../models/conversation';
 import { addWorkingDays } from '../../utils/workingDays';
@@ -210,16 +210,14 @@ export const submitQuotation = async (req: Request, res: Response) => {
       description,
       totalAmount,
       currency: currency || 'EUR',
-      milestones: milestones ? milestones.map((m: any, i: number) => ({
+      milestones: milestones ? milestones.map((m: any, i: number): IQuotationMilestone => ({
         title: m.title,
         description: m.description,
         amount: m.amount,
-        currency: m.currency,
-        dueDate: m.dueDate,
-        deliverables: m.deliverables,
+        dueCondition: m.dueDate ? 'custom_date' as const : (m.dueCondition || 'on_start'),
+        customDueDate: m.dueDate ? new Date(m.dueDate) : m.customDueDate,
         order: i,
         status: 'pending',
-        workStatus: 'pending',
       })) : [],
       preparationDuration,
       executionDuration,
@@ -353,16 +351,14 @@ export const editQuotation = async (req: Request, res: Response) => {
       description,
       totalAmount,
       currency: currency || 'EUR',
-      milestones: milestones ? milestones.map((m: any, i: number) => ({
+      milestones: milestones ? milestones.map((m: any, i: number): IQuotationMilestone => ({
         title: m.title,
         description: m.description,
         amount: m.amount,
-        currency: m.currency,
-        dueDate: m.dueDate,
-        deliverables: m.deliverables,
+        dueCondition: m.dueDate ? 'custom_date' as const : (m.dueCondition || 'on_start'),
+        customDueDate: m.dueDate ? new Date(m.dueDate) : m.customDueDate,
         order: i,
         status: 'pending',
-        workStatus: 'pending',
       })) : [],
       preparationDuration,
       executionDuration,
