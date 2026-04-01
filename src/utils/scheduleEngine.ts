@@ -336,15 +336,22 @@ const getProjectDurations = (project: any, subprojectIndex?: number) => {
       ? execution?.range?.max || execution?.range?.min
       : execution?.range?.min || execution?.range?.max;
 
-  if (!execution || typeof executionValue !== "number" || executionValue <= 0) {
+  if (!isRfqPackage && (!execution || typeof executionValue !== "number" || executionValue <= 0)) {
+    return null;
+  }
+
+  const rfqFallbackUnit = execution?.unit || "days";
+  const resolvedValue = typeof executionValue === "number" && executionValue > 0 ? executionValue : isRfqPackage ? 1 : 0;
+  if (resolvedValue <= 0) {
     return null;
   }
 
   const buffer = subproject?.buffer || project.bufferDuration || null;
 
+  const effectiveUnit = execution?.unit || rfqFallbackUnit;
   const prepValue = subproject?.preparationDuration?.value;
   const prepUnit =
-    subproject?.preparationDuration?.unit || execution.unit || "days";
+    subproject?.preparationDuration?.unit || effectiveUnit;
 
   const preparation =
     typeof prepValue === "number"
@@ -352,7 +359,7 @@ const getProjectDurations = (project: any, subprojectIndex?: number) => {
       : null;
 
   return {
-    execution: { value: executionValue, unit: execution.unit } as Duration,
+    execution: { value: resolvedValue, unit: effectiveUnit } as Duration,
     buffer: buffer
       ? ({ value: buffer.value, unit: buffer.unit } as Duration)
       : null,
