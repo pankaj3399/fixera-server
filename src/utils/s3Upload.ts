@@ -268,3 +268,43 @@ export const parseS3KeyFromUrl = (url: string): string | null => {
     return null;
   }
 };
+
+export const TRUSTED_S3_HOST_RE = new RegExp(
+  `^${(BUCKET_NAME).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.s3\\.([a-z0-9-]+\\.)?amazonaws\\.com$`,
+  'i'
+);
+
+export const ALLOWED_KEY_PREFIXES = [
+  'profile-images/',
+  'id-proofs/',
+  'certifications/',
+  'project-images/',
+  'project-videos/',
+  'project-attachments/',
+  'review-images/',
+  'reviews/',
+  'warranty-claims/',
+];
+
+export const isAllowedS3Url = (url: string): boolean => {
+  try {
+    const parsed = new URL(url);
+    if (!TRUSTED_S3_HOST_RE.test(parsed.hostname)) return false;
+    const key = parseS3KeyFromUrl(url);
+    if (!key) return false;
+    return ALLOWED_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+  } catch {
+    return false;
+  }
+};
+
+export const presignS3Url = async (url: string, expiresIn = 7 * 24 * 60 * 60): Promise<string | null> => {
+  if (!isAllowedS3Url(url)) return null;
+  const key = parseS3KeyFromUrl(url);
+  if (!key) return null;
+  try {
+    return await getPresignedUrl(key, expiresIn);
+  } catch {
+    return null;
+  }
+};

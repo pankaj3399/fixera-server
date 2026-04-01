@@ -17,12 +17,13 @@ import {
 import {
   deleteFromS3,
   generateFileName,
-  getPresignedUrl,
   parseS3KeyFromUrl,
   uploadToS3,
   validateFile,
   validateImageFileBuffer,
   validateVideoFile,
+  isAllowedS3Url,
+  presignS3Url,
 } from "../../utils/s3Upload";
 import { SYSTEM_USER_ID } from "../../constants/system";
 
@@ -36,32 +37,17 @@ const ACTIVE_CLAIM_STATUSES: WarrantyClaimStatus[] = [
   "escalated",
 ];
 
-const TRUSTED_S3_HOST_RE = new RegExp(
-  `^${(process.env.S3_BUCKET_NAME || 'fixera-uploads').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.s3\\.([a-z0-9-]+\\.)?amazonaws\\.com$`,
-  'i'
-);
-
-const presignEvidenceUrls = async (urls: string[]): Promise<string[]> => {
-  return Promise.all(
-    urls.map(async (url) => {
-      try {
-        const parsed = new URL(url);
-        if (!TRUSTED_S3_HOST_RE.test(parsed.hostname)) return url;
-        const key = parseS3KeyFromUrl(url);
-        if (!key) return url;
-        return await getPresignedUrl(key, 7 * 24 * 60 * 60);
-      } catch {
-        return url;
-      }
-    })
-  );
-};
-
 const presignClaim = async (claim: any) => {
   if (!claim) return claim;
   const obj = claim.toObject ? claim.toObject() : { ...claim };
   if (Array.isArray(obj.evidence) && obj.evidence.length > 0) {
-    obj.evidence = await presignEvidenceUrls(obj.evidence);
+    const results = await Promise.all(
+      obj.evidence.map(async (url: string) => {
+        const signed = await presignS3Url(url);
+        return signed ?? url;
+      })
+    );
+    obj.evidence = results;
   }
   return obj;
 };
@@ -547,7 +533,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       professional: professionalId,
       reason,
       description: description.trim(),
-      evidence: Array.isArray(evidence) ? evidence.slice(0, 10) : [],
+      evidence: Array.isArray(evidence) ? evidence.filter(isAllowedS3Url).slice(0, 10) : [],
       warrantyEndsAt: warrantyCoverage.endsAt,
       openedAt,
       sla: {

@@ -6,14 +6,9 @@ import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import mongoose from "mongoose";
 import { moderateText } from "../../utils/contentModeration";
-import { uploadToS3, generateFileName, validateImageFileBuffer, deleteFromS3, getPresignedUrl, parseS3KeyFromUrl } from "../../utils/s3Upload";
+import { uploadToS3, generateFileName, validateImageFileBuffer, deleteFromS3, presignS3Url } from "../../utils/s3Upload";
 
 const MAX_COMMENT_LENGTH = 1000;
-
-const TRUSTED_S3_HOST_RE = new RegExp(
-  `^${(process.env.S3_BUCKET_NAME || 'fixera-uploads').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.s3\\.([a-z0-9-]+\\.)?amazonaws\\.com$`,
-  'i'
-);
 
 const presignReviewImages = async (reviews: any[]): Promise<any[]> => {
   return Promise.all(
@@ -22,15 +17,8 @@ const presignReviewImages = async (reviews: any[]): Promise<any[]> => {
       if (!Array.isArray(images) || images.length === 0) return review;
       const signed = await Promise.all(
         images.map(async (url: string) => {
-          try {
-            const parsed = new URL(url);
-            if (!TRUSTED_S3_HOST_RE.test(parsed.hostname)) return url;
-            const key = parseS3KeyFromUrl(url);
-            if (!key) return url;
-            return await getPresignedUrl(key, 7 * 24 * 60 * 60);
-          } catch {
-            return url;
-          }
+          const result = await presignS3Url(url);
+          return result ?? url;
         })
       );
       return { ...review, customerReview: { ...review.customerReview, images: signed } };
