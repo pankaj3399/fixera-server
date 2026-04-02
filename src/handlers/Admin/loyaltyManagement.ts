@@ -575,12 +575,18 @@ export const updateProfessionalManagement = async (req: Request, res: Response) 
     }
     if (action === "suspend") {
       professional.accountStatus = "suspended";
+      if (professional.professionalStatus !== "suspended" && !professional.previousProfessionalStatus) {
+        professional.previousProfessionalStatus = professional.professionalStatus as any;
+      }
       professional.professionalStatus = "suspended";
       if (reason?.trim()) professional.suspensionReason = reason.trim();
     }
     if (action === "reactivate") {
       professional.accountStatus = "active";
-      if (professional.professionalStatus === "suspended") professional.professionalStatus = "approved";
+      if (professional.professionalStatus === "suspended") {
+        professional.professionalStatus = (professional.previousProfessionalStatus as any) || "approved";
+      }
+      professional.previousProfessionalStatus = undefined;
       professional.suspensionReason = undefined;
     }
 

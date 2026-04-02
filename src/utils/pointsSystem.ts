@@ -64,7 +64,30 @@ export const addPoints = async (
   };
 
   const createOpts = opts?.session ? { session: opts.session } : {};
-  const [transaction] = await PointTransaction.create([txData], createOpts);
+  let transaction;
+  try {
+    [transaction] = await PointTransaction.create([txData], createOpts);
+  } catch (error: any) {
+    if (error?.code === 11000) {
+      const rollbackUpdate: Record<string, any> = {
+        $set: { points: balanceBefore }
+      };
+
+      if (prevUser.pointsExpiry instanceof Date) {
+        rollbackUpdate.$set.pointsExpiry = prevUser.pointsExpiry;
+      } else {
+        rollbackUpdate.$unset = { pointsExpiry: 1 };
+      }
+
+      await User.updateOne(
+        { _id: userId, role: { $ne: 'employee' } },
+        rollbackUpdate,
+        opts?.session ? { session: opts.session } : {}
+      );
+    }
+
+    throw error;
+  }
 
   console.log(`Points: +${amount} to user=${userId} (${source}): ${description}. Balance: ${balanceBefore} → ${balanceAfter}`);
 

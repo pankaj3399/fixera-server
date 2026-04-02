@@ -12,7 +12,6 @@ import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import { addPoints } from '../../utils/pointsSystem';
 import PointsConfig from '../../models/pointsConfig';
 import PointTransaction from '../../models/pointTransaction';
-import User from '../../models/user';
 import {
   addWarrantyDuration,
   getBookingWarrantyDuration,
@@ -110,6 +109,7 @@ const ensureWarrantyCoverageSnapshot = async (booking: any) => {
 };
 
 const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
+const COMPLETABLE_BOOKING_STATUSES: BookingStatus[] = ['booked', 'in_progress', 'dispute'];
 
 const getProfessionalId = async (booking: any) => {
   if (booking.professional) return booking.professional;
@@ -136,11 +136,6 @@ const awardBookingCompletionPointsToUser = async (
     if (!isDuplicateKeyError(error)) {
       throw error;
     }
-
-    await User.updateOne(
-      { _id: userId, role: { $ne: 'employee' } },
-      { $inc: { points: -amount } }
-    );
   }
 };
 
@@ -334,27 +329,48 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
     }
 
     if (requestedStatus === 'completed') {
-      const atomicUpdate = await Booking.findOneAndUpdate(
-        { _id: booking._id, status: { $ne: 'completed' } },
-        { $set: { status: 'completed', actualEndDate: booking.actualEndDate || new Date() } },
-        { new: true }
-      );
-      if (!atomicUpdate) {
-        return res.json({
-          success: true,
-          data: { message: 'Booking is already completed', booking }
-        });
-      }
-      booking.status = atomicUpdate.status;
-      booking.actualEndDate = atomicUpdate.actualEndDate;
-
       const paymentStatus = booking.payment?.status;
       const paymentStatusValue = paymentStatus ? String(paymentStatus) : '';
       const isAlreadyCaptured =
         paymentStatusValue === 'captured' || paymentStatusValue === 'completed';
       const completionDate = booking.actualEndDate || new Date();
 
+      const finalizeCompletedBooking = async () => {
+        const atomicUpdate = await Booking.findOneAndUpdate(
+          { _id: booking._id, status: { $in: COMPLETABLE_BOOKING_STATUSES } },
+          { $set: { status: 'completed', actualEndDate: completionDate } },
+          { new: true }
+        );
+
+        if (!atomicUpdate) {
+          const currentBooking = await Booking.findById(booking._id).select('status actualEndDate');
+          if (currentBooking?.status === 'completed') {
+            booking.status = currentBooking.status;
+            booking.actualEndDate = currentBooking.actualEndDate || booking.actualEndDate;
+            return res.json({
+              success: true,
+              data: { message: 'Booking is already completed', booking }
+            });
+          }
+
+          return res.status(409).json({
+            success: false,
+            error: {
+              code: 'BOOKING_STATUS_CONFLICT',
+              message: `Cannot mark booking completed while booking status is "${currentBooking?.status || booking.status}"`
+            }
+          });
+        }
+
+        booking.status = atomicUpdate.status;
+        booking.actualEndDate = atomicUpdate.actualEndDate;
+        return null;
+      };
+
       if (isAlreadyCaptured) {
+        const completionResponse = await finalizeCompletedBooking();
+        if (completionResponse) return completionResponse;
+
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
@@ -399,6 +415,9 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
             error: captureResult.error
           });
         }
+
+        const completionResponse = await finalizeCompletedBooking();
+        if (completionResponse) return completionResponse;
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);

@@ -321,6 +321,11 @@ export const uploadWarrantyEvidence = async (req: Request, res: Response) => {
       }
 
       await Promise.all(keys.map((key) => deleteFromS3(key).catch(() => null)));
+      claim.evidence = (claim.evidence || []).filter((url) => {
+        const evidenceKey = parseS3KeyFromUrl(url);
+        return !evidenceKey || !keys.includes(evidenceKey);
+      });
+      await claim.save();
       return res.status(200).json({ success: true, msg: "Evidence files cleaned up" });
     }
 
@@ -768,9 +773,13 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
     if (!message || message.trim().length < 5) {
       return res.status(400).json({ success: false, msg: "Proposal message is required" });
     }
-    const parsedResolveByDate = resolveByDate ? new Date(resolveByDate) : proposedScheduleAt ? new Date(proposedScheduleAt) : null;
+    const parsedResolveByDate = resolveByDate ? new Date(resolveByDate) : null;
     if (!parsedResolveByDate || Number.isNaN(parsedResolveByDate.getTime())) {
       return res.status(400).json({ success: false, msg: "Resolve date is required" });
+    }
+    const parsedProposedScheduleAt = proposedScheduleAt ? new Date(proposedScheduleAt) : null;
+    if (parsedProposedScheduleAt && Number.isNaN(parsedProposedScheduleAt.getTime())) {
+      return res.status(400).json({ success: false, msg: "Proposed schedule date is invalid" });
     }
 
     const claim = await WarrantyClaim.findById(claimId);
@@ -791,7 +800,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       ...claim.proposal,
       message: message.trim(),
       resolveByDate: parsedResolveByDate,
-      proposedScheduleAt: parsedResolveByDate,
+      proposedScheduleAt: parsedProposedScheduleAt || undefined,
       proposedBy: toObjectId(userId),
       proposedAt: new Date(),
       customerDecision: undefined,

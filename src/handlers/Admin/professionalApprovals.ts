@@ -207,6 +207,7 @@ export const approveProfessional = async (req: Request, res: Response, next: Nex
 
     // Update professional status
     professional.professionalStatus = 'approved';
+    professional.accountStatus = 'active';
     professional.approvedBy = (adminUser._id as mongoose.Types.ObjectId).toString();
     professional.approvedAt = new Date();
     professional.rejectionReason = undefined; // Clear any previous rejection reason
@@ -340,6 +341,7 @@ export const suspendProfessional = async (req: Request, res: Response, next: Nex
 
     // Update professional status
     professional.professionalStatus = 'suspended';
+    professional.accountStatus = 'suspended';
     professional.suspensionReason = reason.trim();
     await professional.save();
 
@@ -406,6 +408,7 @@ export const reactivateProfessional = async (req: Request, res: Response, next: 
 
     // Update professional status back to approved
     professional.professionalStatus = 'approved';
+    professional.accountStatus = 'active';
     professional.suspensionReason = undefined;
     await professional.save();
 
@@ -553,6 +556,7 @@ export const reviewIdChanges = async (req: Request, res: Response, next: NextFun
       // Clear pending changes, re-approve professional
       professional.pendingIdChanges = undefined;
       professional.professionalStatus = 'approved';
+      professional.accountStatus = 'active';
       professional.isIdVerified = true;
       professional.approvedBy = (adminUser._id as mongoose.Types.ObjectId).toString();
       professional.approvedAt = new Date();
@@ -625,6 +629,7 @@ export const reviewIdChanges = async (req: Request, res: Response, next: NextFun
 
       professional.pendingIdChanges = undefined;
       professional.professionalStatus = 'approved';
+      professional.accountStatus = 'active';
       professional.isIdVerified = true;
       professional.lastIdChangeRejectionReason = reason.trim();
       await professional.save();

@@ -38,6 +38,7 @@ export interface IUser extends Document {
     approvedAt?: Date;
     rejectionReason?: string;
     suspensionReason?: string;
+    previousProfessionalStatus?: 'draft' | 'pending' | 'approved' | 'rejected';
     lastIdChangeRejectionReason?: string;
     // Customer-specific fields
     customerType?: CustomerType;
@@ -286,6 +287,11 @@ const UserSchema = new Schema({
         type: String,
         required: false,
         maxlength: 500
+    },
+    previousProfessionalStatus: {
+        type: String,
+        enum: ['draft', 'pending', 'approved', 'rejected'],
+        required: false
     },
     lastIdChangeRejectionReason: {
         type: String,
