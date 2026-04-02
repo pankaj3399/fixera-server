@@ -13,6 +13,25 @@ import mongoose from 'mongoose';
 const LOYALTY_LEVELS = ["Bronze", "Silver", "Gold", "Platinum", "Diamond"] as const;
 const PROFESSIONAL_LEVELS = ["New", "Level 1", "Level 2", "Level 3", "Expert"] as const;
 
+const appendQueryCondition = (query: Record<string, any>, condition: Record<string, any> | null) => {
+  if (!condition) return;
+  if (!Array.isArray(query.$and)) query.$and = [];
+  query.$and.push(condition);
+};
+
+const buildAccountStatusCondition = (statuses: string[]) => {
+  if (statuses.length === 0) return null;
+  if (statuses.includes("active")) {
+    return {
+      $or: [
+        { accountStatus: { $in: statuses } },
+        { accountStatus: { $exists: false } }
+      ]
+    };
+  }
+  return { accountStatus: { $in: statuses } };
+};
+
 // Get current loyalty configuration
 export const getLoyaltyConfig = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -498,7 +517,7 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
     if (country) query["businessInfo.country"] = country;
     if (levels.length > 0) query.professionalLevel = { $in: levels };
     if (tags.length > 0) query.adminTags = { $in: tags };
-    if (statuses.length > 0) query.accountStatus = { $in: statuses };
+    appendQueryCondition(query, buildAccountStatusCondition(statuses));
 
     const [professionals, total] = await Promise.all([
       User.find(query)
@@ -645,7 +664,7 @@ export const listCustomerManagement = async (req: Request, res: Response) => {
       query.$or = countryOr;
     }
     if (levels.length > 0) query.loyaltyLevel = { $in: levels };
-    if (statuses.length > 0) query.accountStatus = { $in: statuses };
+    appendQueryCondition(query, buildAccountStatusCondition(statuses));
 
     const [customers, total] = await Promise.all([
       User.find(query)

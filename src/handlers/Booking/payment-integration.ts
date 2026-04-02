@@ -5,8 +5,11 @@
 
 import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
+import Payment from '../../models/payment';
 import Project from '../../models/project';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
+import { stripe } from '../../services/stripe';
+import { generateIdempotencyKey } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import { addPoints } from '../../utils/pointsSystem';
@@ -117,6 +120,75 @@ const getProfessionalId = async (booking: any) => {
 
   const project = await Project.findById(booking.project).select('professionalId');
   return project?.professionalId;
+};
+
+const refundCapturedBookingOnConflict = async (
+  bookingId: string,
+  reason: string
+): Promise<{ success: boolean; error?: { code: string; message: string } }> => {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) {
+    return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found for compensating refund' } };
+  }
+  if (!booking.payment?.stripePaymentIntentId || booking.payment.status !== 'completed') {
+    return { success: false, error: { code: 'INVALID_STATUS', message: 'Captured booking payment is not refundable in current state' } };
+  }
+
+  const totalWithVat = booking.payment.totalWithVat ?? booking.payment.amount ?? 0;
+  const refund = await stripe.refunds.create({
+    payment_intent: booking.payment.stripePaymentIntentId,
+  }, {
+    idempotencyKey: generateIdempotencyKey({
+      bookingId: booking._id.toString(),
+      operation: 'refund',
+      timestamp: Date.now(),
+    })
+  });
+
+  if (booking.payment.stripeTransferId) {
+    try {
+      await stripe.transfers.createReversal(
+        booking.payment.stripeTransferId,
+        { metadata: { reason, bookingId: booking._id.toString() } }
+      );
+      booking.payment.refundSource = 'professional';
+    } catch (error) {
+      console.error('Transfer reversal failed during completion conflict refund:', error);
+      booking.payment.refundSource = 'platform';
+      booking.payment.refundNotes = 'Platform-funded refund after booking completion conflict';
+    }
+  } else {
+    booking.payment.refundSource = 'platform';
+  }
+
+  booking.payment.status = 'refunded';
+  booking.payment.refundedAt = new Date();
+  booking.payment.refundReason = reason;
+  booking.status = 'refunded';
+  await booking.save();
+
+  await Payment.findOneAndUpdate(
+    { booking: booking._id },
+    {
+      $set: {
+        status: 'refunded',
+        refundedAt: booking.payment.refundedAt,
+      },
+      $push: {
+        refunds: {
+          amount: totalWithVat,
+          reason,
+          refundId: refund.id,
+          refundedAt: booking.payment.refundedAt || new Date(),
+          source: booking.payment.refundSource || 'platform',
+          notes: booking.payment.refundNotes,
+        },
+      },
+    },
+    { upsert: false }
+  );
+
+  return { success: true };
 };
 
 const awardBookingCompletionPointsToUser = async (
@@ -347,29 +419,31 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           if (currentBooking?.status === 'completed') {
             booking.status = currentBooking.status;
             booking.actualEndDate = currentBooking.actualEndDate || booking.actualEndDate;
-            return res.json({
-              success: true,
-              data: { message: 'Booking is already completed', booking }
-            });
+            return { alreadyCompleted: true as const };
           }
 
-          return res.status(409).json({
-            success: false,
-            error: {
-              code: 'BOOKING_STATUS_CONFLICT',
-              message: `Cannot mark booking completed while booking status is "${currentBooking?.status || booking.status}"`
-            }
-          });
+          return {
+            conflictStatus: currentBooking?.status || booking.status,
+            alreadyCompleted: false as const
+          };
         }
 
         booking.status = atomicUpdate.status;
         booking.actualEndDate = atomicUpdate.actualEndDate;
-        return null;
+        return { alreadyCompleted: false as const };
       };
 
       if (isAlreadyCaptured) {
-        const completionResponse = await finalizeCompletedBooking();
-        if (completionResponse) return completionResponse;
+        const finalizeResult = await finalizeCompletedBooking();
+        if (finalizeResult.conflictStatus) {
+          return res.status(409).json({
+            success: false,
+            error: {
+              code: 'BOOKING_STATUS_CONFLICT',
+              message: `Cannot mark booking completed while booking status is "${finalizeResult.conflictStatus}"`
+            }
+          });
+        }
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
@@ -400,7 +474,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         return res.json({
           success: true,
           data: {
-            message: 'Booking completed',
+            message: finalizeResult.alreadyCompleted ? 'Booking is already completed' : 'Booking completed',
             booking
           }
         });
@@ -416,8 +490,28 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           });
         }
 
-        const completionResponse = await finalizeCompletedBooking();
-        if (completionResponse) return completionResponse;
+        const finalizeResult = await finalizeCompletedBooking();
+        if (finalizeResult.conflictStatus) {
+          const refundReason = `Booking completion conflict after capture: status=${finalizeResult.conflictStatus}`;
+          const refundResult = await refundCapturedBookingOnConflict(booking._id.toString(), refundReason);
+          if (!refundResult.success) {
+            return res.status(500).json({
+              success: false,
+              error: {
+                code: 'BOOKING_STATUS_CONFLICT_REFUND_FAILED',
+                message: `Payment was captured but booking could not be completed because status is "${finalizeResult.conflictStatus}". Compensating refund failed: ${refundResult.error?.message || 'unknown error'}`
+              }
+            });
+          }
+
+          return res.status(409).json({
+            success: false,
+            error: {
+              code: 'BOOKING_STATUS_CONFLICT',
+              message: `Booking status changed to "${finalizeResult.conflictStatus}" before completion could be finalized. Payment was refunded.`
+            }
+          });
+        }
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
@@ -448,7 +542,9 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         return res.json({
           success: true,
           data: {
-            message: 'Booking completed and payment transferred to professional',
+            message: finalizeResult.alreadyCompleted
+              ? 'Booking is already completed'
+              : 'Booking completed and payment transferred to professional',
             booking
           }
         });

@@ -340,6 +340,9 @@ export const suspendProfessional = async (req: Request, res: Response, next: Nex
     }
 
     // Update professional status
+    if (professional.professionalStatus !== 'suspended' && !professional.previousProfessionalStatus) {
+      professional.previousProfessionalStatus = professional.professionalStatus as any;
+    }
     professional.professionalStatus = 'suspended';
     professional.accountStatus = 'suspended';
     professional.suspensionReason = reason.trim();
@@ -406,8 +409,9 @@ export const reactivateProfessional = async (req: Request, res: Response, next: 
       });
     }
 
-    // Update professional status back to approved
-    professional.professionalStatus = 'approved';
+    // Restore professional status from the pre-suspension snapshot when available
+    professional.professionalStatus = (professional.previousProfessionalStatus as any) || 'approved';
+    professional.previousProfessionalStatus = undefined;
     professional.accountStatus = 'active';
     professional.suspensionReason = undefined;
     await professional.save();

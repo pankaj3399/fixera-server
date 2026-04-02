@@ -130,6 +130,35 @@ export const updateUserLoyalty = async (
       }
 
       const oldLevel = user.loyaltyLevel || 'Bronze';
+      if (user.manualCustomerLevelOverride) {
+        const overrideLevel = toValidLoyaltyLevel(user.manualCustomerLevelOverride);
+        const result = await User.findOneAndUpdate(
+          { _id: userId, __v: user.__v },
+          {
+            $inc: { totalSpent: validAmount, totalBookings: 1, __v: 1 },
+            $set: {
+              loyaltyLevel: overrideLevel,
+              lastLoyaltyUpdate: new Date()
+            }
+          },
+          { new: true }
+        );
+
+        if (!result) {
+          if (attempt < maxRetries - 1) {
+            continue;
+          }
+          console.error(`Loyalty: Override update failed after ${maxRetries} retries for user ${userId}`);
+          return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
+        }
+
+        return {
+          user: result,
+          leveledUp: oldLevel !== overrideLevel,
+          oldLevel,
+          newLevel: overrideLevel
+        };
+      }
       const newTotalSpent = (user.totalSpent || 0) + validAmount;
       const newTotalBookings = (user.totalBookings || 0) + 1;
 

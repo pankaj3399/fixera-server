@@ -37,12 +37,59 @@ const ACTIVE_CLAIM_STATUSES: WarrantyClaimStatus[] = [
   "escalated",
 ];
 
+const getWarrantyUploadKeyForUser = (userId: string) => `warranty-claims/${userId}/`;
+
+const isWarrantyUrlOwnedByUser = (url: string, userId: string) => {
+  const key = parseS3KeyFromUrl(url);
+  return Boolean(key && key.startsWith(getWarrantyUploadKeyForUser(userId)));
+};
+
+const getParticipantWarrantyPrefixes = (claim: any) =>
+  [claim?.customer, claim?.professional]
+    .map((value) => (value ? String(value) : ""))
+    .filter(Boolean)
+    .map((userId) => getWarrantyUploadKeyForUser(userId));
+
+const canPresignWarrantyUrlForClaim = (url: string, claim: any) => {
+  const key = parseS3KeyFromUrl(url);
+  if (!key || !key.startsWith("warranty-claims/")) return false;
+  return getParticipantWarrantyPrefixes(claim).some((prefix) => key.startsWith(prefix));
+};
+
+const validateWarrantyUrlsForUser = (urls: string[], userId: string) => {
+  const validUrls = Array.from(new Set(urls.filter((url) => isAllowedS3Url(url) && isWarrantyUrlOwnedByUser(url, userId))));
+  const invalidUrls = urls.filter((url) => !validUrls.includes(url));
+  return { validUrls, invalidUrls };
+};
+
+const validateWarrantyUrlsForClaim = (urls: string[], claim: any, userId: string) => {
+  const existingUrls = new Set([
+    ...(Array.isArray(claim?.evidence) ? claim.evidence : []),
+    ...(Array.isArray(claim?.resolution?.attachments) ? claim.resolution.attachments : []),
+  ]);
+
+  const validUrls = Array.from(
+    new Set(
+      urls.filter((url) => {
+        if (!isAllowedS3Url(url)) return false;
+        if (existingUrls.has(url)) return true;
+        return isWarrantyUrlOwnedByUser(url, userId);
+      })
+    )
+  );
+  const invalidUrls = urls.filter((url) => !validUrls.includes(url));
+  return { validUrls, invalidUrls };
+};
+
 const presignClaim = async (claim: any) => {
   if (!claim) return claim;
   const obj = claim.toObject ? claim.toObject() : { ...claim };
   if (Array.isArray(obj.evidence) && obj.evidence.length > 0) {
     const results = await Promise.all(
       obj.evidence.map(async (url: string) => {
+        if (!canPresignWarrantyUrlForClaim(url, obj)) {
+          return url;
+        }
         const signed = await presignS3Url(url);
         return signed ?? url;
       })
@@ -52,6 +99,9 @@ const presignClaim = async (claim: any) => {
   if (Array.isArray(obj.resolution?.attachments) && obj.resolution.attachments.length > 0) {
     obj.resolution.attachments = await Promise.all(
       obj.resolution.attachments.map(async (url: string) => {
+        if (!canPresignWarrantyUrlForClaim(url, obj)) {
+          return url;
+        }
         const signed = await presignS3Url(url);
         return signed ?? url;
       })
@@ -320,12 +370,15 @@ export const uploadWarrantyEvidence = async (req: Request, res: Response) => {
         return res.status(403).json({ success: false, msg: "One or more evidence files are not authorized for deletion" });
       }
 
-      await Promise.all(keys.map((key) => deleteFromS3(key).catch(() => null)));
-      claim.evidence = (claim.evidence || []).filter((url) => {
+      const deleteResults = await Promise.allSettled(keys.map((key) => deleteFromS3(key)));
+      const deletedKeys = keys.filter((_, index) => deleteResults[index]?.status === "fulfilled");
+      const urlsToRemove = (claim.evidence || []).filter((url) => {
         const evidenceKey = parseS3KeyFromUrl(url);
-        return !evidenceKey || !keys.includes(evidenceKey);
+        return Boolean(evidenceKey && deletedKeys.includes(evidenceKey));
       });
-      await claim.save();
+      if (urlsToRemove.length > 0) {
+        await claim.updateOne({ $pull: { evidence: { $in: urlsToRemove } } });
+      }
       return res.status(200).json({ success: true, msg: "Evidence files cleaned up" });
     }
 
@@ -585,6 +638,14 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       });
     }
 
+    const { validUrls: evidenceUrls, invalidUrls: invalidEvidenceUrls } = validateWarrantyUrlsForUser(
+      Array.isArray(evidence) ? evidence.slice(0, 10) : [],
+      userId
+    );
+    if (invalidEvidenceUrls.length > 0) {
+      return res.status(400).json({ success: false, msg: "One or more evidence attachments are not owned by the current user" });
+    }
+
     const openedAt = new Date();
     const claim = await WarrantyClaim.create({
       booking: booking._id,
@@ -592,7 +653,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       professional: professionalId,
       reason,
       description: description.trim(),
-      evidence: Array.isArray(evidence) ? evidence.filter(isAllowedS3Url).slice(0, 10) : [],
+      evidence: evidenceUrls,
       warrantyEndsAt: warrantyCoverage.endsAt,
       openedAt,
       sla: {
@@ -777,9 +838,16 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
     if (!parsedResolveByDate || Number.isNaN(parsedResolveByDate.getTime())) {
       return res.status(400).json({ success: false, msg: "Resolve date is required" });
     }
+    const now = Date.now();
+    if (parsedResolveByDate.getTime() <= now) {
+      return res.status(400).json({ success: false, msg: "Resolve date must be in the future" });
+    }
     const parsedProposedScheduleAt = proposedScheduleAt ? new Date(proposedScheduleAt) : null;
     if (parsedProposedScheduleAt && Number.isNaN(parsedProposedScheduleAt.getTime())) {
       return res.status(400).json({ success: false, msg: "Proposed schedule date is invalid" });
+    }
+    if (parsedProposedScheduleAt && parsedProposedScheduleAt.getTime() < now) {
+      return res.status(400).json({ success: false, msg: "Proposed schedule date cannot be in the past" });
     }
 
     const claim = await WarrantyClaim.findById(claimId);
@@ -1003,11 +1071,20 @@ export const markWarrantyResolved = async (req: Request, res: Response) => {
       });
     }
 
+    const { validUrls: resolutionAttachments, invalidUrls: invalidResolutionAttachments } = validateWarrantyUrlsForClaim(
+      Array.isArray(attachments) ? attachments.slice(0, 10) : [],
+      claim,
+      userId
+    );
+    if (invalidResolutionAttachments.length > 0) {
+      return res.status(400).json({ success: false, msg: "One or more resolution attachments are not authorized for this claim" });
+    }
+
     const resolvedAt = new Date();
     const autoCloseDays = claim.sla?.customerAutoCloseDays || CUSTOMER_AUTO_CLOSE_DAYS;
     claim.resolution = {
       summary: summary.trim(),
-      attachments: Array.isArray(attachments) ? attachments.filter(isAllowedS3Url).slice(0, 10) : [],
+      attachments: resolutionAttachments,
       resolvedAt,
       resolvedBy: toObjectId(userId),
     };

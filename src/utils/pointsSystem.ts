@@ -29,69 +29,63 @@ export const addPoints = async (
   const expiresAt = new Date();
   expiresAt.setMonth(expiresAt.getMonth() + config.expiryMonths);
 
-  // Atomically update and return the previous document for accurate balanceBefore
-  const updateOpts: Record<string, any> = { returnDocument: 'before' as const };
-  if (opts?.session) updateOpts.session = opts.session;
+  const ownedSession = !opts?.session;
+  const session = opts?.session || await mongoose.startSession();
+  const manageTransaction = !session.inTransaction();
 
-  const prevUser = await User.findOneAndUpdate(
-    { _id: userId, role: { $ne: 'employee' } },
-    { $inc: { points: amount }, $max: { pointsExpiry: expiresAt } },
-    updateOpts
-  );
-  if (!prevUser) {
-    const exists = await User.findById(userId).select('_id role');
-    if (!exists) throw new Error('User not found');
-    if (exists.role === 'employee') throw new Error('Employees cannot earn or spend points');
-    throw new Error('User not found');
-  }
-
-  const balanceBefore = prevUser.points || 0;
-  const balanceAfter = balanceBefore + amount;
-
-  // Create transaction record
-  const txData = {
-    userId,
-    type: 'earn' as const,
-    source,
-    amount,
-    balanceBefore,
-    balanceAfter,
-    description,
-    expiresAt,
-    relatedBooking: opts?.relatedBooking,
-    relatedReferral: opts?.relatedReferral,
-    metadata: opts?.metadata
-  };
-
-  const createOpts = opts?.session ? { session: opts.session } : {};
-  let transaction;
   try {
-    [transaction] = await PointTransaction.create([txData], createOpts);
-  } catch (error: any) {
-    if (error?.code === 11000) {
-      const rollbackUpdate: Record<string, any> = {
-        $set: { points: balanceBefore }
-      };
-
-      if (prevUser.pointsExpiry instanceof Date) {
-        rollbackUpdate.$set.pointsExpiry = prevUser.pointsExpiry;
-      } else {
-        rollbackUpdate.$unset = { pointsExpiry: 1 };
-      }
-
-      await User.updateOne(
-        { _id: userId, role: { $ne: 'employee' } },
-        rollbackUpdate,
-        opts?.session ? { session: opts.session } : {}
-      );
+    if (manageTransaction) {
+      session.startTransaction();
     }
 
+    const prevUser = await User.findOneAndUpdate(
+      { _id: userId, role: { $ne: 'employee' } },
+      { $inc: { points: amount }, $max: { pointsExpiry: expiresAt } },
+      { returnDocument: 'before' as const, session }
+    );
+    if (!prevUser) {
+      const exists = await User.findById(userId).select('_id role').session(session);
+      if (!exists) throw new Error('User not found');
+      if (exists.role === 'employee') throw new Error('Employees cannot earn or spend points');
+      throw new Error('User not found');
+    }
+
+    const balanceBefore = prevUser.points || 0;
+    const balanceAfter = balanceBefore + amount;
+
+    const txData = {
+      userId,
+      type: 'earn' as const,
+      source,
+      amount,
+      balanceBefore,
+      balanceAfter,
+      description,
+      expiresAt,
+      relatedBooking: opts?.relatedBooking,
+      relatedReferral: opts?.relatedReferral,
+      metadata: opts?.metadata
+    };
+
+    const [transaction] = await PointTransaction.create([{ ...txData }], { session });
+
+    if (manageTransaction) {
+      await session.commitTransaction();
+    }
+
+    console.log(`Points: +${amount} to user=${userId} (${source}): ${description}. Balance: ${balanceBefore} -> ${balanceAfter}`);
+
+    return { newBalance: balanceAfter, transaction };
+  } catch (error) {
+    if (manageTransaction && session.inTransaction()) {
+      await session.abortTransaction();
+    }
     throw error;
+  } finally {
+    if (ownedSession) {
+      await session.endSession();
+    }
   }
-
-  console.log(`Points: +${amount} to user=${userId} (${source}): ${description}. Balance: ${balanceBefore} → ${balanceAfter}`);
-
-  return { newBalance: balanceAfter, transaction };
 };
 
 /**
@@ -149,7 +143,7 @@ export const deductPoints = async (
   const createOpts = opts?.session ? { session: opts.session } : {};
   const [transaction] = await PointTransaction.create([txData], createOpts);
 
-  console.log(`Points: -${amount} from user=${userId} (${source}): ${description}. Balance: ${balanceBefore} → ${balanceAfter}`);
+  console.log(`Points: -${amount} from user=${userId} (${source}): ${description}. Balance: ${balanceBefore} -> ${balanceAfter}`);
 
   return { newBalance: balanceAfter, transaction };
 };
@@ -197,7 +191,7 @@ export const previewPointsRedemption = async (
   // Calculate discount value
   let discountAmount = redeemable * config.conversionRate;
 
-  // Don't let discount exceed booking amount (leave at least €0.50 for Stripe)
+  // Don't let discount exceed booking amount (leave at least EUR0.50 for Stripe)
   const maxDiscount = Math.max(0, bookingAmount - 0.50);
   if (discountAmount > maxDiscount) {
     redeemable = Math.floor(maxDiscount / config.conversionRate);
