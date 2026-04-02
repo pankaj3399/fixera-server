@@ -27,6 +27,7 @@ export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFu
     }
 
     const loyaltyStatus = await calculateLoyaltyStatus(user.totalSpent || 0);
+    const effectiveLevel = user.manualCustomerLevelOverride || user.loyaltyLevel || loyaltyStatus.level;
     const benefits = await getUserLoyaltyBenefits((user._id as mongoose.Types.ObjectId).toString());
     const pointsBalance = await getPointsBalance(userId);
 
@@ -34,7 +35,7 @@ export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFu
       success: true,
       data: {
         loyaltyStatus: {
-          level: loyaltyStatus.level,
+          level: effectiveLevel,
           nextLevel: loyaltyStatus.nextTier?.name,
           amountToNextTier: loyaltyStatus.amountToNextTier,
           progress: loyaltyStatus.progress

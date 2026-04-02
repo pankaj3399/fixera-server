@@ -38,6 +38,18 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
         msg: 'Access denied. User not found.' 
       });
     }
+    if (user.deletedAt) {
+      return res.status(403).json({
+        success: false,
+        msg: 'This account has been deleted.'
+      });
+    }
+    if (user.accountStatus === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        msg: 'This account is suspended.'
+      });
+    }
 
     // 7. Attach user to request object
     req.user = user;
@@ -114,6 +126,18 @@ export const authMiddleware = (allowedRoles: string[]) => {
         return res.status(401).json({
           success: false,
           message: 'Access denied. User not found.'
+        });
+      }
+      if (user.deletedAt) {
+        return res.status(403).json({
+          success: false,
+          message: 'This account has been deleted.'
+        });
+      }
+      if (user.accountStatus === 'suspended') {
+        return res.status(403).json({
+          success: false,
+          message: 'This account is suspended.'
         });
       }
 

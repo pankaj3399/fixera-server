@@ -30,6 +30,7 @@ export interface IWarrantyClaim extends Document {
   openedAt: Date;
   proposal?: {
     message: string;
+    resolveByDate?: Date;
     proposedScheduleAt?: Date;
     proposedBy: Types.ObjectId;
     proposedAt: Date;
@@ -46,6 +47,7 @@ export interface IWarrantyClaim extends Document {
   };
   resolution?: {
     summary: string;
+    attachments?: string[];
     resolvedAt: Date;
     resolvedBy: Types.ObjectId;
     customerConfirmedAt?: Date;
@@ -133,6 +135,7 @@ const WarrantyClaimSchema = new Schema<IWarrantyClaim>(
     },
     proposal: {
       message: { type: String, maxlength: 3000 },
+      resolveByDate: { type: Date },
       proposedScheduleAt: { type: Date },
       proposedBy: { type: Schema.Types.ObjectId, ref: "User" },
       proposedAt: { type: Date },
@@ -149,6 +152,7 @@ const WarrantyClaimSchema = new Schema<IWarrantyClaim>(
     },
     resolution: {
       summary: { type: String, maxlength: 3000 },
+      attachments: [{ type: String }],
       resolvedAt: { type: Date },
       resolvedBy: { type: Schema.Types.ObjectId, ref: "User" },
       customerConfirmedAt: { type: Date },

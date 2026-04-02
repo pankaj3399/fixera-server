@@ -22,7 +22,11 @@ import {
   getPointsAnalytics,
   getProfessionalLevelConfig,
   updateProfessionalLevelConfig,
-  recalculateProfessionalLevels
+  recalculateProfessionalLevels,
+  listProfessionalManagement,
+  updateProfessionalManagement,
+  listCustomerManagement,
+  updateCustomerManagement
 } from "../../handlers/Admin/loyaltyManagement";
 import {
   getAllServiceConfigurations,
@@ -59,6 +63,10 @@ const adminRouter = Router();
 // All admin routes require authentication and admin role
 adminRouter.use(requireAdmin);
 
+// Professional management routes (must be before :professionalId param routes)
+adminRouter.route('/professionals/manage').get(listProfessionalManagement);
+adminRouter.route('/professionals/manage/:professionalId').patch(updateProfessionalManagement);
+
 // Professional approval routes
 adminRouter.route('/professionals').get(getPendingProfessionals);
 adminRouter.route('/professionals/:professionalId').get(getProfessionalDetails);
@@ -83,6 +91,8 @@ adminRouter.route('/points/adjust').post(adjustUserPoints);
 // Professional level management routes
 adminRouter.route('/professional-levels/config').get(getProfessionalLevelConfig).put(updateProfessionalLevelConfig);
 adminRouter.route('/professional-levels/recalculate').post(recalculateProfessionalLevels);
+adminRouter.route('/customers/manage').get(listCustomerManagement);
+adminRouter.route('/customers/manage/:customerId').patch(updateCustomerManagement);
 
 // Referral system management routes
 adminRouter.route('/referral/config').get(getReferralConfig);

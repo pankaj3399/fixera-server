@@ -4,6 +4,7 @@ import LoyaltyConfig from "../../models/loyaltyConfig";
 import PointsConfig from "../../models/pointsConfig";
 import PointTransaction from "../../models/pointTransaction";
 import ProfessionalLevelConfig from "../../models/professionalLevelConfig";
+import Payment from "../../models/payment";
 import { calculateLoyaltyStatus } from "../../utils/loyaltySystem";
 import { addPoints, deductPoints } from "../../utils/pointsSystem";
 import { updateProfessionalLevel } from "../../utils/professionalLevelSystem";
@@ -230,7 +231,7 @@ export const updatePointsConfig = async (req: Request, res: Response, next: Next
     const userId = (req as any).admin?._id;
     if (!userId) return res.status(401).json({ success: false, msg: "Authentication required" });
 
-    const { isEnabled, conversionRate, expiryMonths, minRedemptionPoints } = req.body;
+    const { isEnabled, conversionRate, expiryMonths, minRedemptionPoints, professionalEarningPerBooking, customerEarningPerBooking } = req.body;
 
     // Validate fields
     if (isEnabled !== undefined && typeof isEnabled !== 'boolean') {
@@ -251,6 +252,16 @@ export const updatePointsConfig = async (req: Request, res: Response, next: Next
         return res.status(400).json({ success: false, msg: "minRedemptionPoints must be a non-negative integer" });
       }
     }
+    if (professionalEarningPerBooking !== undefined) {
+      if (typeof professionalEarningPerBooking !== 'number' || !Number.isInteger(professionalEarningPerBooking) || professionalEarningPerBooking < 0) {
+        return res.status(400).json({ success: false, msg: "professionalEarningPerBooking must be a non-negative integer" });
+      }
+    }
+    if (customerEarningPerBooking !== undefined) {
+      if (typeof customerEarningPerBooking !== 'number' || !Number.isInteger(customerEarningPerBooking) || customerEarningPerBooking < 0) {
+        return res.status(400).json({ success: false, msg: "customerEarningPerBooking must be a non-negative integer" });
+      }
+    }
 
     const config = await PointsConfig.getCurrentConfig();
 
@@ -258,6 +269,8 @@ export const updatePointsConfig = async (req: Request, res: Response, next: Next
     if (conversionRate !== undefined) config.conversionRate = conversionRate;
     if (expiryMonths !== undefined) config.expiryMonths = expiryMonths;
     if (minRedemptionPoints !== undefined) config.minRedemptionPoints = minRedemptionPoints;
+    if (professionalEarningPerBooking !== undefined) config.professionalEarningPerBooking = professionalEarningPerBooking;
+    if (customerEarningPerBooking !== undefined) config.customerEarningPerBooking = customerEarningPerBooking;
     config.lastModifiedBy = userId;
     config.lastModified = new Date();
 
@@ -444,5 +457,247 @@ export const recalculateProfessionalLevels = async (req: Request, res: Response,
   } catch (error: any) {
     console.error('Recalculate professional levels error:', error);
     return res.status(500).json({ success: false, msg: "Failed to recalculate professional levels" });
+  }
+};
+
+const parseCsv = (value: unknown): string[] =>
+  typeof value === "string"
+    ? value.split(",").map((item) => item.trim()).filter(Boolean)
+    : [];
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export const listProfessionalManagement = async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(Number.parseInt(String(req.query.page || "1"), 10) || 1, 1);
+    const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || "20"), 10) || 20, 1), 100);
+    const skip = (page - 1) * limit;
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const country = typeof req.query.country === "string" ? req.query.country.trim() : "";
+    const levels = parseCsv(req.query.levels);
+    const tags = parseCsv(req.query.tags);
+    const statuses = parseCsv(req.query.statuses);
+
+    const query: Record<string, any> = { role: "professional", deletedAt: { $exists: false } };
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      query.$or = [
+        { name: regex },
+        { email: regex },
+        { "businessInfo.companyName": regex }
+      ];
+    }
+    if (country) query["businessInfo.country"] = country;
+    if (levels.length > 0) query.professionalLevel = { $in: levels };
+    if (tags.length > 0) query.adminTags = { $in: tags };
+    if (statuses.length > 0) query.accountStatus = { $in: statuses };
+
+    const [professionals, total] = await Promise.all([
+      User.find(query)
+        .select("name email phone professionalStatus accountStatus professionalLevel manualProfessionalLevelOverride points adminTags businessInfo createdAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      User.countDocuments(query)
+    ]);
+
+    const professionalIds = professionals.map((item: any) => item._id);
+    const earnings = await Payment.aggregate([
+      { $match: { professional: { $in: professionalIds }, status: { $in: ["completed", "authorized"] } } },
+      { $group: { _id: "$professional", moneyEarned: { $sum: { $ifNull: ["$professionalPayout", "$amount"] } } } }
+    ]);
+    const earningsMap = new Map(earnings.map((item) => [String(item._id), item.moneyEarned || 0]));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        professionals: professionals.map((item: any) => ({
+          ...item,
+          moneyEarned: earningsMap.get(String(item._id)) || 0
+        })),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit)
+        }
+      }
+    });
+  } catch (error: any) {
+    console.error("List professional management error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load professionals" });
+  }
+};
+
+export const updateProfessionalManagement = async (req: Request, res: Response) => {
+  try {
+    const adminId = (req as any).admin?._id;
+    const { professionalId } = req.params;
+    const {
+      professionalLevel,
+      tags,
+      action,
+      reason
+    } = req.body as {
+      professionalLevel?: string;
+      tags?: string[];
+      action?: "suspend" | "reactivate";
+      reason?: string;
+    };
+
+    const professional = await User.findOne({ _id: professionalId, role: "professional" });
+    if (!professional) {
+      return res.status(404).json({ success: false, msg: "Professional not found" });
+    }
+
+    if (professionalLevel) {
+      professional.manualProfessionalLevelOverride = professionalLevel as any;
+      professional.professionalLevel = professionalLevel as any;
+    }
+    if (Array.isArray(tags)) {
+      professional.adminTags = Array.from(new Set(tags.map((tag) => String(tag).trim()).filter(Boolean))).slice(0, 10);
+    }
+    if (action === "suspend") {
+      professional.accountStatus = "suspended";
+      professional.professionalStatus = "suspended";
+      if (reason?.trim()) professional.rejectionReason = reason.trim();
+    }
+    if (action === "reactivate") {
+      professional.accountStatus = "active";
+      if (professional.professionalStatus === "suspended") professional.professionalStatus = "approved";
+    }
+
+    await professional.save();
+
+    return res.status(200).json({
+      success: true,
+      msg: "Professional updated",
+      data: {
+        professional: {
+          _id: professional._id,
+          professionalLevel: professional.professionalLevel,
+          manualProfessionalLevelOverride: professional.manualProfessionalLevelOverride,
+          adminTags: professional.adminTags || [],
+          accountStatus: professional.accountStatus || "active"
+        },
+        updatedBy: adminId
+      }
+    });
+  } catch (error: any) {
+    console.error("Update professional management error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to update professional" });
+  }
+};
+
+export const listCustomerManagement = async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(Number.parseInt(String(req.query.page || "1"), 10) || 1, 1);
+    const limit = Math.min(Math.max(Number.parseInt(String(req.query.limit || "20"), 10) || 20, 1), 100);
+    const skip = (page - 1) * limit;
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const country = typeof req.query.country === "string" ? req.query.country.trim() : "";
+    const levels = parseCsv(req.query.levels);
+    const statuses = parseCsv(req.query.statuses);
+
+    const query: Record<string, any> = { role: "customer", deletedAt: { $exists: false } };
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      query.$or = [
+        { name: regex },
+        { email: regex },
+        { businessName: regex }
+      ];
+    }
+    if (country) {
+      query.$or = [...(query.$or || []), { "location.country": country }, { "companyAddress.country": country }];
+    }
+    if (levels.length > 0) query.loyaltyLevel = { $in: levels };
+    if (statuses.length > 0) query.accountStatus = { $in: statuses };
+
+    const [customers, total] = await Promise.all([
+      User.find(query)
+        .select("name email phone customerType businessName location companyAddress loyaltyLevel manualCustomerLevelOverride points totalSpent totalBookings accountStatus createdAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      User.countDocuments(query)
+    ]);
+
+    const customerIds = customers.map((item: any) => item._id);
+    const spendAgg = await Payment.aggregate([
+      { $match: { customer: { $in: customerIds }, status: { $in: ["completed", "authorized"] } } },
+      { $group: { _id: "$customer", moneySpent: { $sum: "$amount" } } }
+    ]);
+    const spendMap = new Map(spendAgg.map((item) => [String(item._id), item.moneySpent || 0]));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        customers: customers.map((item: any) => ({
+          ...item,
+          moneySpent: spendMap.get(String(item._id)) || item.totalSpent || 0
+        })),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit)
+        }
+      }
+    });
+  } catch (error: any) {
+    console.error("List customer management error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load customers" });
+  }
+};
+
+export const updateCustomerManagement = async (req: Request, res: Response) => {
+  try {
+    const adminId = (req as any).admin?._id;
+    const { customerId } = req.params;
+    const {
+      loyaltyLevel,
+      action
+    } = req.body as {
+      loyaltyLevel?: string;
+      action?: "suspend" | "reactivate" | "delete";
+    };
+
+    const customer = await User.findOne({ _id: customerId, role: "customer" });
+    if (!customer) {
+      return res.status(404).json({ success: false, msg: "Customer not found" });
+    }
+
+    if (loyaltyLevel) {
+      customer.manualCustomerLevelOverride = loyaltyLevel as any;
+      customer.loyaltyLevel = loyaltyLevel as any;
+    }
+    if (action === "suspend") customer.accountStatus = "suspended";
+    if (action === "reactivate") customer.accountStatus = "active";
+    if (action === "delete") {
+      customer.deletedAt = new Date();
+      customer.deletedBy = adminId;
+    }
+
+    await customer.save();
+
+    return res.status(200).json({
+      success: true,
+      msg: "Customer updated",
+      data: {
+        customer: {
+          _id: customer._id,
+          loyaltyLevel: customer.loyaltyLevel,
+          manualCustomerLevelOverride: customer.manualCustomerLevelOverride,
+          accountStatus: customer.accountStatus || "active",
+          deletedAt: customer.deletedAt || null
+        }
+      }
+    });
+  } catch (error: any) {
+    console.error("Update customer management error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to update customer" });
   }
 };

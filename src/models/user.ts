@@ -116,6 +116,7 @@ export interface IUser extends Document {
     professionalOnboardingCompletedAt?: Date;
     // Loyalty system fields
     loyaltyLevel?: 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
+    manualCustomerLevelOverride?: 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
     totalSpent?: number;
     totalBookings?: number;
     lastLoyaltyUpdate?: Date;
@@ -124,6 +125,11 @@ export interface IUser extends Document {
     pointsExpiry?: Date;
     // Professional level
     professionalLevel?: 'New' | 'Level 1' | 'Level 2' | 'Level 3' | 'Expert';
+    manualProfessionalLevelOverride?: 'New' | 'Level 1' | 'Level 2' | 'Level 3' | 'Expert';
+    adminTags?: string[];
+    accountStatus?: 'active' | 'suspended';
+    deletedAt?: Date;
+    deletedBy?: Types.ObjectId;
     // Referral system fields
     referralCode?: string;
     referredBy?: Types.ObjectId;
@@ -421,6 +427,11 @@ const UserSchema = new Schema({
         enum: ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'],
         default: 'Bronze'
     },
+    manualCustomerLevelOverride: {
+        type: String,
+        enum: ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'],
+        required: false
+    },
     totalSpent: {
         type: Number,
         default: 0,
@@ -450,6 +461,30 @@ const UserSchema = new Schema({
         type: String,
         enum: ['New', 'Level 1', 'Level 2', 'Level 3', 'Expert'],
         default: 'New'
+    },
+    manualProfessionalLevelOverride: {
+        type: String,
+        enum: ['New', 'Level 1', 'Level 2', 'Level 3', 'Expert'],
+        required: false
+    },
+    adminTags: [{
+        type: String,
+        trim: true,
+        maxlength: 40
+    }],
+    accountStatus: {
+        type: String,
+        enum: ['active', 'suspended'],
+        default: 'active'
+    },
+    deletedAt: {
+        type: Date,
+        required: false
+    },
+    deletedBy: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+        required: false
     },
     // Referral system fields
     referralCode: {
@@ -622,6 +657,7 @@ UserSchema.pre("save", function (next) {
         this.set("totalSpent", undefined);
         this.set("totalBookings", undefined);
         this.set("lastLoyaltyUpdate", undefined);
+        this.set("manualCustomerLevelOverride", undefined);
         this.set("points", undefined);
         this.set("pointsExpiry", undefined);
 
@@ -633,6 +669,8 @@ UserSchema.pre("save", function (next) {
 
         this.set("profileCompletedAt", undefined);
         this.set("professionalOnboardingCompletedAt", undefined);
+        this.set("manualProfessionalLevelOverride", undefined);
+        this.set("adminTags", undefined);
     }
     next();
 });
@@ -641,6 +679,10 @@ UserSchema.index({ role: 1, professionalStatus: 1 });
 UserSchema.index({ role: 1 });
 UserSchema.index({ role: 1, points: 1 });
 UserSchema.index({ role: 1, totalSpent: -1 });
+UserSchema.index({ role: 1, loyaltyLevel: 1 });
+UserSchema.index({ role: 1, professionalLevel: 1 });
+UserSchema.index({ role: 1, accountStatus: 1 });
+UserSchema.index({ role: 1, adminTags: 1 });
 UserSchema.index({ 'employee.companyId': 1 });
 UserSchema.index({ email: 1 });
 UserSchema.index({ phone: 1 });

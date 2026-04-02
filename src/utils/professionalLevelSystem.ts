@@ -134,7 +134,10 @@ export const calculateProfessionalLevel = async (
   professionalId: mongoose.Types.ObjectId | string,
   opts?: { session?: mongoose.ClientSession }
 ): Promise<ProfessionalLevelInfo> => {
-  const config = await ProfessionalLevelConfig.getCurrentConfig();
+  const [config, professional] = await Promise.all([
+    ProfessionalLevelConfig.getCurrentConfig(),
+    User.findById(professionalId).select("manualProfessionalLevelOverride").lean()
+  ]);
   const metrics = await getProfessionalMetrics(professionalId, opts);
   const activeLevels = config.levels.filter(l => l.isActive).sort((a, b) => a.order - b.order);
 
@@ -164,12 +167,17 @@ export const calculateProfessionalLevel = async (
     }
   }
 
-  const currentLevel = activeLevels[currentLevelIndex];
+  const derivedLevel = activeLevels[currentLevelIndex];
+  const currentLevel =
+    professional?.manualProfessionalLevelOverride
+      ? activeLevels.find((level) => level.name === professional.manualProfessionalLevelOverride) || derivedLevel
+      : derivedLevel;
 
   // Next level info
   let nextLevel: ProfessionalLevelInfo['nextLevel'] = undefined;
-  if (currentLevelIndex < activeLevels.length - 1) {
-    const next = activeLevels[currentLevelIndex + 1];
+  const currentLevelOverrideIndex = activeLevels.findIndex((level) => level.name === currentLevel.name);
+  if (currentLevelOverrideIndex < activeLevels.length - 1) {
+    const next = activeLevels[currentLevelOverrideIndex + 1];
     const nc = next.criteria;
 
     const missingCriteria: string[] = [];
@@ -236,6 +244,17 @@ export const updateProfessionalLevel = async (
   }
 
   const oldLevel = user.professionalLevel || 'New';
+  if (user.manualProfessionalLevelOverride) {
+    if (oldLevel !== user.manualProfessionalLevelOverride) {
+      user.professionalLevel = user.manualProfessionalLevelOverride;
+      await user.save(opts?.session ? { session: opts.session } : {});
+    }
+    return {
+      levelChanged: oldLevel !== user.manualProfessionalLevelOverride,
+      oldLevel,
+      newLevel: user.manualProfessionalLevelOverride
+    };
+  }
   const levelInfo = await calculateProfessionalLevel(professionalId, opts);
 
   if (oldLevel !== levelInfo.currentLevel) {

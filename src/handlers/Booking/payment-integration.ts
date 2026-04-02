@@ -9,6 +9,8 @@ import Project from '../../models/project';
 import { createPaymentIntent, captureAndTransferPayment } from '../Stripe/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
+import { addPoints } from '../../utils/pointsSystem';
+import PointsConfig from '../../models/pointsConfig';
 import {
   addWarrantyDuration,
   getBookingWarrantyDuration,
@@ -302,12 +304,29 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         }
 
         // Update professional's level after booking completion
+        const proId = booking.professional
+          || (booking.project ? (await Project.findById(booking.project).select('professionalId'))?.professionalId : undefined);
         try {
-          const proId = booking.professional
-            || (booking.project ? (await Project.findById(booking.project).select('professionalId'))?.professionalId : undefined);
           if (proId) await updateProfessionalLevel(proId);
         } catch (e) {
           console.error('Error updating professional level:', e);
+        }
+
+        // Award points to professional and customer for booking completion
+        try {
+          const pointsConfig = await PointsConfig.getCurrentConfig();
+          if (pointsConfig.isEnabled) {
+            if (proId && pointsConfig.professionalEarningPerBooking > 0) {
+              await addPoints(proId, pointsConfig.professionalEarningPerBooking, 'booking_completion',
+                `Earned for completing booking`, { relatedBooking: booking._id });
+            }
+            if (booking.customer && pointsConfig.customerEarningPerBooking > 0) {
+              await addPoints(booking.customer, pointsConfig.customerEarningPerBooking, 'booking_completion',
+                `Earned for completed booking`, { relatedBooking: booking._id });
+            }
+          }
+        } catch (e) {
+          console.error('Error awarding booking completion points:', e);
         }
 
         return res.json({
@@ -344,12 +363,29 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         }
 
         // Update professional's level after booking completion
+        const proId2 = booking.professional
+          || (booking.project ? (await Project.findById(booking.project).select('professionalId'))?.professionalId : undefined);
         try {
-          const proId = booking.professional
-            || (booking.project ? (await Project.findById(booking.project).select('professionalId'))?.professionalId : undefined);
-          if (proId) await updateProfessionalLevel(proId);
+          if (proId2) await updateProfessionalLevel(proId2);
         } catch (e) {
           console.error('Error updating professional level:', e);
+        }
+
+        // Award points to professional and customer for booking completion
+        try {
+          const pointsConfig = await PointsConfig.getCurrentConfig();
+          if (pointsConfig.isEnabled) {
+            if (proId2 && pointsConfig.professionalEarningPerBooking > 0) {
+              await addPoints(proId2, pointsConfig.professionalEarningPerBooking, 'booking_completion',
+                `Earned for completing booking`, { relatedBooking: booking._id });
+            }
+            if (booking.customer && pointsConfig.customerEarningPerBooking > 0) {
+              await addPoints(booking.customer, pointsConfig.customerEarningPerBooking, 'booking_completion',
+                `Earned for completed booking`, { relatedBooking: booking._id });
+            }
+          }
+        } catch (e) {
+          console.error('Error awarding booking completion points:', e);
         }
 
         return res.json({

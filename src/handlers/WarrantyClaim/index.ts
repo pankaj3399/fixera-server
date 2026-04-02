@@ -49,6 +49,14 @@ const presignClaim = async (claim: any) => {
     );
     obj.evidence = results;
   }
+  if (Array.isArray(obj.resolution?.attachments) && obj.resolution.attachments.length > 0) {
+    obj.resolution.attachments = await Promise.all(
+      obj.resolution.attachments.map(async (url: string) => {
+        const signed = await presignS3Url(url);
+        return signed ?? url;
+      })
+    );
+  }
   return obj;
 };
 
@@ -703,15 +711,20 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, msg: "Only professionals can submit claim proposals" });
     }
     const { claimId } = req.params;
-    const { message, proposedScheduleAt } = req.body as {
+    const { message, proposedScheduleAt, resolveByDate } = req.body as {
       message?: string;
       proposedScheduleAt?: string;
+      resolveByDate?: string;
     };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
     if (!message || message.trim().length < 5) {
       return res.status(400).json({ success: false, msg: "Proposal message is required" });
+    }
+    const parsedResolveByDate = resolveByDate ? new Date(resolveByDate) : proposedScheduleAt ? new Date(proposedScheduleAt) : null;
+    if (!parsedResolveByDate || Number.isNaN(parsedResolveByDate.getTime())) {
+      return res.status(400).json({ success: false, msg: "Resolve date is required" });
     }
 
     const claim = await WarrantyClaim.findById(claimId);
@@ -731,7 +744,8 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
     claim.proposal = {
       ...claim.proposal,
       message: message.trim(),
-      proposedScheduleAt: proposedScheduleAt ? new Date(proposedScheduleAt) : undefined,
+      resolveByDate: parsedResolveByDate,
+      proposedScheduleAt: parsedResolveByDate,
       proposedBy: toObjectId(userId),
       proposedAt: new Date(),
       customerDecision: undefined,
@@ -743,7 +757,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       status: "proposal_sent",
       timestamp: new Date(),
       updatedBy: toObjectId(userId),
-      note: "Professional submitted warranty proposal",
+      note: "Professional submitted warranty resolve proposal",
     });
     await claim.save();
 
@@ -751,12 +765,12 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
-      text: `Warranty claim ${claim.claimNumber}: professional submitted a proposal.`,
+      text: `Warranty claim ${claim.claimNumber}: professional submitted a resolve proposal for ${parsedResolveByDate.toLocaleDateString()}.`,
     });
 
     return res.status(200).json({
       success: true,
-      msg: "Proposal submitted",
+      msg: "Resolve proposal submitted",
       claim,
     });
   } catch (error: any) {
@@ -914,7 +928,7 @@ export const markWarrantyResolved = async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, msg: "Only professionals can mark claims as resolved" });
     }
     const { claimId } = req.params;
-    const { summary } = req.body as { summary?: string };
+    const { summary, attachments } = req.body as { summary?: string; attachments?: string[] };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
@@ -938,6 +952,7 @@ export const markWarrantyResolved = async (req: Request, res: Response) => {
     const autoCloseDays = claim.sla?.customerAutoCloseDays || CUSTOMER_AUTO_CLOSE_DAYS;
     claim.resolution = {
       summary: summary.trim(),
+      attachments: Array.isArray(attachments) ? attachments.filter(isAllowedS3Url).slice(0, 10) : [],
       resolvedAt,
       resolvedBy: toObjectId(userId),
     };
@@ -1046,11 +1061,15 @@ export const escalateWarrantyClaim = async (req: Request, res: Response) => {
     const claim = await WarrantyClaim.findById(claimId);
     if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
 
-    const userIsParticipant =
-      claim.customer.toString() === userId ||
-      claim.professional.toString() === userId ||
-      isAdmin(req);
-    if (!userIsParticipant) {
+    const role = getUserRole(req);
+    const customerCanEscalateResolved =
+      role === "customer" &&
+      claim.customer.toString() === userId &&
+      claim.status === "resolved";
+    const professionalCanEscalate =
+      role === "professional" &&
+      claim.professional.toString() === userId;
+    if (!isAdmin(req) && !professionalCanEscalate && !customerCanEscalateResolved) {
       return res.status(403).json({ success: false, msg: "Not authorized for this claim" });
     }
     if (claim.status === "closed") {
@@ -1243,8 +1262,20 @@ export const getAdminWarrantyAnalytics = async (req: Request, res: Response) => 
       },
       {
         $project: {
+          resolutionMs: {
+            $subtract: ["$resolution.resolvedAt", "$createdAt"],
+          },
+        },
+      },
+      {
+        $match: {
+          resolutionMs: { $gte: 0 },
+        },
+      },
+      {
+        $project: {
           resolutionHours: {
-            $divide: [{ $subtract: ["$resolution.resolvedAt", "$createdAt"] }, 1000 * 60 * 60],
+            $divide: ["$resolutionMs", 1000 * 60 * 60],
           },
         },
       },

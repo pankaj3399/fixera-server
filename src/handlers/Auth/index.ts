@@ -385,6 +385,18 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
         msg: "Invalid email or password"
       });
     }
+    if (userExists.deletedAt) {
+      return res.status(403).json({
+        success: false,
+        msg: "This account has been deleted"
+      });
+    }
+    if (userExists.accountStatus === 'suspended') {
+      return res.status(403).json({
+        success: false,
+        msg: "This account is suspended"
+      });
+    }
 
     // Compare password
     const checkPassword = await bcrypt.compare(password, userExists.password!);
@@ -567,6 +579,14 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       referredBy: user.referredBy,
       points: user.points || 0,
       pointsExpiry: user.pointsExpiry,
+      loyaltyLevel: user.loyaltyLevel,
+      manualCustomerLevelOverride: user.manualCustomerLevelOverride,
+      totalSpent: user.totalSpent || 0,
+      totalBookings: user.totalBookings || 0,
+      professionalLevel: user.professionalLevel,
+      manualProfessionalLevelOverride: user.manualProfessionalLevelOverride,
+      adminTags: user.adminTags || [],
+      accountStatus: user.accountStatus || 'active',
       totalReferrals: user.totalReferrals || 0,
       completedReferrals: user.completedReferrals || 0,
       createdAt: user.createdAt,
