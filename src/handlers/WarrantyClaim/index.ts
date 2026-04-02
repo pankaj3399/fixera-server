@@ -846,8 +846,8 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
     if (parsedProposedScheduleAt && Number.isNaN(parsedProposedScheduleAt.getTime())) {
       return res.status(400).json({ success: false, msg: "Proposed schedule date is invalid" });
     }
-    if (parsedProposedScheduleAt && parsedProposedScheduleAt.getTime() < now) {
-      return res.status(400).json({ success: false, msg: "Proposed schedule date cannot be in the past" });
+    if (parsedProposedScheduleAt && parsedProposedScheduleAt.getTime() <= now) {
+      return res.status(400).json({ success: false, msg: "Proposed schedule date must be in the future" });
     }
 
     const claim = await WarrantyClaim.findById(claimId);
@@ -888,7 +888,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
-      text: `Warranty claim ${claim.claimNumber}: professional submitted a resolve proposal for ${parsedResolveByDate.toLocaleDateString()}.`,
+      text: `Warranty claim ${claim.claimNumber}: professional submitted a resolve proposal for ${new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(parsedResolveByDate)}.`,
     });
 
     return res.status(200).json({

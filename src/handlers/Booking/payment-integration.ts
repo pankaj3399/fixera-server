@@ -130,7 +130,10 @@ const refundCapturedBookingOnConflict = async (
   if (!booking) {
     return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found for compensating refund' } };
   }
-  if (!booking.payment?.stripePaymentIntentId || booking.payment.status !== 'completed') {
+  if (
+    !booking.payment?.stripePaymentIntentId ||
+    !['captured', 'completed'].includes(String(booking.payment.status))
+  ) {
     return { success: false, error: { code: 'INVALID_STATUS', message: 'Captured booking payment is not refundable in current state' } };
   }
 
@@ -141,7 +144,7 @@ const refundCapturedBookingOnConflict = async (
     idempotencyKey: generateIdempotencyKey({
       bookingId: booking._id.toString(),
       operation: 'refund',
-      timestamp: Date.now(),
+      version: `conflict-${booking.payment.stripePaymentIntentId}`,
     })
   });
 

@@ -274,6 +274,7 @@ export const rejectProfessional = async (req: Request, res: Response, next: Next
 
     // Update professional status
     professional.professionalStatus = 'rejected';
+    professional.accountStatus = 'rejected';
     professional.rejectionReason = reason.trim();
     professional.suspensionReason = undefined;
     professional.approvedBy = undefined;

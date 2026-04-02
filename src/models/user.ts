@@ -129,7 +129,7 @@ export interface IUser extends Document {
     professionalLevel?: 'New' | 'Level 1' | 'Level 2' | 'Level 3' | 'Expert';
     manualProfessionalLevelOverride?: 'New' | 'Level 1' | 'Level 2' | 'Level 3' | 'Expert';
     adminTags?: string[];
-    accountStatus?: 'active' | 'suspended';
+    accountStatus?: 'active' | 'suspended' | 'rejected';
     deletedAt?: Date;
     deletedBy?: Types.ObjectId;
     // Referral system fields
@@ -492,7 +492,7 @@ const UserSchema = new Schema({
     },
     accountStatus: {
         type: String,
-        enum: ['active', 'suspended'],
+        enum: ['active', 'suspended', 'rejected'],
         default: 'active'
     },
     deletedAt: {

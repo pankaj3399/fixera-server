@@ -149,7 +149,8 @@ export const recalculateCustomerTiers = async (req: Request, res: Response, next
         const loyaltyStatus = await calculateLoyaltyStatus(totalSpent);
 
         const VALID_LEVELS = new Set(['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']);
-        customer.loyaltyLevel = (VALID_LEVELS.has(loyaltyStatus.level) ? loyaltyStatus.level : 'Bronze') as any;
+        const computedLevel = (VALID_LEVELS.has(loyaltyStatus.level) ? loyaltyStatus.level : 'Bronze') as any;
+        customer.loyaltyLevel = customer.manualCustomerLevelOverride || computedLevel;
         customer.lastLoyaltyUpdate = new Date();
 
         await customer.save();
@@ -531,8 +532,8 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
 
     const professionalIds = professionals.map((item: any) => item._id);
     const earnings = await Payment.aggregate([
-      { $match: { professional: { $in: professionalIds }, status: { $in: ["completed", "authorized"] } } },
-      { $group: { _id: "$professional", moneyEarned: { $sum: { $ifNull: ["$professionalPayout", "$amount"] } } } }
+      { $match: { professional: { $in: professionalIds }, status: "completed" } },
+      { $group: { _id: "$professional", moneyEarned: { $sum: { $ifNull: ["$professionalPayout", 0] } } } }
     ]);
     const earningsMap = new Map(earnings.map((item) => [String(item._id), item.moneyEarned || 0]));
 
@@ -678,7 +679,7 @@ export const listCustomerManagement = async (req: Request, res: Response) => {
 
     const customerIds = customers.map((item: any) => item._id);
     const spendAgg = await Payment.aggregate([
-      { $match: { customer: { $in: customerIds }, status: { $in: ["completed", "authorized"] } } },
+      { $match: { customer: { $in: customerIds }, status: "completed" } },
       { $group: { _id: "$customer", moneySpent: { $sum: "$amount" } } }
     ]);
     const spendMap = new Map(spendAgg.map((item) => [String(item._id), item.moneySpent || 0]));
