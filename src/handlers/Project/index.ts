@@ -46,6 +46,27 @@ const toBlockedRange = (range?: {
   };
 };
 
+const serializePublicProject = (project: any) => {
+  const projectObject =
+    typeof project?.toObject === "function" ? project.toObject() : project;
+
+  if (
+    !projectObject ||
+    !projectObject.professionalId ||
+    typeof projectObject.professionalId !== "object"
+  ) {
+    return projectObject;
+  }
+
+  const { email: _email, phone: _phone, ...publicProfessional } =
+    projectObject.professionalId;
+
+  return {
+    ...projectObject,
+    professionalId: publicProfessional,
+  };
+};
+
 const getDateRange = (start?: string, end?: string, fallbackDays = 180) => {
   const rangeStart = start ? new Date(start) : new Date();
   const rangeEnd = end ? new Date(end) : new Date(rangeStart);
@@ -356,7 +377,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     const project = await Project.findOne({
       _id: id,
       status: "published",
-    }).populate('professionalId', 'name businessInfo.companyName businessInfo.timezone email phone companyAvailability companyBlockedRanges');
+    }).populate('professionalId', 'name businessInfo.companyName businessInfo.timezone companyAvailability companyBlockedRanges');
 
     if (!project) {
       return res.status(404).json({
@@ -367,7 +388,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
 
     res.json({
       success: true,
-      project
+      project: serializePublicProject(project)
     });
   } catch (error) {
     console.error('Error fetching published project:', error);

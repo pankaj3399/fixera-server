@@ -51,6 +51,7 @@ import {
   updatePlatformSettings,
 } from "../../handlers/Admin/platformSettings";
 import {
+  getAdminReviews,
   hideReview,
   unhideReview,
   getHiddenReviews,
@@ -114,6 +115,7 @@ adminRouter.route('/payments').get(getPayments);
 adminRouter.route('/payments/:paymentId/capture').post(capturePayment);
 
 // Review moderation routes
+adminRouter.route('/reviews').get(getAdminReviews);
 adminRouter.route('/reviews/hidden').get(getHiddenReviews);
 adminRouter.route('/reviews/:bookingId/hide').put(hideReview);
 adminRouter.route('/reviews/:bookingId/unhide').put(unhideReview);
