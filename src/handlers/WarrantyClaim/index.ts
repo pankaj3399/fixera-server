@@ -213,6 +213,10 @@ const ensureWarrantyChatContext = async ({
     ]);
 
     const senderId = actorId || SYSTEM_USER_ID;
+    if (claimId && !claimNumber) {
+      throw new Error("Warranty notification requires claimNumber when claimId is provided");
+    }
+
     await ChatMessage.create(
       [
         {
@@ -225,7 +229,7 @@ const ensureWarrantyChatContext = async ({
             ? {
                 warrantyMeta: {
                   claimId: claimId.toString(),
-                  claimNumber: claimNumber || "Warranty claim",
+                  claimNumber,
                   ...(bookingId ? { bookingId: bookingId.toString() } : {}),
                   ...(status ? { status } : {}),
                 },
