@@ -13,7 +13,7 @@ export interface IChatAttachment {
   fileSize?: number;
 }
 
-export type ChatMessageType = "text" | "review_notification";
+export type ChatMessageType = "text" | "review_notification" | "warranty_notification";
 
 export interface IReviewNotificationMeta {
   bookingId: string;
@@ -23,6 +23,13 @@ export interface IReviewNotificationMeta {
   qualityOfService: number;
   comment?: string;
   customerName: string;
+}
+
+export interface IWarrantyNotificationMeta {
+  claimId: string;
+  claimNumber: string;
+  bookingId?: string;
+  status?: string;
 }
 
 export interface IChatMessage extends Document {
@@ -36,6 +43,7 @@ export interface IChatMessage extends Document {
   attachments: IChatAttachment[];
   readBy: IChatMessageReadReceipt[];
   reviewMeta?: IReviewNotificationMeta;
+  warrantyMeta?: IWarrantyNotificationMeta;
   replyTo?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -61,7 +69,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
     },
     messageType: {
       type: String,
-      enum: ["text", "review_notification"],
+      enum: ["text", "review_notification", "warranty_notification"],
       default: "text",
       required: true,
     },
@@ -104,6 +112,12 @@ const ChatMessageSchema = new Schema<IChatMessage>(
       comment: { type: String },
       customerName: { type: String },
     },
+    warrantyMeta: {
+      claimId: { type: String },
+      claimNumber: { type: String },
+      bookingId: { type: String },
+      status: { type: String },
+    },
     readBy: [
       {
         userId: {
@@ -131,7 +145,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
 // document-level operations (create/save). Mongoose update operations
 // (updateOne/findOneAndUpdate) do not invoke this with document context.
 ChatMessageSchema.path("text").validate(function (value: string | undefined) {
-  if (this.messageType === "review_notification") return true;
+  if (this.messageType === "review_notification" || this.messageType === "warranty_notification") return true;
   const hasText = typeof value === "string" && value.trim().length > 0;
   const hasImages = Array.isArray(this.images) && this.images.length > 0;
   const hasAttachments = Array.isArray(this.attachments) && this.attachments.length > 0;

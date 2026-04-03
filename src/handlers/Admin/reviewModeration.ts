@@ -2,6 +2,50 @@ import { Request, Response, NextFunction } from "express";
 import Booking from "../../models/booking";
 import mongoose from "mongoose";
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const buildReviewModerationQuery = ({
+  hidden,
+  search,
+}: {
+  hidden?: boolean;
+  search?: string;
+}) => {
+  const query: Record<string, any> = {
+    status: "completed",
+    "customerReview.communicationLevel": { $exists: true },
+  };
+
+  if (typeof hidden === "boolean") {
+    query["customerReview.isHidden"] = hidden ? true : { $ne: true };
+  }
+
+  if (search) {
+    const safeSearch = escapeRegex(search);
+    query.$or = [
+      { "customerReview.comment": { $regex: safeSearch, $options: "i" } },
+      { bookingNumber: { $regex: safeSearch, $options: "i" } },
+    ];
+  }
+
+  return query;
+};
+
+const getReviewStats = async () => {
+  const [totalReviews, hiddenReviews] = await Promise.all([
+    Booking.countDocuments(buildReviewModerationQuery({})),
+    Booking.countDocuments(buildReviewModerationQuery({ hidden: true })),
+  ]);
+
+  return {
+    total: totalReviews,
+    hidden: hiddenReviews,
+    visible: Math.max(totalReviews - hiddenReviews, 0),
+  };
+};
+
 // Hide a customer review (admin only)
 export const hideReview = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -79,42 +123,103 @@ export const unhideReview = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
-// Get all hidden reviews (admin only)
-export const getHiddenReviews = async (req: Request, res: Response, next: NextFunction) => {
+// Get all moderatable customer reviews (admin only)
+export const getAdminReviews = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { page = "1", limit = "20" } = req.query;
+    const { page = "1", limit = "20", status = "visible", search } = req.query;
 
     const pageNum = Math.max(parseInt(page as string, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit as string, 10) || 20, 1), 50);
     const skip = (pageNum - 1) * limitNum;
 
-    const query = {
-      "customerReview.isHidden": true,
-      "customerReview.communicationLevel": { $exists: true },
-    };
+    let hiddenFilter: boolean | undefined;
+    if (status === "hidden") hiddenFilter = true;
+    if (status === "visible") hiddenFilter = false;
 
-    const [reviews, totalCount] = await Promise.all([
+    const searchTerm = typeof search === "string" ? search.trim() : "";
+    const query = buildReviewModerationQuery({
+      hidden: hiddenFilter,
+      search: searchTerm || undefined,
+    });
+
+    const sortField = hiddenFilter === true ? "customerReview.hiddenAt" : "customerReview.reviewedAt";
+
+    const [reviews, totalCount, stats] = await Promise.all([
       Booking.find(query)
-        .select("customerReview customer professional project createdAt")
+        .select("bookingNumber customerReview customer professional project createdAt")
         .populate("customer", "name profileImage")
         .populate("professional", "name businessInfo profileImage")
         .populate("project", "title")
-        .sort({ "customerReview.hiddenAt": -1 })
+        .sort({ [sortField]: -1, createdAt: -1 })
         .skip(skip)
         .limit(limitNum)
         .lean(),
       Booking.countDocuments(query),
+      getReviewStats(),
     ]);
 
     return res.status(200).json({
       success: true,
       data: {
         reviews,
+        stats,
+        filters: {
+          status,
+          search: searchTerm,
+        },
         pagination: {
           page: pageNum,
           limit: limitNum,
           total: totalCount,
-          totalPages: Math.ceil(totalCount / limitNum),
+          totalPages: Math.max(Math.ceil(totalCount / limitNum), 1),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Get admin reviews error:", error);
+    next(error);
+  }
+};
+
+// Get all hidden reviews (admin only)
+export const getHiddenReviews = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { page = "1", limit = "20", search } = req.query;
+
+    const pageNum = Math.max(parseInt(page as string, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit as string, 10) || 20, 1), 50);
+    const skip = (pageNum - 1) * limitNum;
+    const searchTerm = typeof search === "string" ? search.trim() : "";
+
+    const query = buildReviewModerationQuery({
+      hidden: true,
+      search: searchTerm || undefined,
+    });
+
+    const [reviews, totalCount, stats] = await Promise.all([
+      Booking.find(query)
+        .select("bookingNumber customerReview customer professional project createdAt")
+        .populate("customer", "name profileImage")
+        .populate("professional", "name businessInfo profileImage")
+        .populate("project", "title")
+        .sort({ "customerReview.hiddenAt": -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Booking.countDocuments(query),
+      getReviewStats(),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        reviews,
+        stats,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: totalCount,
+          totalPages: Math.max(Math.ceil(totalCount / limitNum), 1),
         },
       },
     });

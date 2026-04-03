@@ -163,11 +163,19 @@ const ensureWarrantyChatContext = async ({
   professionalId,
   actorId,
   text,
+  claimId,
+  claimNumber,
+  bookingId,
+  status,
 }: {
   customerId: Types.ObjectId;
   professionalId: Types.ObjectId;
   actorId?: Types.ObjectId;
   text: string;
+  claimId?: Types.ObjectId | string;
+  claimNumber?: string;
+  bookingId?: Types.ObjectId | string;
+  status?: string;
 }) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -211,8 +219,18 @@ const ensureWarrantyChatContext = async ({
           conversationId: conversation._id,
           senderId,
           senderRole: "system",
-          messageType: "text",
+          messageType: claimId ? "warranty_notification" : "text",
           text,
+          ...(claimId
+            ? {
+                warrantyMeta: {
+                  claimId: claimId.toString(),
+                  claimNumber: claimNumber || "Warranty claim",
+                  ...(bookingId ? { bookingId: bookingId.toString() } : {}),
+                  ...(status ? { status } : {}),
+                },
+              }
+            : {}),
           readBy: actorId ? [{ userId: actorId, readAt: new Date() }] : [],
         },
       ],
@@ -666,6 +684,10 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       customerId: booking.customer as Types.ObjectId,
       professionalId: professionalId as Types.ObjectId,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber} opened by customer.`,
     });
 
@@ -888,6 +910,10 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber}: professional submitted a resolve proposal for ${new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(parsedResolveByDate)}.`,
     });
 
@@ -946,6 +972,10 @@ export const declineWarrantyClaim = async (req: Request, res: Response) => {
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber} was declined by professional and escalated to admin.`,
     });
 
@@ -1027,6 +1057,10 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text:
         action === "accept"
           ? `Warranty claim ${claim.claimNumber}: customer accepted proposal.`
@@ -1108,6 +1142,10 @@ export const markWarrantyResolved = async (req: Request, res: Response) => {
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber} marked as resolved by professional.`,
     });
 
@@ -1164,6 +1202,10 @@ export const confirmWarrantyResolution = async (req: Request, res: Response) => 
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber} was confirmed and closed by customer.`,
     });
 
@@ -1228,6 +1270,10 @@ export const escalateWarrantyClaim = async (req: Request, res: Response) => {
       customerId: claim.customer,
       professionalId: claim.professional,
       actorId: toObjectId(userId),
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber} escalated to admin.`,
     });
 
@@ -1281,6 +1327,10 @@ export const adminCloseWarrantyClaim = async (req: Request, res: Response) => {
     await ensureWarrantyChatContext({
       customerId: claim.customer,
       professionalId: claim.professional,
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
       text: `Warranty claim ${claim.claimNumber} was closed by admin.`,
     });
 
@@ -1529,6 +1579,10 @@ export const autoEscalateWarrantyClaim = async (
   await ensureWarrantyChatContext({
     customerId: updated.customer,
     professionalId: updated.professional,
+    claimId: updated._id,
+    claimNumber: updated.claimNumber,
+    bookingId: updated.booking,
+    status: updated.status,
     text: `Warranty claim ${updated.claimNumber} was auto-escalated to admin due to missed response SLA.`,
   });
 };
@@ -1571,6 +1625,10 @@ export const autoCloseResolvedWarrantyClaim = async (
   await ensureWarrantyChatContext({
     customerId: updated.customer,
     professionalId: updated.professional,
+    claimId: updated._id,
+    claimNumber: updated.claimNumber,
+    bookingId: updated.booking,
+    status: updated.status,
     text: `Warranty claim ${updated.claimNumber} was auto-closed after customer confirmation deadline.`,
   });
 };
