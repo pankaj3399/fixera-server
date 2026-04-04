@@ -650,7 +650,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     const [bookings, total, distinctServices] = await Promise.all([
       Booking.find(query)
         .populate('customer', 'name email phone customerType')
-        .populate('professional', 'name email businessInfo')
+        .populate('professional', 'name email username businessInfo')
         .populate('project', 'title description pricing category service')
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -693,7 +693,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email businessInfo hourlyRate')
+      .populate('professional', 'name email username businessInfo hourlyRate')
       .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId')
       .populate('assignedTeamMembers', 'name email');
 
@@ -1125,7 +1125,7 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
     const [payments, totalCount, summaryStats] = await Promise.all([
       Payment.find(query)
         .populate('booking', 'status bookingType bookingNumber')
-        .populate('professional', 'name email businessInfo')
+        .populate('professional', 'name email username businessInfo')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber)

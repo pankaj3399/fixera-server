@@ -104,6 +104,7 @@ async function searchProfessionals(
       const searchRegex = new RegExp(query.trim(), "i");
       filter.$or = [
         { name: searchRegex },
+        { username: searchRegex },
         { "businessInfo.companyName": searchRegex },
         { serviceCategories: searchRegex },
       ];
@@ -144,7 +145,7 @@ async function searchProfessionals(
     const [professionals, total] = await Promise.all([
       User.find(filter)
         .select(
-          "name email businessInfo hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
+          "name username email businessInfo hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
         )
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -534,7 +535,7 @@ async function searchProjects(
     const professionalsData = professionalIds.length > 0
       ? await User.find({ _id: { $in: professionalIds } })
         .select(
-          "name email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
+          "name username email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
         )
         .lean()
       : [];
@@ -696,19 +697,18 @@ export const autocomplete = async (req: Request, res: Response) => {
         professionalStatus: "approved",
         $or: [
           { name: searchRegex },
+          { username: searchRegex },
           { "businessInfo.companyName": searchRegex },
         ],
       })
-        .select("name businessInfo.companyName")
+        .select("name username")
         .limit(10)
         .lean();
 
       const suggestions = professionals.map((p: any) => ({
         type: "professional",
-        value: p.businessInfo?.companyName || p.name,
-        label: p.businessInfo?.companyName
-          ? `${p.businessInfo.companyName} (${p.name})`
-          : p.name,
+        value: p.username || p.name,
+        label: p.username || p.name,
       }));
 
       // Also get service category suggestions

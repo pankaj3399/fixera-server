@@ -72,7 +72,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     const professionalsData =
       professionalIds.length > 0
         ? await User.find({ _id: { $in: professionalIds } })
-            .select("name businessInfo.companyName businessInfo.city businessInfo.country profileImage")
+            .select("name username businessInfo.companyName businessInfo.city businessInfo.country profileImage")
             .lean()
         : [];
 
@@ -131,7 +131,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
         professional: professional
           ? {
               name:
-                professional.businessInfo?.companyName || professional.name,
+                professional.username || professional.name,
               profileImage: professional.profileImage || null,
               city: professional.businessInfo?.city || null,
               country: professional.businessInfo?.country || null,
