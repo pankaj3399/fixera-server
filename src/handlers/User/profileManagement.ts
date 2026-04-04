@@ -423,13 +423,20 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     }
 
     // Mark profile as completed if key fields are filled
-    if (user.businessInfo?.companyName && user.username && user.hourlyRate && user.serviceCategories?.length) {
+    if (user.businessInfo?.companyName && user.username && user.hourlyRate != null && user.serviceCategories?.length) {
       user.profileCompletedAt = new Date();
     } else {
       user.profileCompletedAt = undefined;
     }
 
-    await user.save();
+    try {
+      await user.save();
+    } catch (err: any) {
+      if (err.code === 11000 && err.keyPattern?.username) {
+        return res.status(400).json({ success: false, msg: "Username already taken" });
+      }
+      throw err;
+    }
 
     console.log(`✅ Profile: Successfully updated professional profile for ${user.email}`);
     console.log('💾 Saved companyBlockedDates:', user.companyBlockedDates);

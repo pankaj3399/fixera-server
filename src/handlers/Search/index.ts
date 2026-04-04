@@ -145,7 +145,7 @@ async function searchProfessionals(
     const [professionals, total] = await Promise.all([
       User.find(filter)
         .select(
-          "name email businessInfo hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
+          "name username email businessInfo hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
         )
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -535,7 +535,7 @@ async function searchProjects(
     const professionalsData = professionalIds.length > 0
       ? await User.find({ _id: { $in: professionalIds } })
         .select(
-          "name email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
+          "name username email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
         )
         .lean()
       : [];

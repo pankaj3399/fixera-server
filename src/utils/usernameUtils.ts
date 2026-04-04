@@ -37,8 +37,12 @@ export function normalizeToSlug(text: string): string {
 export function stripCompanySuffix(name: string): string {
     let result = name.trim();
     for (const suffix of COMPANY_SUFFIXES) {
-        const regex = new RegExp(`\\b${suffix}\\b\\.?`, 'gi');
-        result = result.replace(regex, '');
+        const regex = new RegExp(`[\\s,]+${suffix}[\\s.,]*$`, 'gi');
+        const stripped = result.replace(regex, '');
+        if (stripped !== result) {
+            result = stripped.trim();
+            break;
+        }
     }
     return result.trim();
 }

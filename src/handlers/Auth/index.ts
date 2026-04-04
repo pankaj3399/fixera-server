@@ -434,6 +434,7 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
       idCountryOfIssue: userExists.idCountryOfIssue,
       idExpirationDate: userExists.idExpirationDate,
       professionalStatus: userExists.professionalStatus,
+      username: userExists.username,
       businessInfo: userExists.businessInfo,
       professionalOnboardingCompletedAt: userExists.professionalOnboardingCompletedAt,
       createdAt: userExists.createdAt,

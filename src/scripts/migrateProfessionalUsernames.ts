@@ -62,7 +62,9 @@ async function migrate() {
     let candidate = baseUsername;
     let suffix = 1;
     while (existingUsernames.has(candidate)) {
-      candidate = `${baseUsername}-${suffix}`;
+      const suffixStr = `-${suffix}`;
+      const truncatedBase = baseUsername.replace(/-+$/, '').slice(0, 30 - suffixStr.length);
+      candidate = `${truncatedBase}${suffixStr}`;
       suffix++;
       collisionCount++;
       if (suffix > 99) {

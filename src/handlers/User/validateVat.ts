@@ -3,7 +3,7 @@ import { validateVATNumber, isValidVATFormat, formatVATNumber } from "../../util
 import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
-import { generateUsername } from "../../utils/usernameUtils";
+import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
 
 export const validateVAT = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -163,18 +163,22 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
         user.businessInfo.companyName,
         user.businessInfo.city
       );
-      if (baseUsername) {
+      if (baseUsername && isValidUsernameFormat(baseUsername).valid) {
         let candidateUsername = baseUsername;
         let suffix = 1;
         while (await User.findOne({ username: candidateUsername, _id: { $ne: user._id } })) {
-          candidateUsername = `${baseUsername}-${suffix}`;
+          const suffixStr = `-${suffix}`;
+          const truncatedBase = baseUsername.replace(/-+$/, '').slice(0, 30 - suffixStr.length);
+          candidateUsername = `${truncatedBase}${suffixStr}`;
           suffix++;
           if (suffix > 100) {
             candidateUsername = `pro-${user._id.toString().slice(-6)}`;
             break;
           }
         }
-        user.username = candidateUsername;
+        if (isValidUsernameFormat(candidateUsername).valid) {
+          user.username = candidateUsername;
+        }
       }
     }
 
