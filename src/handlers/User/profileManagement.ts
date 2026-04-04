@@ -1193,8 +1193,10 @@ export const generateUsernameSuggestionsHandler = async (req: Request, res: Resp
       return res.status(403).json({ success: false, msg: "Only professionals can generate username suggestions" });
     }
 
-    const companyName = (req.query.companyName as string)?.trim() || user.businessInfo?.companyName;
-    const city = (req.query.city as string)?.trim() || user.businessInfo?.city;
+    const rawCompanyName = Array.isArray(req.query.companyName) ? req.query.companyName[0] : req.query.companyName;
+    const rawCity = Array.isArray(req.query.city) ? req.query.city[0] : req.query.city;
+    const companyName = (typeof rawCompanyName === "string" && rawCompanyName.trim()) || user.businessInfo?.companyName;
+    const city = (typeof rawCity === "string" && rawCity.trim()) || user.businessInfo?.city;
 
     if (!companyName) {
       return res.status(400).json({ success: false, msg: "Company name is required to generate a username" });

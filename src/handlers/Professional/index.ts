@@ -27,7 +27,7 @@ export const getProfessionalsByCategory = async (
       serviceCategories: categorySlug,
     })
       .select(
-        "name username email businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage"
+        "name username businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage"
       )
       .sort({ createdAt: -1 })
       .limit(100); // Limit to 100 professionals for performance
@@ -52,7 +52,7 @@ export const getAllProfessionals = async (req: Request, res: Response) => {
       professionalStatus: "approved",
     })
       .select(
-        "name username email businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage"
+        "name username businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage"
       )
       .sort({ createdAt: -1 })
       .limit(100);

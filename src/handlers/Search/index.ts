@@ -105,6 +105,7 @@ async function searchProfessionals(
       filter.$or = [
         { name: searchRegex },
         { username: searchRegex },
+        { "businessInfo.companyName": searchRegex },
         { serviceCategories: searchRegex },
       ];
     }
