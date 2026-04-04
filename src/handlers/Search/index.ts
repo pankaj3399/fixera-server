@@ -105,7 +105,6 @@ async function searchProfessionals(
       filter.$or = [
         { name: searchRegex },
         { username: searchRegex },
-        { "businessInfo.companyName": searchRegex },
         { serviceCategories: searchRegex },
       ];
     }
@@ -145,7 +144,7 @@ async function searchProfessionals(
     const [professionals, total] = await Promise.all([
       User.find(filter)
         .select(
-          "name username email businessInfo hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
+          "name username email businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage companyAvailability createdAt"
         )
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -535,7 +534,7 @@ async function searchProjects(
     const professionalsData = professionalIds.length > 0
       ? await User.find({ _id: { $in: professionalIds } })
         .select(
-          "name username email businessInfo hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
+          "name username email businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency profileImage companyAvailability companyBlockedDates companyBlockedRanges"
         )
         .lean()
       : [];
@@ -572,6 +571,7 @@ async function searchProjects(
           const professionalSummary = {
             _id: professional._id,
             name: professional.name,
+            username: professional.username,
             email: professional.email,
             businessInfo: professional.businessInfo,
             hourlyRate: professional.hourlyRate,
@@ -691,14 +691,12 @@ export const autocomplete = async (req: Request, res: Response) => {
     const searchRegex = new RegExp((q as string).trim(), "i");
 
     if (type === "professionals") {
-      // Get professional name and company name suggestions
       const professionals = await User.find({
         role: "professional",
         professionalStatus: "approved",
         $or: [
           { name: searchRegex },
           { username: searchRegex },
-          { "businessInfo.companyName": searchRegex },
         ],
       })
         .select("name username")

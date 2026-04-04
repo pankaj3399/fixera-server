@@ -72,7 +72,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     const professionalsData =
       professionalIds.length > 0
         ? await User.find({ _id: { $in: professionalIds } })
-            .select("name username businessInfo.companyName businessInfo.city businessInfo.country profileImage")
+            .select("name username businessInfo.city businessInfo.country profileImage")
             .lean()
         : [];
 

@@ -330,7 +330,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
       return res.status(400).json({ success: false, msg: "Invalid professional ID" });
     }
 
-    const professional = await User.findById(professionalId).select("name username role businessInfo profileImage serviceCategories hourlyRate createdAt location professionalStatus");
+    const professional = await User.findById(professionalId).select("name username role businessInfo.description businessInfo.city businessInfo.country businessInfo.website profileImage serviceCategories hourlyRate createdAt location professionalStatus");
     if (!professional || professional.role !== "professional" || professional.professionalStatus !== "approved") {
       return res.status(404).json({ success: false, msg: "Professional not found" });
     }
