@@ -124,13 +124,13 @@ export const createOrGetConversation = async (
   };
 
   const populateFields = [
-    { path: "customerId", select: "name email businessInfo profileImage" },
-    { path: "professionalId", select: "name email businessInfo profileImage" },
+    { path: "customerId", select: "name email username businessInfo profileImage" },
+    { path: "professionalId", select: "name email username businessInfo profileImage" },
   ];
 
   let conversation = await Conversation.findOne(pairQuery)
-    .populate("customerId", "name email businessInfo profileImage")
-    .populate("professionalId", "name email businessInfo profileImage");
+    .populate("customerId", "name email username businessInfo profileImage")
+    .populate("professionalId", "name email username businessInfo profileImage");
 
   if (conversation) {
     return res.status(200).json({ success: true, conversation });
@@ -208,8 +208,8 @@ export const listMyConversations = async (
 
   const [conversations, total] = await Promise.all([
     Conversation.find(baseQuery)
-      .populate("customerId", "name email businessInfo profileImage")
-      .populate("professionalId", "name email businessInfo profileImage")
+      .populate("customerId", "name email username businessInfo profileImage")
+      .populate("professionalId", "name email username businessInfo profileImage")
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -254,8 +254,8 @@ export const getConversationMessages = async (
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 30;
 
   const conversation = await Conversation.findById(conversationId)
-    .populate("customerId", "name email businessInfo profileImage")
-    .populate("professionalId", "name email businessInfo profileImage");
+    .populate("customerId", "name email username businessInfo profileImage")
+    .populate("professionalId", "name email username businessInfo profileImage");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -274,11 +274,11 @@ export const getConversationMessages = async (
   }
 
   const messagesDesc = await ChatMessage.find(messageQuery)
-    .populate("senderId", "name email businessInfo profileImage role")
+    .populate("senderId", "name email username businessInfo profileImage role")
     .populate({
       path: "replyTo",
       select: "text senderId images createdAt",
-      populate: { path: "senderId", select: "name businessInfo" },
+      populate: { path: "senderId", select: "name username businessInfo" },
     })
     .sort({ _id: -1 })
     .limit(limit);
@@ -468,7 +468,7 @@ export const sendMessage = async (req: Request, res: Response) => {
     $inc: updateInc,
   });
 
-  await message.populate("senderId", "name email businessInfo profileImage role");
+  await message.populate("senderId", "name email username businessInfo profileImage role");
 
   return res.status(201).json({
     success: true,
@@ -617,8 +617,8 @@ export const getConversationInfo = async (req: Request, res: Response) => {
   }
 
   const conversation = await Conversation.findById(conversationId)
-    .populate("customerId", "name email businessInfo profileImage createdAt")
-    .populate("professionalId", "name email businessInfo profileImage createdAt");
+    .populate("customerId", "name email username businessInfo profileImage createdAt")
+    .populate("professionalId", "name email username businessInfo profileImage createdAt");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });

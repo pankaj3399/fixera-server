@@ -8,6 +8,7 @@ import { PhoneNumberUtil, PhoneNumberFormat } from 'google-libphonenumber';
 import { getCountryCode } from '../../utils/geocoding';
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 import { NO_PREVIOUS_VALUE, normalizePendingIdChanges } from "../../utils/pendingIdChanges";
+import { isValidUsernameFormat, isTooSimilarToCompanyName, generateUsernameSuggestions } from "../../utils/usernameUtils";
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 const maskEmail = (email: string): string => {
@@ -200,7 +201,8 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       blockedRanges,
       companyAvailability,
       companyBlockedDates,
-      companyBlockedRanges
+      companyBlockedRanges,
+      username
     } = req.body;
 
     await connecToDatabase();
@@ -259,6 +261,22 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
         ...businessInfo
       };
 
+    }
+
+    if (username !== undefined) {
+      const normalized = username.toLowerCase().trim();
+      const formatCheck = isValidUsernameFormat(normalized);
+      if (!formatCheck.valid) {
+        return res.status(400).json({ success: false, msg: formatCheck.reason });
+      }
+      const existing = await User.findOne({ username: normalized, _id: { $ne: user._id } });
+      if (existing) {
+        return res.status(400).json({ success: false, msg: "Username already taken" });
+      }
+      if (user.businessInfo?.companyName && isTooSimilarToCompanyName(normalized, user.businessInfo.companyName)) {
+        return res.status(400).json({ success: false, msg: "Username cannot be too similar to your company name" });
+      }
+      user.username = normalized;
     }
 
     if (hourlyRate !== undefined) {
@@ -405,8 +423,10 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     }
 
     // Mark profile as completed if key fields are filled
-    if (user.businessInfo?.companyName && user.hourlyRate && user.serviceCategories?.length) {
+    if (user.businessInfo?.companyName && user.username && user.hourlyRate && user.serviceCategories?.length) {
       user.profileCompletedAt = new Date();
+    } else {
+      user.profileCompletedAt = undefined;
     }
 
     await user.save();
@@ -430,6 +450,7 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       idProofFileName: user.idProofFileName,
       idProofUploadedAt: user.idProofUploadedAt,
       isIdVerified: user.isIdVerified || false,
+      username: user.username,
       businessInfo: user.businessInfo,
       hourlyRate: user.hourlyRate,
       currency: user.currency,
@@ -528,6 +549,15 @@ export const submitForVerification = async (req: Request, res: Response, next: N
         code: 'ID_PROOF_MISSING',
         type: 'id',
         message: 'ID proof upload'
+      });
+    }
+
+    if (!user.username) {
+      missingRequirements.push('Display username');
+      missingRequirementDetails.push({
+        code: 'USERNAME_MISSING',
+        type: 'business',
+        message: 'Display username'
       });
     }
 
@@ -1099,5 +1129,146 @@ export const deleteProfileImage = async (req: Request, res: Response, next: Next
   } catch (error) {
     console.error("Delete profile image error:", error);
     return res.status(500).json({ success: false, msg: "Failed to remove profile image" });
+  }
+};
+
+export const checkUsernameAvailability = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await connecToDatabase();
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    const { username } = req.params;
+    if (!username) {
+      return res.status(400).json({ success: false, available: false, reason: "Username is required" });
+    }
+
+    const formatCheck = isValidUsernameFormat(username.toLowerCase());
+    if (!formatCheck.valid) {
+      return res.status(200).json({ success: true, available: false, reason: formatCheck.reason });
+    }
+
+    const existing = await User.findOne({ username: username.toLowerCase(), _id: { $ne: userId } });
+    if (existing) {
+      return res.status(200).json({ success: true, available: false, reason: "Username already taken" });
+    }
+
+    const user = await User.findById(userId);
+    if (user?.role === 'professional' && user.businessInfo?.companyName) {
+      if (isTooSimilarToCompanyName(username.toLowerCase(), user.businessInfo.companyName)) {
+        return res.status(200).json({
+          success: true,
+          available: false,
+          reason: "Username cannot be too similar to your company name"
+        });
+      }
+    }
+
+    return res.status(200).json({ success: true, available: true });
+  } catch (error) {
+    console.error("Check username error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to check username availability" });
+  }
+};
+
+export const generateUsernameSuggestionsHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await connecToDatabase();
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user || user.role !== 'professional') {
+      return res.status(403).json({ success: false, msg: "Only professionals can generate username suggestions" });
+    }
+
+    if (!user.businessInfo?.companyName) {
+      return res.status(400).json({ success: false, msg: "Company name is required to generate a username" });
+    }
+
+    const rawSuggestions = generateUsernameSuggestions(
+      user.businessInfo.companyName,
+      user.businessInfo.city
+    );
+
+    const available: string[] = [];
+    for (const suggestion of rawSuggestions) {
+      let candidate = suggestion;
+      let suffix = 1;
+      while (await User.findOne({ username: candidate, _id: { $ne: user._id } })) {
+        candidate = `${suggestion}-${suffix}`;
+        suffix++;
+        if (suffix > 10) break;
+      }
+      if (suffix <= 10) available.push(candidate);
+    }
+
+    if (available.length === 0) {
+      const fallback = `pro-${user._id.toString().slice(-6)}`;
+      available.push(fallback);
+    }
+
+    return res.status(200).json({ success: true, suggestions: available });
+  } catch (error) {
+    console.error("Generate username suggestions error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to generate username suggestions" });
+  }
+};
+
+export const updateUsername = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await connecToDatabase();
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user || user.role !== 'professional') {
+      return res.status(403).json({ success: false, msg: "Only professionals can set a username" });
+    }
+
+    const { username } = req.body;
+    if (!username) {
+      return res.status(400).json({ success: false, msg: "Username is required" });
+    }
+
+    const normalized = username.toLowerCase().trim();
+    const formatCheck = isValidUsernameFormat(normalized);
+    if (!formatCheck.valid) {
+      return res.status(400).json({ success: false, msg: formatCheck.reason });
+    }
+
+    const existing = await User.findOne({ username: normalized, _id: { $ne: user._id } });
+    if (existing) {
+      return res.status(400).json({ success: false, msg: "Username already taken" });
+    }
+
+    if (user.businessInfo?.companyName && isTooSimilarToCompanyName(normalized, user.businessInfo.companyName)) {
+      return res.status(400).json({ success: false, msg: "Username cannot be too similar to your company name" });
+    }
+
+    user.username = normalized;
+    try {
+      await user.save();
+    } catch (err: any) {
+      if (err.code === 11000) {
+        return res.status(400).json({ success: false, msg: "Username was just taken by someone else, please try another" });
+      }
+      throw err;
+    }
+
+    return res.status(200).json({
+      success: true,
+      msg: "Username updated successfully",
+      username: user.username
+    });
+  } catch (error) {
+    console.error("Update username error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to update username" });
   }
 };

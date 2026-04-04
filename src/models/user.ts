@@ -147,6 +147,7 @@ export interface IUser extends Document {
         availabilityPreference?: 'personal' | 'same_as_company';
         managedByCompany?: boolean;
     };
+    username?: string;
     // Stripe Connect fields (for professionals)
     stripe?: {
         accountId?: string;
@@ -258,6 +259,20 @@ const UserSchema = new Schema({
             newValue: { type: String, required: false, default: '' }
         }],
         default: []
+    },
+    username: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        minlength: [3, 'Username must be at least 3 characters'],
+        maxlength: [30, 'Username cannot exceed 30 characters'],
+        validate: {
+            validator: function(v: string) {
+                if (!v) return true;
+                return /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/.test(v);
+            },
+            message: 'Username can only contain lowercase letters, numbers, and hyphens. Must start and end with a letter or number.'
+        }
     },
     // Professional approval fields
     professionalStatus: {
@@ -686,6 +701,7 @@ UserSchema.pre("save", function (next) {
         this.set("totalReferrals", undefined);
         this.set("completedReferrals", undefined);
 
+        this.set("username", undefined);
         this.set("profileCompletedAt", undefined);
         this.set("professionalOnboardingCompletedAt", undefined);
         this.set("manualProfessionalLevelOverride", undefined);
@@ -703,10 +719,8 @@ UserSchema.index({ role: 1, professionalLevel: 1 });
 UserSchema.index({ role: 1, accountStatus: 1 });
 UserSchema.index({ role: 1, adminTags: 1 });
 UserSchema.index({ 'employee.companyId': 1 });
-UserSchema.index({ email: 1 });
-UserSchema.index({ phone: 1 });
 // Text indexes for search functionality
-UserSchema.index({ name: 'text', 'businessInfo.companyName': 'text' });
+UserSchema.index({ name: 'text', username: 'text', 'businessInfo.companyName': 'text' });
 UserSchema.index({ serviceCategories: 1 });
 UserSchema.index({ 'businessInfo.city': 1, 'businessInfo.country': 1 });
 UserSchema.index({ hourlyRate: 1 });
@@ -715,6 +729,7 @@ UserSchema.index({ customerType: 1 });
 UserSchema.index({ 'location.coordinates': '2dsphere' }); // Geospatial index for location-based queries
 UserSchema.index({ 'location.city': 1, 'location.country': 1 });
 // Stripe Connect indexes
+UserSchema.index({ username: 1 }, { unique: true, sparse: true });
 UserSchema.index({ 'stripe.accountId': 1 }, { unique: true, sparse: true });
 UserSchema.index({ role: 1, 'stripe.chargesEnabled': 1 });
 

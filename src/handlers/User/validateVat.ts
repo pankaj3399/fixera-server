@@ -3,6 +3,7 @@ import { validateVATNumber, isValidVATFormat, formatVATNumber } from "../../util
 import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
+import { generateUsername } from "../../utils/usernameUtils";
 
 export const validateVAT = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -157,6 +158,26 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
       }
     }
 
+    if (!user.username && user.businessInfo?.companyName && user.role === 'professional') {
+      const baseUsername = generateUsername(
+        user.businessInfo.companyName,
+        user.businessInfo.city
+      );
+      if (baseUsername) {
+        let candidateUsername = baseUsername;
+        let suffix = 1;
+        while (await User.findOne({ username: candidateUsername, _id: { $ne: user._id } })) {
+          candidateUsername = `${baseUsername}-${suffix}`;
+          suffix++;
+          if (suffix > 100) {
+            candidateUsername = `pro-${user._id.toString().slice(-6)}`;
+            break;
+          }
+        }
+        user.username = candidateUsername;
+      }
+    }
+
     // Auto-populate company address for business customers
     if (autoPopulate && validationResult.valid && user.role === 'customer' && user.customerType === 'business') {
       if (validationResult.companyName && !user.businessName) {
@@ -204,6 +225,7 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
         companyName: validationResult.companyName,
         companyAddress: validationResult.companyAddress,
         autoPopulated: autoPopulate && validationResult.valid,
+        username: user.username,
         businessInfo: user.businessInfo,
         customerBusinessName: user.businessName,
         customerCompanyAddress: user.companyAddress

@@ -673,7 +673,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
 
     const refreshedBooking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email businessInfo')
+      .populate('professional', 'name email username businessInfo')
       .populate('project', 'title description pricing category service professionalId');
 
     return res.json({

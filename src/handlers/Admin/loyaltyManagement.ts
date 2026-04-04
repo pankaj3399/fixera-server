@@ -512,6 +512,7 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
       query.$or = [
         { name: regex },
         { email: regex },
+        { username: regex },
         { "businessInfo.companyName": regex }
       ];
     }

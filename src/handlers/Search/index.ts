@@ -104,6 +104,7 @@ async function searchProfessionals(
       const searchRegex = new RegExp(query.trim(), "i");
       filter.$or = [
         { name: searchRegex },
+        { username: searchRegex },
         { "businessInfo.companyName": searchRegex },
         { serviceCategories: searchRegex },
       ];
@@ -696,19 +697,18 @@ export const autocomplete = async (req: Request, res: Response) => {
         professionalStatus: "approved",
         $or: [
           { name: searchRegex },
+          { username: searchRegex },
           { "businessInfo.companyName": searchRegex },
         ],
       })
-        .select("name businessInfo.companyName")
+        .select("name username")
         .limit(10)
         .lean();
 
       const suggestions = professionals.map((p: any) => ({
         type: "professional",
-        value: p.businessInfo?.companyName || p.name,
-        label: p.businessInfo?.companyName
-          ? `${p.businessInfo.companyName} (${p.name})`
-          : p.name,
+        value: p.username || p.name,
+        label: p.username || p.name,
       }));
 
       // Also get service category suggestions
