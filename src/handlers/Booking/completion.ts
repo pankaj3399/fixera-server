@@ -68,13 +68,6 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       });
     }
 
-    if (booking.status !== 'in_progress') {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'INVALID_STATUS', message: `Cannot confirm completion while booking is "${booking.status}"` }
-      });
-    }
-
     const { notes, extraCosts: extraCostsRaw } = req.body;
     let extraCostsInput = extraCostsRaw;
     if (typeof extraCostsRaw === 'string') {
@@ -216,37 +209,66 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       }
     }
 
-    booking.completionAttestation = {
-      confirmedAt: new Date(),
-      confirmedBy: authUser._id,
-      attachments: attachmentUrls,
-      notes: notes || undefined,
+    const completionConfirmedAt = new Date();
+    const statusHistoryNote = validatedExtraCosts.length > 0
+      ? `Professional confirmed completion with ${validatedExtraCosts.length} extra cost(s) totaling ${extraCostTotal}`
+      : 'Professional confirmed completion';
+
+    const updateDoc: any = {
+      $set: {
+        status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+        completionAttestation: {
+          confirmedAt: completionConfirmedAt,
+          confirmedBy: authUser._id,
+          attachments: attachmentUrls,
+          notes: notes || undefined,
+        },
+      },
+      $push: {
+        statusHistory: {
+          status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+          timestamp: completionConfirmedAt,
+          updatedBy: authUser._id,
+          note: statusHistoryNote,
+        }
+      }
     };
 
     if (validatedExtraCosts.length > 0) {
-      booking.extraCosts = validatedExtraCosts;
-      booking.extraCostStatus = 'pending';
-      booking.extraCostTotal = extraCostTotal;
+      updateDoc.$set.extraCosts = validatedExtraCosts;
+      updateDoc.$set.extraCostStatus = 'pending';
+      updateDoc.$set.extraCostTotal = extraCostTotal;
     }
 
-    booking.status = 'professional_completed' as BookingStatus;
-    booking.statusHistory.push({
-      status: 'professional_completed' as BookingStatus,
-      timestamp: new Date(),
-      updatedBy: authUser._id,
-      note: validatedExtraCosts.length > 0
-        ? `Professional confirmed completion with ${validatedExtraCosts.length} extra cost(s) totaling ${extraCostTotal}`
-        : 'Professional confirmed completion'
-    });
+    const updatedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: 'in_progress' as BookingStatus },
+      updateDoc,
+      { new: true }
+    ).populate('project');
 
-    await booking.save();
+    if (!updatedBooking) {
+      if (attachmentUrls.length > 0) {
+        await Promise.allSettled(attachmentUrls.map((key) => deleteFromS3(key)));
+        attachmentUrls = [];
+      }
+
+      const currentBooking = await Booking.findById(booking._id).select('status');
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INVALID_STATUS',
+          message: `Cannot confirm completion while booking is "${currentBooking?.status || booking.status}"`
+        }
+      });
+    }
+
     completionSaved = true;
 
     return res.json({
       success: true,
       data: {
         message: 'Completion confirmed. Awaiting customer confirmation.',
-        booking,
+        booking: updatedBooking,
         extraCostTotal,
       }
     });
