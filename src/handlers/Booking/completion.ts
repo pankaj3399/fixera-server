@@ -472,6 +472,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
         $set: {
           status: COMPLETED_BOOKING_STATUS,
           actualEndDate: completionDate,
+          ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'confirmed' } : {}),
         },
         $push: {
           statusHistory: {
@@ -508,17 +509,32 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       });
     }
 
-    if (completedBooking.extraCosts && completedBooking.extraCosts.length > 0) {
-      completedBooking.extraCostStatus = 'confirmed';
-    }
-
-    markMilestonesCompleted(completedBooking, completionDate);
-    await ensureWarrantyCoverageSnapshot(completedBooking);
-
     const transferResult = await captureAndTransferPayment(completedBooking._id.toString());
+    const refreshedBooking = await Booking.findById(completedBooking._id);
+    const paymentStatus = refreshedBooking?.payment?.status ? String(refreshedBooking.payment.status) : '';
+
     if (!transferResult.success) {
-      const paymentStatus = completedBooking.payment?.status ? String(completedBooking.payment.status) : '';
       if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
+        await Booking.findOneAndUpdate(
+          { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+          {
+            $set: {
+              status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+            },
+            $unset: {
+              actualEndDate: 1,
+            },
+            $push: {
+              statusHistory: {
+                status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+                timestamp: new Date(),
+                updatedBy: authUser._id,
+                note: `Reverted completion after payment failure: ${transferResult.error?.message || 'unknown payment error'}`
+              }
+            }
+          }
+        );
+
         return res.status(400).json({
           success: false,
           error: transferResult.error
@@ -526,31 +542,36 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       }
     }
 
-    if (extraCostTotal < 0 && completedBooking.payment?.stripePaymentIntentId) {
+    const finalizedBooking = refreshedBooking || completedBooking;
+
+    markMilestonesCompleted(finalizedBooking, completionDate);
+    await ensureWarrantyCoverageSnapshot(finalizedBooking);
+
+    if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
       const refundAmount = Math.abs(extraCostTotal);
-      const currency = (completedBooking.payment.currency || 'EUR').toLowerCase();
+      const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
       await stripe.refunds.create({
-        payment_intent: completedBooking.payment.stripePaymentIntentId,
+        payment_intent: finalizedBooking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, currency),
       }, {
         idempotencyKey: generateIdempotencyKey({
-          bookingId: completedBooking._id.toString(),
+          bookingId: finalizedBooking._id.toString(),
           operation: 'unit-underuse-refund',
-          version: `${completedBooking.payment.stripePaymentIntentId}:${convertToStripeAmount(refundAmount, currency)}`,
+          version: `${finalizedBooking.payment.stripePaymentIntentId}:${convertToStripeAmount(refundAmount, currency)}`,
         })
       });
     }
 
-    await completedBooking.save();
+    await finalizedBooking.save();
 
     try {
-      const bookingAmount = (completedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
-      await processReferralCompletion(completedBooking.customer, completedBooking._id, bookingAmount);
+      const bookingAmount = (finalizedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
+      await processReferralCompletion(finalizedBooking.customer, finalizedBooking._id, bookingAmount);
     } catch (e) {
       console.error('Error processing referral completion:', e);
     }
 
-    const proId = await getProfessionalId(completedBooking);
+    const proId = await getProfessionalId(finalizedBooking);
     try {
       if (proId) await updateProfessionalLevel(proId);
     } catch (e) {
@@ -558,7 +579,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     }
 
     try {
-      await awardBookingCompletionPoints(proId, completedBooking.customer, completedBooking._id);
+      await awardBookingCompletionPoints(proId, finalizedBooking.customer, finalizedBooking._id);
     } catch (e) {
       console.error('Error awarding booking completion points:', e);
     }
@@ -567,7 +588,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       success: true,
       data: {
         message: 'Booking completed successfully',
-        booking: completedBooking,
+        booking: finalizedBooking,
       }
     });
   } catch (error: any) {
