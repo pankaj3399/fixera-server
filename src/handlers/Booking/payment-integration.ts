@@ -16,6 +16,10 @@ import { addPoints } from '../../utils/pointsSystem';
 import PointsConfig from '../../models/pointsConfig';
 import PointTransaction from '../../models/pointTransaction';
 import {
+  buildProjectScheduleWindow,
+  validateProjectScheduleSelection,
+} from '../../utils/scheduleEngine';
+import {
   addWarrantyDuration,
   getBookingWarrantyDuration,
   normalizeWarrantyDuration,
@@ -51,6 +55,69 @@ const ALLOWED_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
   cancelled: [],
   dispute: ['completed', 'cancelled', 'refunded'],
   refunded: [],
+};
+
+const resolveBookingSubprojectIndex = (projectDoc: any, requestedIndex: unknown) => {
+  const subprojects = Array.isArray(projectDoc?.subprojects)
+    ? projectDoc.subprojects
+    : [];
+
+  const parsedRequestedIndex =
+    typeof requestedIndex === 'number'
+      ? requestedIndex
+      : typeof requestedIndex === 'string'
+      ? Number.parseInt(requestedIndex, 10)
+      : Number.NaN;
+
+  if (
+    Number.isInteger(parsedRequestedIndex) &&
+    parsedRequestedIndex >= 0 &&
+    parsedRequestedIndex < subprojects.length
+  ) {
+    return parsedRequestedIndex;
+  }
+
+  if (subprojects.length === 1) {
+    return 0;
+  }
+
+  const rfqIndexes = subprojects.reduce((indexes: number[], subproject: any, index: number) => {
+    if (subproject?.pricing?.type === 'rfq') {
+      indexes.push(index);
+    }
+    return indexes;
+  }, []);
+
+  if (rfqIndexes.length === 1) {
+    return rfqIndexes[0];
+  }
+
+  return undefined;
+};
+
+const normalizeSelectedExtraOptions = (extraOptions: unknown, projectDoc: any): number[] => {
+  if (!Array.isArray(extraOptions) || !Array.isArray(projectDoc?.extraOptions)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      extraOptions
+        .map((value: unknown) =>
+          typeof value === 'number'
+            ? value
+            : typeof value === 'string'
+            ? Number.parseInt(value, 10)
+            : Number.NaN
+        )
+        .filter(
+          (index: number) =>
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index < projectDoc.extraOptions.length
+        )
+    )
+  );
 };
 
 const isValidBookingStatus = (value: string): value is BookingStatus =>
@@ -287,31 +354,22 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
     }
 
     if (action === 'accept') {
-      // Mark quote as accepted first
       booking.status = 'quote_accepted';
+      booking.statusHistory = booking.statusHistory || [];
+      booking.statusHistory.push({
+        status: 'quote_accepted',
+        timestamp: new Date(),
+        updatedBy: booking.customer,
+        note: 'Customer accepted the quote',
+      });
       await booking.save();
-
-      // Create Payment Intent (with optional points redemption)
-      const paymentResult = await createPaymentIntent(booking._id.toString(), userId, parseInt(pointsToRedeem) || 0);
-
-      if (!paymentResult.success) {
-        // Revert status if payment intent creation fails
-        booking.status = 'quoted';
-        await booking.save();
-
-        return res.status(400).json({
-          success: false,
-          error: paymentResult.error
-        });
-      }
 
       return res.json({
         success: true,
         data: {
-          message: 'Quote accepted. Proceed to payment.',
+          message: 'Quote accepted. Please complete the booking wizard to proceed to payment.',
           booking,
-          clientSecret: paymentResult.clientSecret,
-          requiresPayment: true,
+          requiresBookingWizard: true,
         }
       });
     }
@@ -431,8 +489,13 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           };
         }
 
-        booking.status = atomicUpdate.status;
-        booking.actualEndDate = atomicUpdate.actualEndDate;
+        const refreshed = await Booking.findById(booking._id);
+        if (refreshed) {
+          booking.status = refreshed.status;
+          booking.actualEndDate = refreshed.actualEndDate;
+          booking.milestonePayments = refreshed.milestonePayments;
+          booking.__v = refreshed.__v;
+        }
         return { alreadyCompleted: false as const };
       };
 
@@ -674,7 +737,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
     const refreshedBooking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email username businessInfo')
-      .populate('project', 'title description pricing category service professionalId');
+      .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     return res.json({
       success: true,
@@ -692,5 +755,119 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
         message: 'Failed to process request'
       }
     });
+  }
+};
+
+export const setBookingSchedule = async (req: Request, res: Response) => {
+  try {
+    const { bookingId } = req.params;
+    const userId = (req as any).user?._id?.toString();
+    const { scheduledStartDate, scheduledStartTime, additionalNotes, selectedExtraOptions } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
+    }
+
+    if (!scheduledStartDate) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_DATE', message: 'Start date is required' } });
+    }
+
+    const booking = await Booking.findById(bookingId)
+      .populate('customer', 'name email phone customerType location')
+      .populate('professional', 'name email username businessInfo')
+      .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
+
+    if (!booking) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Booking not found' } });
+    }
+
+    if (booking.customer._id.toString() !== userId) {
+      return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can set the schedule' } });
+    }
+
+    if (!['quote_accepted'].includes(booking.status)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Schedule can only be set for accepted quotes' } });
+    }
+
+    if (booking.project) {
+      const projectId = (booking.project as any)?._id?.toString?.() || String(booking.project);
+      const projectDoc = await Project.findById(projectId).select('subprojects extraOptions');
+      if (!projectDoc) {
+        return res.status(404).json({ success: false, error: { code: 'PROJECT_NOT_FOUND', message: 'Linked project not found' } });
+      }
+
+      const resolvedSubprojectIndex = resolveBookingSubprojectIndex(
+        projectDoc,
+        booking.selectedSubprojectIndex
+      );
+
+      const validation = await validateProjectScheduleSelection({
+        projectId,
+        subprojectIndex: resolvedSubprojectIndex,
+        startDate: scheduledStartDate,
+        startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+      });
+
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'INVALID_DATE',
+            message: validation.reason || 'Selected schedule is not available',
+          },
+        });
+      }
+
+      const window = await buildProjectScheduleWindow({
+        projectId,
+        subprojectIndex: resolvedSubprojectIndex,
+        startDate: scheduledStartDate,
+        startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+      });
+
+      if (!window) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_DATE', message: 'Unable to schedule the selected window' },
+        });
+      }
+
+      booking.scheduledStartDate = window.scheduledStartDate;
+      booking.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
+      booking.scheduledBufferStartDate = window.scheduledBufferStartDate;
+      booking.scheduledBufferEndDate = window.scheduledBufferEndDate;
+      booking.scheduledBufferUnit = window.scheduledBufferUnit;
+      booking.scheduledStartTime = window.scheduledStartTime;
+      booking.scheduledEndTime = window.scheduledEndTime;
+      if (window.assignedTeamMembers?.length) {
+        booking.assignedTeamMembers = window.assignedTeamMembers as any;
+      }
+      if (typeof resolvedSubprojectIndex === 'number') {
+        booking.selectedSubprojectIndex = resolvedSubprojectIndex;
+      }
+      booking.selectedExtraOptions = normalizeSelectedExtraOptions(selectedExtraOptions, projectDoc);
+    } else {
+      const startDate = new Date(scheduledStartDate);
+      if (isNaN(startDate.getTime()) || startDate < new Date()) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_DATE', message: 'Start date must be a valid future date' } });
+      }
+      booking.scheduledStartDate = startDate;
+      booking.scheduledStartTime = typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined;
+    }
+
+    if (additionalNotes) {
+      booking.rfqData = booking.rfqData || {};
+      (booking.rfqData as any).additionalNotes = additionalNotes;
+    }
+
+    await booking.save();
+
+    return res.json({
+      success: true,
+      data: { message: 'Schedule set successfully', booking }
+    });
+  } catch (error: any) {
+    console.error('Error setting booking schedule:', error);
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to set schedule' } });
   }
 };

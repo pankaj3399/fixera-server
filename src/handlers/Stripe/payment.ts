@@ -111,7 +111,7 @@ export const createPaymentIntent = async (
     const booking = await Booking.findById(bookingId)
       .populate('customer')
       .populate('professional')
-      .populate('project', 'professionalId title');
+      .populate('project', 'professionalId title extraOptions');
 
     if (!booking) {
       return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } };
@@ -169,6 +169,22 @@ export const createPaymentIntent = async (
     }
     const customer = booking.customer as any;
     const projectInfo = booking.project as any;
+    const normalizedSelectedExtraOptions = Array.isArray(booking.selectedExtraOptions) && Array.isArray(projectInfo?.extraOptions)
+      ? Array.from(
+          new Set(
+            booking.selectedExtraOptions.filter(
+              (optionIndex: number) =>
+                Number.isInteger(optionIndex) &&
+                optionIndex >= 0 &&
+                optionIndex < projectInfo.extraOptions.length
+            )
+          )
+        )
+      : [];
+    const selectedExtraOptionsTotal = normalizedSelectedExtraOptions.reduce(
+      (sum: number, optionIndex: number) => sum + (projectInfo?.extraOptions?.[optionIndex]?.price || 0),
+      0
+    );
 
     // Check if professional has Stripe connected
     if (!professional.stripe?.accountId) {
@@ -198,12 +214,30 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
+    // For milestone-based payments, only charge the first unpaid milestone
+    let chargeAmount = booking.quote.amount;
+    let milestoneIndex: number | null = null;
+    if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
+      const firstUnpaid = booking.milestonePayments.find((m: any) => m.status !== 'paid');
+      if (firstUnpaid) {
+        chargeAmount = firstUnpaid.amount;
+        milestoneIndex = booking.milestonePayments.indexOf(firstUnpaid);
+      }
+    }
+    if (selectedExtraOptionsTotal > 0) {
+      if (!Array.isArray(booking.milestonePayments) || booking.milestonePayments.length === 0) {
+        chargeAmount += selectedExtraOptionsTotal;
+      } else if (milestoneIndex === 0) {
+        chargeAmount += selectedExtraOptionsTotal;
+      }
+    }
+
     // Calculate auto-discount (includes points if requested)
     const discountBreakdown = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
-      booking.quote.amount,
+      chargeAmount,
       customer.totalSpent || 0,
       pointsToRedeem
     );

@@ -6,6 +6,7 @@ import {
   customerRespondToQuotation,
   createDirectQuotation,
   getActiveCustomers,
+  getActiveProjects,
   getQuotationVersions,
   getMilestonePaymentStatus,
   createMilestonePaymentIntent,
@@ -35,6 +36,9 @@ router.post('/direct', createDirectQuotation);
 
 // Get active customers for professional (for direct quotation selector)
 router.get('/active-customers', getActiveCustomers);
+
+// Get active projects for professional (for linking direct quotes)
+router.get('/active-projects', getActiveProjects);
 
 // Get all quotation versions for a booking
 router.get('/:bookingId/versions', getQuotationVersions);

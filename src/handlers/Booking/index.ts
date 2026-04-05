@@ -8,12 +8,44 @@ import {
   buildProjectScheduleWindow,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
-import { presignS3Url } from "../../utils/s3Upload";
+import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
   const signed = await presignS3Url(url);
   return signed ?? url;
+};
+
+const normalizeRfqAnswers = (answers: any[] | undefined) => {
+  if (!Array.isArray(answers)) {
+    return [];
+  }
+
+  return answers.map((answer) => {
+    const normalizedAnswer: Record<string, any> = {
+      questionId: answer?.questionId,
+      question: answer?.question || "",
+      answer: typeof answer?.answer === "string" ? answer.answer : String(answer?.answer ?? ""),
+    };
+
+    const rawFieldType = typeof answer?.fieldType === "string" ? answer.fieldType : undefined;
+    const rawType = typeof answer?.type === "string" ? answer.type : undefined;
+    const resolvedType = rawFieldType || rawType;
+
+    if (resolvedType === "attachment" || resolvedType === "file") {
+      normalizedAnswer.fieldType = "file";
+    } else if (resolvedType === "text") {
+      normalizedAnswer.fieldType = "text";
+    } else if (resolvedType === "number") {
+      normalizedAnswer.fieldType = "number";
+    } else if (resolvedType === "date") {
+      normalizedAnswer.fieldType = "date";
+    } else if (resolvedType === "dropdown" || resolvedType === "checkbox") {
+      normalizedAnswer.fieldType = resolvedType;
+    }
+
+    return normalizedAnswer;
+  });
 };
 
 const presignBookingFiles = async (bookingDoc: any) => {
@@ -28,7 +60,7 @@ const presignBookingFiles = async (bookingDoc: any) => {
   if (Array.isArray(booking?.rfqData?.answers) && booking.rfqData.answers.length > 0) {
     booking.rfqData.answers = await Promise.all(
       booking.rfqData.answers.map(async (answer: any) =>
-        answer?.fieldType === 'file'
+        answer?.fieldType === 'file' || answer?.type === 'attachment'
           ? { ...answer, answer: await presignMaybeS3Url(answer?.answer) }
           : answer
       )
@@ -153,7 +185,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       rfqData: {
         serviceType: rfqData.serviceType,
         description: rfqData.description,
-        answers: rfqData.answers || [],
+        answers: normalizeRfqAnswers(rfqData.answers),
         preferredStartDate: preferredStartDate || rfqData.preferredStartDate,
         urgency: urgency || rfqData.urgency || 'medium',
         budget: rfqData.budget,
@@ -270,22 +302,31 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           ? parsedSubprojectIndex
           : undefined;
 
-      const validation = await validateProjectScheduleSelection({
-        projectId,
-        subprojectIndex,
-        startDate: normalizedStartDate,
-        startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
-        customerBlocks,
-      });
+      const isRfqSubproject =
+        typeof subprojectIndex === "number" &&
+        Array.isArray(project.subprojects) &&
+        subprojectIndex >= 0 &&
+        subprojectIndex < project.subprojects.length &&
+        (project.subprojects[subprojectIndex] as any)?.pricing?.type === "rfq";
 
-      if (!validation.valid) {
-        return res.status(400).json({
-          success: false,
-          msg: validation.reason || "Selected schedule is not available",
+      if (!isRfqSubproject) {
+        const validation = await validateProjectScheduleSelection({
+          projectId,
+          subprojectIndex,
+          startDate: normalizedStartDate,
+          startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
+          customerBlocks,
         });
+
+        if (!validation.valid) {
+          return res.status(400).json({
+            success: false,
+            msg: validation.reason || "Selected schedule is not available",
+          });
+        }
       }
 
-      if (normalizedStartDate) {
+      if (normalizedStartDate && !isRfqSubproject) {
         const window = await buildProjectScheduleWindow({
           projectId,
           subprojectIndex,
@@ -330,8 +371,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       if (
-        !Array.isArray(bookingData.assignedTeamMembers) ||
-        bookingData.assignedTeamMembers.length === 0
+        !isRfqSubproject &&
+        (!Array.isArray(bookingData.assignedTeamMembers) ||
+        bookingData.assignedTeamMembers.length === 0)
       ) {
         return res.status(400).json({
           success: false,
@@ -573,6 +615,42 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
   }
 };
 
+// Upload RFQ attachment (max 10MB, images/PDFs/docs)
+export const uploadRFQAttachment = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: 'Authentication required' });
+    }
+
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ success: false, msg: 'No file uploaded' });
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      return res.status(400).json({ success: false, msg: 'File must be less than 10MB' });
+    }
+
+    const fileName = generateFileName(file.originalname, userId.toString(), 'rfq-attachments');
+    const result = await uploadToS3(file, fileName);
+
+    return res.json({
+      success: true,
+      data: {
+        url: result.url,
+        key: result.key,
+        fileName: file.originalname,
+        mimeType: file.mimetype,
+        fileSize: file.size,
+      },
+    });
+  } catch (error) {
+    console.error('RFQ attachment upload error:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to upload attachment' });
+  }
+};
+
 // Get bookings for current user (customer or professional)
 export const getMyBookings = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -694,7 +772,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email username businessInfo hourlyRate')
-      .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId')
+      .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions')
       .populate('assignedTeamMembers', 'name email');
 
     if (!booking) {

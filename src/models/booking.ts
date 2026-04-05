@@ -46,7 +46,7 @@ export interface IQuotationMilestone {
   title: string;
   amount: number;
   description?: string;
-  dueCondition: 'on_start' | 'on_milestone_completion' | 'on_project_completion' | 'custom_date';
+  dueCondition: 'on_start' | 'on_milestone_start' | 'on_milestone_completion' | 'on_project_completion' | 'custom_date';
   customDueDate?: Date;
   order: number;
   status: 'pending' | 'invoiced' | 'paid' | 'overdue';
@@ -133,6 +133,7 @@ export interface IBooking extends Document {
   customerRejectionReason?: string;
   milestonePayments?: IBookingMilestone[];
   selectedSubprojectIndex?: number;
+  selectedExtraOptions?: number[];
 
   // Booking location (customer's location from their profile)
   location: {
@@ -494,7 +495,7 @@ const BookingSchema = new Schema({
       description: { type: String, maxlength: 500 },
       dueCondition: {
         type: String,
-        enum: ['on_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+        enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
         required: true
       },
       customDueDate: { type: Date },
@@ -533,7 +534,7 @@ const BookingSchema = new Schema({
     description: { type: String, maxlength: 500 },
     dueCondition: {
       type: String,
-      enum: ['on_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+      enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
       required: true
     },
     customDueDate: { type: Date },
@@ -554,6 +555,14 @@ const BookingSchema = new Schema({
       message: 'selectedSubprojectIndex must be an integer',
     },
   },
+  selectedExtraOptions: [{
+    type: Number,
+    min: 0,
+    validate: {
+      validator: Number.isInteger,
+      message: 'selectedExtraOptions entries must be integers',
+    },
+  }],
 
   // Location
   location: {

@@ -9,6 +9,7 @@ import mongoose from 'mongoose';
 import Booking, { IQuoteVersion, IQuotationMilestone, IBookingMilestone } from '../../models/booking';
 import User from '../../models/user';
 import Conversation from '../../models/conversation';
+import ChatMessage from '../../models/chatMessage';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
@@ -22,9 +23,99 @@ import {
   sendDirectQuotationEmail,
 } from '../../utils/emailService';
 
+const sendQuotationChatMessage = async (
+  booking: any,
+  version: number,
+  scope: string,
+  totalAmount: number,
+  currency: string,
+  validUntil: string,
+  isUpdate: boolean,
+) => {
+  try {
+    const professionalId = booking.professional?._id || booking.professional;
+    const customerId = booking.customer?._id || booking.customer;
+
+    const conversation = await Conversation.findOne({
+      professionalId: new mongoose.Types.ObjectId(professionalId.toString()),
+      customerId: new mongoose.Types.ObjectId(customerId.toString()),
+      status: 'active',
+    });
+
+    if (!conversation) return;
+
+    const label = isUpdate ? 'Updated Quotation' : 'New Quotation';
+    const text = `${label}: ${booking.quotationNumber || ''} (v${version})\n\nScope: ${scope}\nAmount: ${currency} ${totalAmount.toFixed(2)}\nValid until: ${new Date(validUntil).toLocaleDateString()}\n\nView and respond to this quotation in your bookings dashboard.`;
+
+    await ChatMessage.create({
+      conversationId: conversation._id,
+      senderId: new mongoose.Types.ObjectId(professionalId.toString()),
+      senderRole: 'professional',
+      messageType: 'quotation_notification',
+      text,
+      quotationMeta: {
+        bookingId: booking._id.toString(),
+        quotationNumber: booking.quotationNumber || '',
+        version,
+        scope,
+        totalAmount,
+        currency,
+        validUntil: new Date(validUntil).toISOString(),
+        status: 'quoted',
+      },
+    });
+
+    conversation.lastMessageAt = new Date();
+    await conversation.save();
+  } catch (e) {
+    console.error('Failed to send quotation chat message:', e);
+  }
+};
+
 const getNextQuotationNumber = async (): Promise<string> => {
   const year = new Date().getFullYear();
   return getNextSequence(`quotationNumber-${year}`, `QT-${year}`);
+};
+
+const resolveLinkedSubprojectIndex = (
+  linkedProject: any,
+  requestedIndex: unknown
+): number | undefined => {
+  const subprojects = Array.isArray(linkedProject?.subprojects)
+    ? linkedProject.subprojects
+    : [];
+
+  const parsedRequestedIndex =
+    typeof requestedIndex === 'number'
+      ? requestedIndex
+      : typeof requestedIndex === 'string'
+      ? Number.parseInt(requestedIndex, 10)
+      : Number.NaN;
+
+  if (
+    Number.isInteger(parsedRequestedIndex) &&
+    parsedRequestedIndex >= 0 &&
+    parsedRequestedIndex < subprojects.length
+  ) {
+    return parsedRequestedIndex;
+  }
+
+  if (subprojects.length === 1) {
+    return 0;
+  }
+
+  const rfqIndexes = subprojects.reduce((indexes: number[], subproject: any, index: number) => {
+    if (subproject?.pricing?.type === 'rfq') {
+      indexes.push(index);
+    }
+    return indexes;
+  }, []);
+
+  if (rfqIndexes.length === 1) {
+    return rfqIndexes[0];
+  }
+
+  return undefined;
 };
 
 /**
@@ -170,6 +261,9 @@ export const submitQuotation = async (req: Request, res: Response) => {
     if (!warrantyDuration?.value || !warrantyDuration?.unit) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Warranty duration is required' } });
     }
+    if (typeof materialsIncluded !== 'boolean') {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Please specify whether materials are included' } });
+    }
     if (!preparationDuration?.value || !preparationDuration?.unit) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Preparation duration is required' } });
     }
@@ -211,7 +305,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       version: versionNumber,
       scope,
       warrantyDuration,
-      materialsIncluded: materialsIncluded || false,
+      materialsIncluded,
       materials: materialsIncluded ? materials : [],
       description,
       totalAmount,
@@ -263,6 +357,8 @@ export const submitQuotation = async (req: Request, res: Response) => {
     } catch (e) {
       console.error('Failed to send quotation email:', e);
     }
+
+    await sendQuotationChatMessage(booking, versionNumber, scope, totalAmount, currency || 'EUR', validUntil, false);
 
     return res.json({
       success: true,
@@ -320,6 +416,9 @@ export const editQuotation = async (req: Request, res: Response) => {
     if (!changeNote) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Change note is required when editing a quotation' } });
     }
+    if (typeof materialsIncluded !== 'boolean') {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Please specify whether materials are included' } });
+    }
 
     if (milestones && milestones.length > 0) {
       const milestoneSum = milestones.reduce((sum: number, m: any) => sum + (m.amount || 0), 0);
@@ -352,7 +451,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       quotationNumber: `${booking.quotationNumber}-v${newVersionNumber}`,
       scope,
       warrantyDuration,
-      materialsIncluded: materialsIncluded || false,
+      materialsIncluded,
       materials: materialsIncluded ? materials : [],
       description,
       totalAmount,
@@ -395,6 +494,8 @@ export const editQuotation = async (req: Request, res: Response) => {
     } catch (e) {
       console.error('Failed to send quotation updated email:', e);
     }
+
+    await sendQuotationChatMessage(booking, newVersionNumber, scope, totalAmount, currency || 'EUR', validUntil, true);
 
     return res.json({
       success: true,
@@ -512,23 +613,6 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
 
     await booking.save();
 
-    // Create payment intent (for first milestone or full amount)
-    const paymentResult = await createPaymentIntent(booking._id.toString(), userId);
-
-    if (!paymentResult.success) {
-      booking.status = 'quoted';
-      booking.milestonePayments = [];
-      booking.statusHistory.push({
-        status: 'quoted',
-        timestamp: new Date(),
-        updatedBy: new mongoose.Types.ObjectId(userId),
-        note: 'Reverted: Payment intent creation failed'
-      });
-      await booking.save();
-
-      return res.status(400).json({ success: false, error: paymentResult.error });
-    }
-
     try {
       await sendQuotationAcceptedEmail(professional.email, professional.name, customer.name, booking.quotationNumber || '', booking._id.toString());
     } catch (e) {
@@ -538,10 +622,9 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
     return res.json({
       success: true,
       data: {
-        message: 'Quotation accepted. Proceed to payment.',
+        message: 'Quotation accepted. Please complete the booking wizard to select your start date and proceed to payment.',
         booking,
-        clientSecret: paymentResult.clientSecret,
-        requiresPayment: true,
+        requiresBookingWizard: true,
       }
     });
   } catch (error: any) {
@@ -557,7 +640,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
 export const createDirectQuotation = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?._id?.toString();
-    const { customerId } = req.body;
+    const { customerId, projectId, selectedSubprojectIndex } = req.body;
 
     if (!userId) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
@@ -584,11 +667,28 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'NO_LOCATION', message: 'Customer does not have a location set' } });
     }
 
+    let linkedProject: any = null;
+    if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
+      const { default: Project } = await import('../../models/project');
+      linkedProject = await Project.findById(projectId).select('title subprojects professionalId');
+      if (linkedProject && linkedProject.professionalId?.toString() !== userId) {
+        return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'You can only link to your own projects' } });
+      }
+    }
+
+    const resolvedSubprojectIndex = linkedProject
+      ? resolveLinkedSubprojectIndex(linkedProject, selectedSubprojectIndex)
+      : undefined;
+
     const bookingData: any = {
       customer: customerId,
       professional: userId,
-      bookingType: 'professional',
+      bookingType: linkedProject ? 'project' : 'professional',
       status: 'draft_quote',
+      ...(linkedProject && { project: linkedProject._id }),
+      ...(typeof resolvedSubprojectIndex === 'number'
+        ? { selectedSubprojectIndex: resolvedSubprojectIndex }
+        : {}),
       location: {
         type: 'Point',
         coordinates: customer.location.coordinates,
@@ -598,15 +698,19 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
         postalCode: customer.location.postalCode,
       },
       rfqData: {
-        serviceType: 'Direct Quotation',
-        description: `Direct quotation from ${professional.name}`,
+        serviceType: linkedProject?.title || 'Direct Quotation',
+        description: linkedProject
+          ? `Direct quotation for project: ${linkedProject.title}`
+          : `Direct quotation from ${professional.name}`,
         answers: [],
       },
       statusHistory: [{
         status: 'draft_quote',
         timestamp: new Date(),
         updatedBy: new mongoose.Types.ObjectId(userId),
-        note: 'Professional-initiated direct quotation',
+        note: linkedProject
+          ? `Professional-initiated quotation linked to project: ${linkedProject.title}`
+          : 'Professional-initiated direct quotation',
       }],
     };
 
@@ -658,6 +762,32 @@ export const getActiveCustomers = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error getting active customers:', error);
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+  }
+};
+
+/**
+ * Get active projects for this professional (for linking direct quotes)
+ */
+export const getActiveProjects = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
+    }
+
+    const { default: Project } = await import('../../models/project');
+    const projects = await Project.find({
+      professionalId: new mongoose.Types.ObjectId(userId),
+      status: 'published',
+    })
+      .select('title category service subprojects')
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    return res.json({ success: true, data: { projects } });
+  } catch (error: any) {
+    console.error('Error getting active projects:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
   }
 };
