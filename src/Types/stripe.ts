@@ -164,7 +164,6 @@ export type IdempotencyOperation =
   | 'account-create'
   | 'onboarding-link'
   | 'extra-cost-payment-intent'
-  | 'extra-cost-refund'
   | 'unit-underuse-refund'
   | 'dispute-resolution-refund';
 

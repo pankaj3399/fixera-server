@@ -15,6 +15,10 @@ import {
   normalizeWarrantyDuration,
 } from '../../utils/warranty';
 
+const DISPUTE_BOOKING_STATES = ['dispute', 'in_dispute', 'under_review'] as const;
+const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
+const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
+
 const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
 
 const getProfessionalId = async (booking: any) => {
@@ -156,6 +160,16 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
+    if (!DISPUTE_BOOKING_STATES.includes(String(booking.status) as typeof DISPUTE_BOOKING_STATES[number])) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'BOOKING_NOT_IN_DISPUTE',
+          message: `Booking ${bookingId} is not in a dispute state`
+        }
+      });
+    }
+
     return res.json({
       success: true,
       data: { booking }
@@ -204,7 +218,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    if (booking.status !== 'dispute') {
+    if (booking.status !== ACTIVE_DISPUTE_STATUS) {
       return res.status(400).json({
         success: false,
         error: { code: 'INVALID_STATUS', message: `Booking is not in dispute status (current: ${booking.status})` }
@@ -229,57 +243,91 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
     }
 
-    const transferResult = await captureAndTransferPayment(booking._id.toString());
+    const completionDate = new Date();
+    const resolvedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: ACTIVE_DISPUTE_STATUS },
+      {
+        $set: {
+          status: COMPLETED_BOOKING_STATUS,
+          actualEndDate: completionDate,
+        },
+        $push: {
+          statusHistory: {
+            status: COMPLETED_BOOKING_STATUS,
+            timestamp: completionDate,
+            updatedBy: adminUser._id,
+            note: `Admin resolved dispute (${action}): ${resolution}`
+          }
+        }
+      },
+      { new: true }
+    );
+
+    if (!resolvedBooking) {
+      const currentBooking = await Booking.findById(booking._id).select('status');
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'BOOKING_STATUS_CONFLICT',
+          message: `Booking status changed to "${currentBooking?.status || booking.status}" before the dispute could be resolved`
+        }
+      });
+    }
+
+    const transferResult = await captureAndTransferPayment(resolvedBooking._id.toString());
     if (!transferResult.success) {
-      const paymentStatus = booking.payment?.status ? String(booking.payment.status) : '';
+      const paymentStatus = resolvedBooking.payment?.status ? String(resolvedBooking.payment.status) : '';
       if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
         console.error('Transfer failed during dispute resolution:', transferResult.error);
       }
     }
 
-    if (finalExtraCostAmount < 0 && booking.payment?.stripePaymentIntentId) {
+    if (finalExtraCostAmount < 0 && resolvedBooking.payment?.stripePaymentIntentId) {
       const refundAmount = Math.abs(finalExtraCostAmount);
-      const currency = (booking.payment.currency || 'EUR').toLowerCase();
+      const currency = (resolvedBooking.payment.currency || 'EUR').toLowerCase();
       await stripe.refunds.create({
-        payment_intent: booking.payment.stripePaymentIntentId,
+        payment_intent: resolvedBooking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, currency),
       }, {
         idempotencyKey: generateIdempotencyKey({
-          bookingId: booking._id.toString(),
+          bookingId: resolvedBooking._id.toString(),
           operation: 'dispute-resolution-refund',
-          version: Date.now().toString(),
+          version: `dispute-resolution:${convertToStripeAmount(refundAmount, currency)}`,
         })
       });
     }
 
-    if (booking.dispute) {
-      booking.dispute.resolvedAt = new Date();
-      booking.dispute.resolution = resolution;
-      booking.dispute.resolvedBy = adminUser._id;
+    if (resolvedBooking.dispute) {
+      resolvedBooking.dispute.resolvedAt = new Date();
+      resolvedBooking.dispute.resolution = resolution;
+      resolvedBooking.dispute.resolvedBy = adminUser._id;
     }
 
-    const completionDate = new Date();
-    booking.status = 'completed' as BookingStatus;
-    booking.actualEndDate = completionDate;
-    booking.statusHistory.push({
-      status: 'completed' as BookingStatus,
-      timestamp: completionDate,
-      updatedBy: adminUser._id,
-      note: `Admin resolved dispute (${action}): ${resolution}`
-    });
+    if (action === 'accept_professional') {
+      resolvedBooking.extraCostStatus = 'confirmed';
+    } else if (action === 'reject_extra_costs') {
+      resolvedBooking.extraCostStatus = 'confirmed';
+      resolvedBooking.extraCostTotal = 0;
+    } else if (action === 'adjust') {
+      resolvedBooking.extraCostStatus = 'confirmed';
+      resolvedBooking.extraCostTotal = adjustedAmount;
+      if (resolvedBooking.dispute) {
+        resolvedBooking.dispute.adminAdjustedAmount = adjustedAmount;
+      }
+    }
 
-    markMilestonesCompleted(booking, completionDate);
-    await ensureWarrantyCoverageSnapshot(booking);
-    await booking.save();
+    markMilestonesCompleted(resolvedBooking, completionDate);
+    await ensureWarrantyCoverageSnapshot(resolvedBooking);
+    await resolvedBooking.save();
 
     try {
-      const bookingAmount = (booking.payment?.amount || 0) + Math.max(0, finalExtraCostAmount);
-      await processReferralCompletion(booking.customer, booking._id, bookingAmount);
+      const bookingAmount = (resolvedBooking.payment?.amount || 0) + Math.max(0, finalExtraCostAmount);
+      await processReferralCompletion(resolvedBooking.customer, resolvedBooking._id, bookingAmount);
     } catch (e) {
       console.error('Error processing referral completion:', e);
     }
 
-    const proId = await getProfessionalId(booking);
+    const proId = await getProfessionalId(resolvedBooking);
     try {
       if (proId) await updateProfessionalLevel(proId);
     } catch (e) {
@@ -287,7 +335,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     }
 
     try {
-      await awardBookingCompletionPoints(proId, booking.customer, booking._id);
+      await awardBookingCompletionPoints(proId, resolvedBooking.customer, resolvedBooking._id);
     } catch (e) {
       console.error('Error awarding booking completion points:', e);
     }
@@ -296,7 +344,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       success: true,
       data: {
         message: `Dispute resolved: ${action}`,
-        booking,
+        booking: resolvedBooking,
       }
     });
   } catch (error: any) {

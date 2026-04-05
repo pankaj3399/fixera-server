@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import Project from '../../models/project';
 import User from '../../models/user';
-import { uploadToS3, generateFileName } from '../../utils/s3Upload';
+import { uploadToS3, generateFileName, deleteFromS3 } from '../../utils/s3Upload';
 import { captureAndTransferPayment } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import {
@@ -21,6 +21,9 @@ import {
   getBookingWarrantyDuration,
   normalizeWarrantyDuration,
 } from '../../utils/warranty';
+
+const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
+const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
 const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
 
@@ -102,6 +105,8 @@ const awardBookingCompletionPoints = async (
 };
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
+  let attachmentUrls: string[] = [];
+  let completionSaved = false;
   try {
     const { bookingId } = req.params;
     const authUser = (req as any).user;
@@ -140,17 +145,29 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
     }
 
     const { notes, extraCosts: extraCostsRaw } = req.body;
-    const extraCostsInput = typeof extraCostsRaw === 'string' ? JSON.parse(extraCostsRaw) : extraCostsRaw;
-    const files = (req as any).files as Express.Multer.File[] | undefined;
-
-    let attachmentUrls: string[] = [];
-    if (files && files.length > 0) {
-      for (const file of files) {
-        const fileName = generateFileName(file.originalname, userId, 'completion-attachments');
-        const result = await uploadToS3(file, fileName);
-        attachmentUrls.push(result.key);
+    let extraCostsInput = extraCostsRaw;
+    if (typeof extraCostsRaw === 'string') {
+      const rawValue = extraCostsRaw.trim();
+      if (!rawValue) {
+        extraCostsInput = undefined;
+      } else {
+        try {
+          extraCostsInput = JSON.parse(rawValue);
+        } catch (error: any) {
+          console.error('Invalid extra costs JSON during professional completion:', {
+            bookingId,
+            userId,
+            extraCostsRaw,
+            error: error?.message || error,
+          });
+          return res.status(400).json({
+            success: false,
+            error: { code: 'VALIDATION_ERROR', message: 'Invalid extraCosts payload' }
+          });
+        }
       }
     }
+    const files = (req as any).files as Express.Multer.File[] | undefined;
 
     let validatedExtraCosts: any[] = [];
     let extraCostTotal = 0;
@@ -254,6 +271,20 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       }
     }
 
+    if (files && files.length > 0) {
+      try {
+        for (const file of files) {
+          const fileName = generateFileName(file.originalname, userId, 'completion-attachments');
+          const result = await uploadToS3(file, fileName);
+          attachmentUrls.push(result.key);
+        }
+      } catch (error) {
+        await Promise.allSettled(attachmentUrls.map((key) => deleteFromS3(key)));
+        attachmentUrls = [];
+        throw error;
+      }
+    }
+
     booking.completionAttestation = {
       confirmedAt: new Date(),
       confirmedBy: authUser._id,
@@ -278,6 +309,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
     });
 
     await booking.save();
+    completionSaved = true;
 
     return res.json({
       success: true,
@@ -288,6 +320,10 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       }
     });
   } catch (error: any) {
+    if (!completionSaved && attachmentUrls.length > 0) {
+      await Promise.allSettled(attachmentUrls.map((key) => deleteFromS3(key)));
+      attachmentUrls = [];
+    }
     console.error('Error in professional completion:', error);
     return res.status(500).json({
       success: false,
@@ -388,7 +424,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       idempotencyKey: generateIdempotencyKey({
         bookingId: booking._id.toString(),
         operation: 'extra-cost-payment-intent',
-        timestamp: Date.now(),
+        version: `${convertToStripeAmount(extraCostTotal, currency)}:${booking.extraCosts?.length || 0}`,
       })
     });
 
@@ -467,9 +503,59 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       }
     }
 
-    const transferResult = await captureAndTransferPayment(booking._id.toString());
+    const completionDate = new Date();
+    const completedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+      {
+        $set: {
+          status: COMPLETED_BOOKING_STATUS,
+          actualEndDate: completionDate,
+        },
+        $push: {
+          statusHistory: {
+            status: COMPLETED_BOOKING_STATUS,
+            timestamp: completionDate,
+            updatedBy: authUser._id,
+            note: extraCostTotal !== 0
+              ? `Customer confirmed completion with extra costs of ${extraCostTotal}`
+              : 'Customer confirmed completion'
+          }
+        }
+      },
+      { new: true }
+    );
+
+    if (!completedBooking) {
+      const currentBooking = await Booking.findById(booking._id).select('status');
+      if (currentBooking?.status === COMPLETED_BOOKING_STATUS) {
+        return res.json({
+          success: true,
+          data: {
+            message: 'Booking is already completed',
+            booking: currentBooking,
+          }
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'BOOKING_STATUS_CONFLICT',
+          message: `Booking status changed to "${currentBooking?.status || booking.status}" before completion could be finalized`
+        }
+      });
+    }
+
+    if (completedBooking.extraCosts && completedBooking.extraCosts.length > 0) {
+      completedBooking.extraCostStatus = 'confirmed';
+    }
+
+    markMilestonesCompleted(completedBooking, completionDate);
+    await ensureWarrantyCoverageSnapshot(completedBooking);
+
+    const transferResult = await captureAndTransferPayment(completedBooking._id.toString());
     if (!transferResult.success) {
-      const paymentStatus = booking.payment?.status ? String(booking.payment.status) : '';
+      const paymentStatus = completedBooking.payment?.status ? String(completedBooking.payment.status) : '';
       if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
         return res.status(400).json({
           success: false,
@@ -478,49 +564,31 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       }
     }
 
-    if (extraCostTotal < 0 && booking.payment?.stripePaymentIntentId) {
+    if (extraCostTotal < 0 && completedBooking.payment?.stripePaymentIntentId) {
       const refundAmount = Math.abs(extraCostTotal);
-      const currency = (booking.payment.currency || 'EUR').toLowerCase();
+      const currency = (completedBooking.payment.currency || 'EUR').toLowerCase();
       await stripe.refunds.create({
-        payment_intent: booking.payment.stripePaymentIntentId,
+        payment_intent: completedBooking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, currency),
       }, {
         idempotencyKey: generateIdempotencyKey({
-          bookingId: booking._id.toString(),
+          bookingId: completedBooking._id.toString(),
           operation: 'unit-underuse-refund',
-          version: Date.now().toString(),
+          version: `${completedBooking.payment.stripePaymentIntentId}:${convertToStripeAmount(refundAmount, currency)}`,
         })
       });
     }
 
-    if (booking.extraCosts && booking.extraCosts.length > 0) {
-      booking.extraCostStatus = 'confirmed';
-    }
-
-    const completionDate = new Date();
-    booking.status = 'completed' as BookingStatus;
-    booking.actualEndDate = completionDate;
-    booking.statusHistory.push({
-      status: 'completed' as BookingStatus,
-      timestamp: completionDate,
-      updatedBy: authUser._id,
-      note: extraCostTotal !== 0
-        ? `Customer confirmed completion with extra costs of ${extraCostTotal}`
-        : 'Customer confirmed completion'
-    });
-
-    markMilestonesCompleted(booking, completionDate);
-    await ensureWarrantyCoverageSnapshot(booking);
-    await booking.save();
+    await completedBooking.save();
 
     try {
-      const bookingAmount = (booking.payment?.amount || 0) + Math.max(0, extraCostTotal);
-      await processReferralCompletion(booking.customer, booking._id, bookingAmount);
+      const bookingAmount = (completedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
+      await processReferralCompletion(completedBooking.customer, completedBooking._id, bookingAmount);
     } catch (e) {
       console.error('Error processing referral completion:', e);
     }
 
-    const proId = await getProfessionalId(booking);
+    const proId = await getProfessionalId(completedBooking);
     try {
       if (proId) await updateProfessionalLevel(proId);
     } catch (e) {
@@ -528,7 +596,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     }
 
     try {
-      await awardBookingCompletionPoints(proId, booking.customer, booking._id);
+      await awardBookingCompletionPoints(proId, completedBooking.customer, completedBooking._id);
     } catch (e) {
       console.error('Error awarding booking completion points:', e);
     }
@@ -537,7 +605,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       success: true,
       data: {
         message: 'Booking completed successfully',
-        booking,
+        booking: completedBooking,
       }
     });
   } catch (error: any) {
