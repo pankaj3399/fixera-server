@@ -214,14 +214,44 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    // For milestone-based payments, only charge the first unpaid milestone
     let chargeAmount = booking.quote.amount;
     let milestoneIndex: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
-      const firstUnpaid = booking.milestonePayments.find((m: any) => m.status !== 'paid');
-      if (firstUnpaid) {
-        chargeAmount = firstUnpaid.amount;
-        milestoneIndex = booking.milestonePayments.indexOf(firstUnpaid);
+      const sorted = booking.milestonePayments
+        .map((m: any, idx: number) => ({ ...m.toObject?.() || m, _originalIndex: idx }))
+        .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0));
+
+      const isPayable = (m: any) => {
+        if (m.status === 'paid') return false;
+        const cond = m.dueCondition;
+        if (cond === 'on_start' || cond === 'on_milestone_start') return true;
+        if (cond === 'on_milestone_completion') {
+          const prevOrder = (m.order ?? 0) - 1;
+          const prev = sorted.find((s: any) => (s.order ?? 0) === prevOrder);
+          return prev && prev.workStatus === 'completed';
+        }
+        if (cond === 'on_project_completion') {
+          return sorted.filter((s: any) => s._originalIndex !== m._originalIndex)
+            .every((s: any) => s.workStatus === 'completed');
+        }
+        if (cond === 'custom_date') {
+          return m.customDueDate && new Date(m.customDueDate) <= new Date();
+        }
+        return true;
+      };
+
+      const nextPayable = sorted.find(isPayable);
+      if (nextPayable) {
+        chargeAmount = nextPayable.amount;
+        milestoneIndex = nextPayable._originalIndex;
+      } else {
+        return {
+          success: false,
+          error: {
+            code: 'NO_MILESTONE_DUE',
+            message: 'No milestone is currently due for payment.'
+          }
+        };
       }
     }
     if (selectedExtraOptionsTotal > 0) {

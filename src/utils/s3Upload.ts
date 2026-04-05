@@ -57,6 +57,32 @@ const reviewImageFilter = (req: Request, file: Express.Multer.File, cb: multer.F
   }
 };
 
+const rfqFileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  const allowedMimeTypes = [
+    ...ALLOWED_IMAGE_MIMES,
+    'application/pdf',
+    'text/plain',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ];
+
+  if (allowedMimeTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Allowed: JPEG, PNG, WebP, PDF, TXT, DOC, DOCX, XLS, XLSX'));
+  }
+};
+
+export const rfqUpload = multer({
+  storage,
+  fileFilter: rfqFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+});
+
 export const uploadReviewImages = multer({
   storage,
   fileFilter: reviewImageFilter,

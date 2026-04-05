@@ -296,11 +296,27 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           : typeof selectedSubprojectIndex === "string"
           ? Number.parseInt(selectedSubprojectIndex, 10)
           : undefined;
-      const subprojectIndex =
+      const explicitIndex =
         typeof parsedSubprojectIndex === "number" &&
         !Number.isNaN(parsedSubprojectIndex)
           ? parsedSubprojectIndex
           : undefined;
+
+      let effectiveSubprojectIndex: number | undefined = explicitIndex;
+      if (typeof effectiveSubprojectIndex !== "number" && Array.isArray(project.subprojects)) {
+        if (project.subprojects.length === 1) {
+          effectiveSubprojectIndex = 0;
+        } else {
+          const rfqIndexes = project.subprojects
+            .map((sp: any, i: number) => (sp?.pricing?.type === "rfq" ? i : -1))
+            .filter((i: number) => i >= 0);
+          if (rfqIndexes.length === 1) {
+            effectiveSubprojectIndex = rfqIndexes[0];
+          }
+        }
+      }
+
+      const subprojectIndex = effectiveSubprojectIndex;
 
       const isRfqSubproject =
         typeof subprojectIndex === "number" &&
@@ -520,6 +536,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
             success: false,
             msg: "Checkout payment requires a positive total amount",
           });
+        }
+
+        if (normalizedExtraOptionIndexes.length > 0) {
+          bookingData.selectedExtraOptions = normalizedExtraOptionIndexes;
         }
 
         bookingData.quote = {

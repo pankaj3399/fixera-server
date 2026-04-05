@@ -167,7 +167,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
 // document-level operations (create/save). Mongoose update operations
 // (updateOne/findOneAndUpdate) do not invoke this with document context.
 ChatMessageSchema.path("text").validate(function (value: string | undefined) {
-  if (this.messageType === "review_notification" || this.messageType === "warranty_notification") return true;
+  if (this.messageType === "review_notification" || this.messageType === "warranty_notification" || this.messageType === "quotation_notification") return true;
   const hasText = typeof value === "string" && value.trim().length > 0;
   const hasImages = Array.isArray(this.images) && this.images.length > 0;
   const hasAttachments = Array.isArray(this.attachments) && this.attachments.length > 0;

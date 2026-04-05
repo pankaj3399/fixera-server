@@ -670,9 +670,32 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
     let linkedProject: any = null;
     if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
       const { default: Project } = await import('../../models/project');
-      linkedProject = await Project.findById(projectId).select('title subprojects professionalId');
-      if (linkedProject && linkedProject.professionalId?.toString() !== userId) {
+      linkedProject = await Project.findById(projectId).select('title subprojects professionalId status');
+      if (!linkedProject) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_PROJECT', message: 'Project not found' } });
+      }
+      if (linkedProject.professionalId?.toString() !== userId) {
         return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'You can only link to your own projects' } });
+      }
+      if (linkedProject.status !== 'published') {
+        return res.status(400).json({ success: false, error: { code: 'PROJECT_NOT_PUBLISHED', message: 'Project must be published to link a quotation' } });
+      }
+
+      if (typeof selectedSubprojectIndex !== 'undefined') {
+        const parsedIdx = typeof selectedSubprojectIndex === 'number'
+          ? selectedSubprojectIndex
+          : typeof selectedSubprojectIndex === 'string'
+          ? Number.parseInt(selectedSubprojectIndex, 10)
+          : Number.NaN;
+
+        if (
+          !Number.isInteger(parsedIdx) ||
+          parsedIdx < 0 ||
+          !Array.isArray(linkedProject.subprojects) ||
+          parsedIdx >= linkedProject.subprojects.length
+        ) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_SUBPROJECT', message: 'Invalid subproject index' } });
+        }
       }
     }
 

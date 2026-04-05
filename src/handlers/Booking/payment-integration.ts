@@ -762,7 +762,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
     const userId = (req as any).user?._id?.toString();
-    const { scheduledStartDate, scheduledStartTime, additionalNotes, selectedExtraOptions } = req.body;
+    const { scheduledStartDate, scheduledStartTime, additionalNotes } = req.body;
+    const hasExplicitExtraOptions = 'selectedExtraOptions' in req.body;
+    const selectedExtraOptions = hasExplicitExtraOptions ? req.body.selectedExtraOptions : undefined;
 
     if (!userId) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
@@ -806,6 +808,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
         subprojectIndex: resolvedSubprojectIndex,
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+        customerBlocks: booking.customerBlocks,
       });
 
       if (!validation.valid) {
@@ -823,6 +826,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
         subprojectIndex: resolvedSubprojectIndex,
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+        customerBlocks: booking.customerBlocks,
       });
 
       if (!window) {
@@ -845,7 +849,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       if (typeof resolvedSubprojectIndex === 'number') {
         booking.selectedSubprojectIndex = resolvedSubprojectIndex;
       }
-      booking.selectedExtraOptions = normalizeSelectedExtraOptions(selectedExtraOptions, projectDoc);
+      if (hasExplicitExtraOptions) {
+        booking.selectedExtraOptions = normalizeSelectedExtraOptions(selectedExtraOptions, projectDoc);
+      }
     } else {
       const startDate = new Date(scheduledStartDate);
       if (isNaN(startDate.getTime()) || startDate < new Date()) {

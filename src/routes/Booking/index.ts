@@ -14,7 +14,7 @@ import { respondToQuoteWithPayment, ensurePaymentIntent, updateBookingStatusWith
 import { getDiscountPreview } from '../../handlers/Booking/discountPreview';
 import { submitCustomerReview, submitProfessionalReview, replyToCustomerReview } from '../../handlers/Booking/reviews';
 import { protect } from '../../middlewares/auth';
-import { upload, uploadReviewImages } from '../../utils/s3Upload';
+import { upload, rfqUpload, uploadReviewImages } from '../../utils/s3Upload';
 
 const router = express.Router();
 
@@ -25,7 +25,7 @@ router.use(protect);
 router.post('/create', createBooking);
 
 // Upload RFQ attachment (10MB limit)
-router.post('/rfq-upload', upload.single('file'), uploadRFQAttachment);
+router.post('/rfq-upload', rfqUpload.single('file'), uploadRFQAttachment);
 
 // Get all bookings for current user
 router.get('/my-bookings', getMyBookings);
