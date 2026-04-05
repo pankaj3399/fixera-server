@@ -1,107 +1,38 @@
 import { Request, Response } from 'express';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
-import Project from '../../models/project';
 import User from '../../models/user';
+import PlatformSettings from '../../models/platformSettings';
 import { uploadToS3, generateFileName, deleteFromS3 } from '../../utils/s3Upload';
 import { captureAndTransferPayment } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import {
+  calculatePlatformCommission,
   generateIdempotencyKey,
   convertToStripeAmount,
   buildPaymentMetadata,
 } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
-import { addPoints } from '../../utils/pointsSystem';
-import PointsConfig from '../../models/pointsConfig';
-import PointTransaction from '../../models/pointTransaction';
 import Payment from '../../models/payment';
 import {
-  addWarrantyDuration,
-  getBookingWarrantyDuration,
-  normalizeWarrantyDuration,
-} from '../../utils/warranty';
+  awardBookingCompletionPoints,
+  ensureWarrantyCoverageSnapshot,
+  getProfessionalId,
+  markMilestonesCompleted,
+} from '../../utils/bookingHelpers';
 
 const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
-const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
-
-const getProfessionalId = async (booking: any) => {
-  if (booking.professional) return booking.professional;
-  if (!booking.project) return undefined;
-  const project = await Project.findById(booking.project).select('professionalId');
-  return project?.professionalId;
-};
-
-const markMilestonesCompleted = (booking: any, completedAt: Date) => {
-  if (!Array.isArray(booking.milestonePayments) || booking.milestonePayments.length === 0) return;
-  booking.milestonePayments.forEach((milestone: any) => {
-    milestone.workStatus = 'completed';
-    milestone.startedAt = milestone.startedAt || booking.actualStartDate || completedAt;
-    milestone.completedAt = milestone.completedAt || completedAt;
-  });
-};
-
-const ensureWarrantyCoverageSnapshot = async (booking: any) => {
-  let source: 'quote' | 'project_subproject' = 'quote';
-  let duration = normalizeWarrantyDuration(booking.warrantyCoverage?.duration)
-    || getBookingWarrantyDuration(booking);
-
-  if (!duration && booking.project) {
-    const project = await Project.findById(booking.project).select('subprojects');
-    const subprojects = Array.isArray((project as any)?.subprojects) ? (project as any).subprojects : [];
-    if (
-      typeof booking.selectedSubprojectIndex === 'number' &&
-      booking.selectedSubprojectIndex >= 0 &&
-      booking.selectedSubprojectIndex < subprojects.length
-    ) {
-      const selectedSubproject = subprojects[booking.selectedSubprojectIndex];
-      duration = normalizeWarrantyDuration(selectedSubproject?.warrantyPeriod);
-      if (duration) source = 'project_subproject';
-    }
+const getPlatformCommissionPercent = async () => {
+  try {
+    const platformConfig = await PlatformSettings.getCurrentConfig();
+    return platformConfig.commissionPercent;
+  } catch (configError) {
+    console.warn('Failed to fetch platform commission for extra-cost payment, falling back to env var:', configError);
+    const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
+    return Number.isFinite(parsed) ? parsed : 0;
   }
-
-  if (!duration) return;
-
-  const startsAt =
-    booking.warrantyCoverage?.startsAt instanceof Date
-      ? booking.warrantyCoverage.startsAt
-      : booking.actualEndDate || new Date();
-  const endsAt =
-    booking.warrantyCoverage?.endsAt instanceof Date
-      ? booking.warrantyCoverage.endsAt
-      : addWarrantyDuration(startsAt, duration);
-
-  booking.warrantyCoverage = {
-    duration,
-    startsAt,
-    endsAt,
-    source: booking.warrantyCoverage?.source || source,
-  };
-};
-
-const awardBookingCompletionPoints = async (
-  professionalId: any,
-  customerId: any,
-  bookingId: any
-) => {
-  const pointsConfig = await PointsConfig.getCurrentConfig();
-  if (!pointsConfig.isEnabled) return;
-
-  const award = async (userId: any, amount: number, desc: string) => {
-    if (!userId || amount <= 0) return;
-    const existing = await PointTransaction.findOne({ userId, relatedBooking: bookingId, source: 'booking_completion' });
-    if (existing) return;
-    try {
-      await addPoints(userId, amount, 'booking_completion', desc, { relatedBooking: bookingId });
-    } catch (error: any) {
-      if (!isDuplicateKeyError(error)) throw error;
-    }
-  };
-
-  await award(professionalId, pointsConfig.professionalEarningPerBooking, 'Earned for completing booking');
-  await award(customerId, pointsConfig.customerEarningPerBooking, 'Earned for completed booking');
 };
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
@@ -403,11 +334,20 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     }
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
+    const commissionPercent = await getPlatformCommissionPercent();
+    const applicationFeeAmount = convertToStripeAmount(
+      calculatePlatformCommission(extraCostTotal, commissionPercent),
+      currency
+    );
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: convertToStripeAmount(extraCostTotal, currency),
       currency,
       payment_method_types: ['card'],
+      transfer_data: {
+        destination: professional.stripe.accountId,
+      },
+      ...(applicationFeeAmount > 0 ? { application_fee_amount: applicationFeeAmount } : {}),
       metadata: {
         ...buildPaymentMetadata(
           booking._id.toString(),
@@ -660,30 +600,48 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       });
     }
 
-    booking.status = 'dispute' as BookingStatus;
-    if (booking.extraCosts && booking.extraCosts.length > 0) {
-      booking.extraCostStatus = 'disputed';
-    }
-    booking.dispute = {
-      raisedBy: authUser._id,
-      reason,
-      description: description || '',
-      raisedAt: new Date(),
-    };
-    booking.statusHistory.push({
-      status: 'dispute' as BookingStatus,
-      timestamp: new Date(),
-      updatedBy: authUser._id,
-      note: `Customer disputed: ${reason}`
-    });
+    const disputedAt = new Date();
+    const disputedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+      {
+        $set: {
+          status: 'dispute' as BookingStatus,
+          ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'disputed' } : {}),
+          dispute: {
+            raisedBy: authUser._id,
+            reason,
+            description: description || '',
+            raisedAt: disputedAt,
+          }
+        },
+        $push: {
+          statusHistory: {
+            status: 'dispute' as BookingStatus,
+            timestamp: disputedAt,
+            updatedBy: authUser._id,
+            note: `Customer disputed: ${reason}`
+          }
+        }
+      },
+      { new: true }
+    );
 
-    await booking.save();
+    if (!disputedBooking) {
+      const currentBooking = await Booking.findById(booking._id).select('status');
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'BOOKING_STATUS_CONFLICT',
+          message: `Booking status changed to "${currentBooking?.status || booking.status}" before the dispute could be recorded`
+        }
+      });
+    }
 
     return res.json({
       success: true,
       data: {
         message: 'Dispute has been raised. An admin will review your case.',
-        booking,
+        booking: disputedBooking,
       }
     });
   } catch (error: any) {

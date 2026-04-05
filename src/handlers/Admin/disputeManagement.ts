@@ -1,101 +1,156 @@
 import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
-import Project from '../../models/project';
+import User from '../../models/user';
 import { captureAndTransferPayment } from '../Stripe/payment';
-import { stripe } from '../../services/stripe';
+import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
-import { addPoints } from '../../utils/pointsSystem';
-import PointsConfig from '../../models/pointsConfig';
-import PointTransaction from '../../models/pointTransaction';
 import {
-  addWarrantyDuration,
-  getBookingWarrantyDuration,
-  normalizeWarrantyDuration,
-} from '../../utils/warranty';
+  awardBookingCompletionPoints,
+  ensureWarrantyCoverageSnapshot,
+  getProfessionalId,
+  markMilestonesCompleted,
+} from '../../utils/bookingHelpers';
 
 const DISPUTE_BOOKING_STATES = ['dispute', 'in_dispute', 'under_review'] as const;
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
-const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
+type DisputeResolutionAction = 'accept_professional' | 'reject_extra_costs' | 'adjust';
 
-const getProfessionalId = async (booking: any) => {
-  if (booking.professional) return booking.professional;
-  if (!booking.project) return undefined;
-  const project = await Project.findById(booking.project).select('professionalId');
-  return project?.professionalId;
-};
-
-const markMilestonesCompleted = (booking: any, completedAt: Date) => {
-  if (!Array.isArray(booking.milestonePayments) || booking.milestonePayments.length === 0) return;
-  booking.milestonePayments.forEach((milestone: any) => {
-    milestone.workStatus = 'completed';
-    milestone.startedAt = milestone.startedAt || booking.actualStartDate || completedAt;
-    milestone.completedAt = milestone.completedAt || completedAt;
-  });
-};
-
-const ensureWarrantyCoverageSnapshot = async (booking: any) => {
-  let source: 'quote' | 'project_subproject' = 'quote';
-  let duration = normalizeWarrantyDuration(booking.warrantyCoverage?.duration)
-    || getBookingWarrantyDuration(booking);
-
-  if (!duration && booking.project) {
-    const project = await Project.findById(booking.project).select('subprojects');
-    const subprojects = Array.isArray((project as any)?.subprojects) ? (project as any).subprojects : [];
-    if (
-      typeof booking.selectedSubprojectIndex === 'number' &&
-      booking.selectedSubprojectIndex >= 0 &&
-      booking.selectedSubprojectIndex < subprojects.length
-    ) {
-      const selectedSubproject = subprojects[booking.selectedSubprojectIndex];
-      duration = normalizeWarrantyDuration(selectedSubproject?.warrantyPeriod);
-      if (duration) source = 'project_subproject';
-    }
+const buildDisputeFilter = (status?: string) => {
+  if (status === 'resolved') {
+    return { status: COMPLETED_BOOKING_STATUS, 'dispute.resolvedAt': { $ne: null } };
   }
 
-  if (!duration) return;
+  if (status === 'open') {
+    return { status: ACTIVE_DISPUTE_STATUS, 'dispute.resolvedAt': null };
+  }
 
-  const startsAt =
-    booking.warrantyCoverage?.startsAt instanceof Date
-      ? booking.warrantyCoverage.startsAt
-      : booking.actualEndDate || new Date();
-  const endsAt =
-    booking.warrantyCoverage?.endsAt instanceof Date
-      ? booking.warrantyCoverage.endsAt
-      : addWarrantyDuration(startsAt, duration);
-
-  booking.warrantyCoverage = {
-    duration,
-    startsAt,
-    endsAt,
-    source: booking.warrantyCoverage?.source || source,
+  return {
+    $or: [
+      { status: ACTIVE_DISPUTE_STATUS },
+      { status: COMPLETED_BOOKING_STATUS, 'dispute.resolvedAt': { $ne: null } },
+    ]
   };
 };
 
-const awardBookingCompletionPoints = async (
-  professionalId: any,
-  customerId: any,
-  bookingId: any
-) => {
-  const pointsConfig = await PointsConfig.getCurrentConfig();
-  if (!pointsConfig.isEnabled) return;
+const applyExtraCostUpdate = (
+  resolvedBooking: any,
+  action: DisputeResolutionAction,
+  adjustedAmount?: number
+): number => {
+  const originalExtraCostAmount = Number(resolvedBooking.extraCostTotal || 0);
+  resolvedBooking.extraCostStatus = 'confirmed';
 
-  const award = async (userId: any, amount: number, desc: string) => {
-    if (!userId || amount <= 0) return;
-    const existing = await PointTransaction.findOne({ userId, relatedBooking: bookingId, source: 'booking_completion' });
-    if (existing) return;
-    try {
-      await addPoints(userId, amount, 'booking_completion', desc, { relatedBooking: bookingId });
-    } catch (error: any) {
-      if (!isDuplicateKeyError(error)) throw error;
+  if (action === 'accept_professional') {
+    return originalExtraCostAmount;
+  }
+
+  if (action === 'reject_extra_costs') {
+    resolvedBooking.extraCostTotal = 0;
+    return 0;
+  }
+
+  const finalAdjustedAmount = Number(adjustedAmount);
+  resolvedBooking.extraCostTotal = finalAdjustedAmount;
+  if (resolvedBooking.dispute) {
+    resolvedBooking.dispute.adminAdjustedAmount = finalAdjustedAmount;
+  }
+  return finalAdjustedAmount;
+};
+
+const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {
+  if (!(finalExtraCostAmount > 0)) return;
+
+  const extraCostPaymentIntentId = resolvedBooking.payment?.extraCostStripePaymentIntentId;
+  if (!extraCostPaymentIntentId) {
+    console.warn(`[DISPUTE] Booking ${resolvedBooking._id} has approved extra costs but no extra-cost PaymentIntent to transfer.`);
+    return;
+  }
+
+  try {
+    const paymentIntent = await stripe.paymentIntents.retrieve(extraCostPaymentIntentId, { expand: ['latest_charge'] });
+    if (paymentIntent.status !== 'succeeded') {
+      console.warn(`[DISPUTE] Extra-cost PaymentIntent ${extraCostPaymentIntentId} is ${paymentIntent.status}; skipping professional transfer.`);
+      return;
     }
-  };
 
-  await award(professionalId, pointsConfig.professionalEarningPerBooking, 'Earned for completing booking');
-  await award(customerId, pointsConfig.customerEarningPerBooking, 'Earned for completed booking');
+    if (paymentIntent.transfer_data?.destination) {
+      return;
+    }
+
+    const professionalId = await getProfessionalId(resolvedBooking);
+    if (!professionalId) {
+      console.error(`[DISPUTE] Missing professional on booking ${resolvedBooking._id}; cannot transfer approved extra costs.`);
+      return;
+    }
+
+    const professional = await User.findById(professionalId).select('stripe.accountId');
+    const destinationAccountId = (professional as any)?.stripe?.accountId;
+    if (!destinationAccountId) {
+      console.error(`[DISPUTE] Professional ${professionalId} has no connected Stripe account; cannot transfer approved extra costs.`);
+      return;
+    }
+
+    let transferCurrency = String(resolvedBooking.payment?.currency || paymentIntent.currency || 'EUR').toLowerCase();
+    let sourceTransaction: string | undefined;
+    let availableAmount = paymentIntent.amount_received || paymentIntent.amount || 0;
+
+    if (paymentIntent.latest_charge) {
+      const latestCharge = typeof paymentIntent.latest_charge === 'string'
+        ? await stripe.charges.retrieve(paymentIntent.latest_charge, { expand: ['balance_transaction'] })
+        : paymentIntent.latest_charge;
+
+      sourceTransaction = latestCharge.id;
+      if (latestCharge.currency) {
+        transferCurrency = latestCharge.currency.toLowerCase();
+      }
+
+      const balanceTransaction =
+        typeof latestCharge.balance_transaction === 'string'
+          ? null
+          : latestCharge.balance_transaction;
+
+      if (balanceTransaction?.currency) {
+        transferCurrency = balanceTransaction.currency.toLowerCase();
+      }
+      if (typeof balanceTransaction?.amount === 'number' && balanceTransaction.amount > 0) {
+        availableAmount = balanceTransaction.amount;
+      }
+    }
+
+    const requestedAmount = convertToStripeAmount(finalExtraCostAmount, transferCurrency);
+    const transferAmount = Math.min(requestedAmount, availableAmount);
+    if (transferAmount <= 0) {
+      console.warn(`[DISPUTE] Extra-cost transfer amount for booking ${resolvedBooking._id} resolved to 0; skipping transfer.`);
+      return;
+    }
+
+    await stripe.transfers.create({
+      amount: transferAmount,
+      currency: transferCurrency,
+      destination: destinationAccountId,
+      ...(sourceTransaction ? { source_transaction: sourceTransaction } : {}),
+      metadata: {
+        bookingId: resolvedBooking._id.toString(),
+        bookingNumber: resolvedBooking.bookingNumber || '',
+        environment: STRIPE_CONFIG.environment,
+        type: 'extra_cost_dispute_resolution',
+        extraCostPaymentIntentId,
+      },
+      description: `Extra cost payout for Booking #${resolvedBooking.bookingNumber}`,
+    }, {
+      idempotencyKey: generateIdempotencyKey({
+        bookingId: resolvedBooking._id.toString(),
+        operation: 'transfer',
+        version: `extra-cost:${extraCostPaymentIntentId}:${transferAmount}`,
+      })
+    });
+  } catch (error) {
+    console.error('Failed to transfer approved extra costs during dispute resolution:', error);
+  }
 };
 
 export const getDisputes = async (req: Request, res: Response) => {
@@ -104,12 +159,7 @@ export const getDisputes = async (req: Request, res: Response) => {
     const pageNum = Math.max(1, parseInt(page as string) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
 
-    const filter: any = { status: 'dispute' };
-    if (status === 'resolved') {
-      filter['dispute.resolvedAt'] = { $ne: null };
-    } else if (status === 'open') {
-      filter['dispute.resolvedAt'] = null;
-    }
+    const filter = buildDisputeFilter(typeof status === 'string' ? status : undefined);
 
     const [disputes, total] = await Promise.all([
       Booking.find(filter)
@@ -203,7 +253,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    if (action === 'adjust' && (adjustedAmount == null || adjustedAmount < 0)) {
+    if (action === 'adjust' && (!Number.isFinite(adjustedAmount) || adjustedAmount < 0)) {
       return res.status(400).json({
         success: false,
         error: { code: 'VALIDATION_ERROR', message: 'Adjusted amount is required for adjust action and must be >= 0' }
@@ -223,24 +273,6 @@ export const resolveDispute = async (req: Request, res: Response) => {
         success: false,
         error: { code: 'INVALID_STATUS', message: `Booking is not in dispute status (current: ${booking.status})` }
       });
-    }
-
-    let finalExtraCostAmount = 0;
-
-    if (action === 'accept_professional') {
-      finalExtraCostAmount = booking.extraCostTotal || 0;
-      booking.extraCostStatus = 'confirmed';
-    } else if (action === 'reject_extra_costs') {
-      finalExtraCostAmount = 0;
-      booking.extraCostStatus = 'confirmed';
-      booking.extraCostTotal = 0;
-    } else if (action === 'adjust') {
-      finalExtraCostAmount = adjustedAmount;
-      booking.extraCostStatus = 'confirmed';
-      booking.extraCostTotal = adjustedAmount;
-      if (booking.dispute) {
-        booking.dispute.adminAdjustedAmount = adjustedAmount;
-      }
     }
 
     const completionDate = new Date();
@@ -274,51 +306,31 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    const transferResult = await captureAndTransferPayment(resolvedBooking._id.toString());
-    if (!transferResult.success) {
-      const paymentStatus = resolvedBooking.payment?.status ? String(resolvedBooking.payment.status) : '';
-      if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
-        console.error('Transfer failed during dispute resolution:', transferResult.error);
-      }
-    }
-
-    if (finalExtraCostAmount < 0 && resolvedBooking.payment?.stripePaymentIntentId) {
-      const refundAmount = Math.abs(finalExtraCostAmount);
-      const currency = (resolvedBooking.payment.currency || 'EUR').toLowerCase();
-      await stripe.refunds.create({
-        payment_intent: resolvedBooking.payment.stripePaymentIntentId,
-        amount: convertToStripeAmount(refundAmount, currency),
-      }, {
-        idempotencyKey: generateIdempotencyKey({
-          bookingId: resolvedBooking._id.toString(),
-          operation: 'dispute-resolution-refund',
-          version: `dispute-resolution:${convertToStripeAmount(refundAmount, currency)}`,
-        })
-      });
-    }
-
     if (resolvedBooking.dispute) {
       resolvedBooking.dispute.resolvedAt = new Date();
       resolvedBooking.dispute.resolution = resolution;
       resolvedBooking.dispute.resolvedBy = adminUser._id;
     }
 
-    if (action === 'accept_professional') {
-      resolvedBooking.extraCostStatus = 'confirmed';
-    } else if (action === 'reject_extra_costs') {
-      resolvedBooking.extraCostStatus = 'confirmed';
-      resolvedBooking.extraCostTotal = 0;
-    } else if (action === 'adjust') {
-      resolvedBooking.extraCostStatus = 'confirmed';
-      resolvedBooking.extraCostTotal = adjustedAmount;
-      if (resolvedBooking.dispute) {
-        resolvedBooking.dispute.adminAdjustedAmount = adjustedAmount;
-      }
-    }
+    const finalExtraCostAmount = applyExtraCostUpdate(
+      resolvedBooking,
+      action as DisputeResolutionAction,
+      adjustedAmount
+    );
 
     markMilestonesCompleted(resolvedBooking, completionDate);
     await ensureWarrantyCoverageSnapshot(resolvedBooking);
     await resolvedBooking.save();
+
+    const transferResult = await captureAndTransferPayment(resolvedBooking._id.toString());
+    if (!transferResult.success) {
+      const paymentStatus = resolvedBooking.payment?.status ? String(resolvedBooking.payment.status) : '';
+      if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
+        console.error('Transfer failed during dispute resolution:', transferResult.error);
+      }
+    } else {
+      await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
+    }
 
     try {
       const bookingAmount = (resolvedBooking.payment?.amount || 0) + Math.max(0, finalExtraCostAmount);
@@ -363,9 +375,9 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
       totalResolved,
       totalDisputes,
     ] = await Promise.all([
-      Booking.countDocuments({ status: 'dispute', 'dispute.resolvedAt': null }),
-      Booking.countDocuments({ status: 'dispute', 'dispute.resolvedAt': { $ne: null } }),
-      Booking.countDocuments({ status: 'dispute' }),
+      Booking.countDocuments({ status: ACTIVE_DISPUTE_STATUS, 'dispute.resolvedAt': null }),
+      Booking.countDocuments({ status: COMPLETED_BOOKING_STATUS, 'dispute.resolvedAt': { $ne: null } }),
+      Booking.countDocuments(buildDisputeFilter()),
     ]);
 
     return res.json({
