@@ -545,8 +545,11 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        const quoteBaseAmount = Math.round(
+          (roundedCheckoutAmount - extraOptionsTotal + Number.EPSILON) * 100
+        ) / 100;
         bookingData.quote = {
-          amount: roundedCheckoutAmount,
+          amount: quoteBaseAmount,
           currency: "EUR",
           description: `Auto-generated checkout quote for ${project.title}`,
           breakdown: [

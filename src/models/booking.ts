@@ -117,6 +117,7 @@ export interface IBooking extends Document {
       currency: string;
     };
     attachments?: string[]; // S3 URLs for uploaded files
+    additionalNotes?: string;
   };
 
   // Quote from professional (legacy simple quote)
@@ -416,7 +417,8 @@ const BookingSchema = new Schema({
     },
     attachments: [{
       type: String // S3 URLs
-    }]
+    }],
+    additionalNotes: { type: String, trim: true, maxlength: 2000 },
   },
 
   // Quote

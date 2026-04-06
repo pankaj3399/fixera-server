@@ -811,48 +811,61 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
         booking.selectedSubprojectIndex
       );
 
-      const validation = await validateProjectScheduleSelection({
-        projectId,
-        subprojectIndex: resolvedSubprojectIndex,
-        startDate: scheduledStartDate,
-        startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
-        customerBlocks: booking.customerBlocks,
-      });
+      const isRfqSubproject = typeof resolvedSubprojectIndex === 'number'
+        && Array.isArray(projectDoc.subprojects)
+        && projectDoc.subprojects[resolvedSubprojectIndex]?.pricing?.type === 'rfq';
 
-      if (!validation.valid) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: 'INVALID_DATE',
-            message: validation.reason || 'Selected schedule is not available',
-          },
+      if (isRfqSubproject) {
+        const startDate = new Date(scheduledStartDate);
+        if (isNaN(startDate.getTime()) || startDate < new Date()) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_DATE', message: 'Start date must be a valid future date' } });
+        }
+        booking.scheduledStartDate = startDate;
+        booking.scheduledStartTime = typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined;
+      } else {
+        const validation = await validateProjectScheduleSelection({
+          projectId,
+          subprojectIndex: resolvedSubprojectIndex,
+          startDate: scheduledStartDate,
+          startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+          customerBlocks: booking.customerBlocks,
         });
-      }
 
-      const window = await buildProjectScheduleWindow({
-        projectId,
-        subprojectIndex: resolvedSubprojectIndex,
-        startDate: scheduledStartDate,
-        startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
-        customerBlocks: booking.customerBlocks,
-      });
+        if (!validation.valid) {
+          return res.status(400).json({
+            success: false,
+            error: {
+              code: 'INVALID_DATE',
+              message: validation.reason || 'Selected schedule is not available',
+            },
+          });
+        }
 
-      if (!window) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'INVALID_DATE', message: 'Unable to schedule the selected window' },
+        const window = await buildProjectScheduleWindow({
+          projectId,
+          subprojectIndex: resolvedSubprojectIndex,
+          startDate: scheduledStartDate,
+          startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+          customerBlocks: booking.customerBlocks,
         });
-      }
 
-      booking.scheduledStartDate = window.scheduledStartDate;
-      booking.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
-      booking.scheduledBufferStartDate = window.scheduledBufferStartDate;
-      booking.scheduledBufferEndDate = window.scheduledBufferEndDate;
-      booking.scheduledBufferUnit = window.scheduledBufferUnit;
-      booking.scheduledStartTime = window.scheduledStartTime;
-      booking.scheduledEndTime = window.scheduledEndTime;
-      if (window.assignedTeamMembers?.length) {
-        booking.assignedTeamMembers = window.assignedTeamMembers as any;
+        if (!window) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_DATE', message: 'Unable to schedule the selected window' },
+          });
+        }
+
+        booking.scheduledStartDate = window.scheduledStartDate;
+        booking.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
+        booking.scheduledBufferStartDate = window.scheduledBufferStartDate;
+        booking.scheduledBufferEndDate = window.scheduledBufferEndDate;
+        booking.scheduledBufferUnit = window.scheduledBufferUnit;
+        booking.scheduledStartTime = window.scheduledStartTime;
+        booking.scheduledEndTime = window.scheduledEndTime;
+        if (window.assignedTeamMembers?.length) {
+          booking.assignedTeamMembers = window.assignedTeamMembers as any;
+        }
       }
       if (typeof resolvedSubprojectIndex === 'number') {
         booking.selectedSubprojectIndex = resolvedSubprojectIndex;
@@ -870,8 +883,8 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     }
 
     if (additionalNotes) {
-      booking.rfqData = booking.rfqData || {};
-      (booking.rfqData as any).additionalNotes = additionalNotes;
+      booking.rfqData = booking.rfqData || {} as any;
+      booking.rfqData.additionalNotes = additionalNotes;
     }
 
     await booking.save();
