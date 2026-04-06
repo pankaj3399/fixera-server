@@ -11,10 +11,14 @@ export type BookingStatus =
   | 'payment_pending' // Payment is being processed
   | 'booked'        // Payment successful, booking confirmed
   | 'in_progress'   // Work has started
-  | 'completed'     // Work finished
+  | 'professional_completed' // Professional confirmed completion, awaiting customer confirmation
+  | 'completed'     // Work finished and confirmed by customer
   | 'cancelled'     // Booking cancelled by either party
   | 'dispute'       // Issue raised
   | 'refunded';     // Payment refunded
+
+export type ExtraCostType = 'unit_adjustment' | 'condition' | 'option' | 'other';
+export type ExtraCostStatus = 'pending' | 'confirmed' | 'disputed';
 
 export type BookingType = 'professional' | 'project';
 
@@ -85,6 +89,24 @@ export interface IQuoteVersion {
   validUntil: Date;
   createdAt: Date;
   changeNote?: string;
+}
+
+export interface IExtraCost {
+  type: ExtraCostType;
+  name: string;
+  justification: string;
+  amount: number;
+  referenceIndex?: number;
+  estimatedUnits?: number;
+  actualUnits?: number;
+  unitPrice?: number;
+}
+
+export interface ICompletionAttestation {
+  confirmedAt: Date;
+  confirmedBy: Types.ObjectId;
+  attachments?: string[];
+  notes?: string;
 }
 
 export interface IBooking extends Document {
@@ -194,6 +216,11 @@ export interface IBooking extends Document {
     disputeAmountPending?: number;
     disputeStatus?: string;
 
+    // Extra cost payment (separate payment intent for positive extra costs)
+    extraCostStripePaymentIntentId?: string;
+    extraCostClientSecret?: string;
+    extraCostAmount?: number;
+
     invoiceNumber?: string;
     invoiceUrl?: string;
     invoiceGeneratedAt?: Date;
@@ -282,6 +309,14 @@ export interface IBooking extends Document {
     refundAmount?: number;
   };
 
+  // Professional completion attestation
+  completionAttestation?: ICompletionAttestation;
+
+  // Extra costs declared by professional at completion
+  extraCosts?: IExtraCost[];
+  extraCostStatus?: ExtraCostStatus;
+  extraCostTotal?: number;
+
   // Dispute
   dispute?: {
     raisedBy: Types.ObjectId;
@@ -291,6 +326,7 @@ export interface IBooking extends Document {
     resolvedAt?: Date;
     resolution?: string;
     resolvedBy?: Types.ObjectId; // Admin who resolved
+    adminAdjustedAmount?: number;
   };
 
   // Post-booking questions (filled after booking is confirmed)
@@ -342,7 +378,7 @@ const BookingSchema = new Schema({
   // Status and lifecycle
   status: {
     type: String,
-    enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
+    enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'professional_completed', 'completed', 'cancelled', 'dispute', 'refunded'],
     default: 'rfq',
     required: true,
     index: true
@@ -350,7 +386,7 @@ const BookingSchema = new Schema({
   statusHistory: [{
     status: {
       type: String,
-      enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled', 'dispute', 'refunded'],
+      enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'professional_completed', 'completed', 'cancelled', 'dispute', 'refunded'],
       required: true
     },
     timestamp: {
@@ -655,6 +691,11 @@ const BookingSchema = new Schema({
     disputeAmountPending: { type: Number },
     disputeStatus: { type: String },
 
+    // Extra cost payment (separate payment intent for positive extra costs)
+    extraCostStripePaymentIntentId: { type: String },
+    extraCostClientSecret: { type: String },
+    extraCostAmount: { type: Number },
+
     // Invoice
     invoiceNumber: { type: String },
     invoiceUrl: { type: String },
@@ -820,6 +861,35 @@ const BookingSchema = new Schema({
     }
   },
 
+  // Professional completion attestation
+  completionAttestation: {
+    confirmedAt: { type: Date },
+    confirmedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    attachments: [{ type: String }],
+    notes: { type: String, maxlength: 2000 }
+  },
+
+  // Extra costs declared by professional at completion
+  extraCosts: [{
+    type: {
+      type: String,
+      enum: ['unit_adjustment', 'condition', 'option', 'other'],
+      required: true
+    },
+    name: { type: String, required: true, maxlength: 200 },
+    justification: { type: String, required: true, maxlength: 1000 },
+    amount: { type: Number, required: true },
+    referenceIndex: { type: Number },
+    estimatedUnits: { type: Number },
+    actualUnits: { type: Number },
+    unitPrice: { type: Number }
+  }],
+  extraCostStatus: {
+    type: String,
+    enum: ['pending', 'confirmed', 'disputed']
+  },
+  extraCostTotal: { type: Number },
+
   // Dispute
   dispute: {
     raisedBy: {
@@ -843,7 +913,8 @@ const BookingSchema = new Schema({
     resolvedBy: {
       type: Schema.Types.ObjectId,
       ref: 'User'
-    }
+    },
+    adminAdjustedAmount: { type: Number }
   },
 
   // Post-booking data

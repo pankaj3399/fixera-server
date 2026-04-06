@@ -56,6 +56,12 @@ import {
   unhideReview,
   getHiddenReviews,
 } from "../../handlers/Admin/reviewModeration";
+import {
+  getDisputes,
+  getDisputeDetails,
+  resolveDispute,
+  getDisputeAnalytics,
+} from "../../handlers/Admin/disputeManagement";
 import { runWarrantyClaimChecks } from "../../utils/warrantyClaimScheduler";
 import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineScheduler";
 
@@ -119,6 +125,12 @@ adminRouter.route('/reviews').get(getAdminReviews);
 adminRouter.route('/reviews/hidden').get(getHiddenReviews);
 adminRouter.route('/reviews/:bookingId/hide').put(hideReview);
 adminRouter.route('/reviews/:bookingId/unhide').put(unhideReview);
+
+// Dispute management routes
+adminRouter.route('/disputes').get(getDisputes);
+adminRouter.route('/disputes/analytics').get(getDisputeAnalytics);
+adminRouter.route('/disputes/:bookingId').get(getDisputeDetails);
+adminRouter.route('/disputes/:bookingId/resolve').post(resolveDispute);
 
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);
