@@ -691,11 +691,26 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo hourlyRate')
-      .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId')
+    const isAdmin = req.user?.role === 'admin';
+    const isViewerCustomer = !isAdmin && req.user?.role === 'customer';
+
+    const professionalFields = isAdmin
+      ? 'name email phone username businessInfo hourlyRate stripe role createdAt'
+      : isViewerCustomer
+        ? '_id username'
+        : 'name email username businessInfo';
+
+    const bookingQuery = Booking.findById(bookingId)
+      .populate('customer', isAdmin
+        ? 'name email phone customerType location vatNumber totalSpent'
+        : 'name email phone customerType location')
+      .populate('professional', professionalFields)
+      .populate('project', isAdmin
+        ? 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects'
+        : 'title description pricing category service team rfqQuestions postBookingQuestions professionalId')
       .populate('assignedTeamMembers', 'name email');
+
+    const booking = await bookingQuery;
 
     if (!booking) {
       return res.status(404).json({
@@ -704,14 +719,14 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    // Check authorization - only customer, professional, or project owner can view
+    // Check authorization - customer, professional, project owner, or admin can view
     const isCustomer = booking.customer._id.toString() === userIdString;
     const isProfessional = booking.professional?._id.toString() === userIdString;
     // For project bookings, also check if user owns the project
     const isProjectOwner = booking.bookingType === 'project' && booking.project
       && (booking.project as any).professionalId?.toString() === userIdString;
 
-    if (!isCustomer && !isProfessional && !isProjectOwner) {
+    if (!isAdmin && !isCustomer && !isProfessional && !isProjectOwner) {
       return res.status(403).json({
         success: false,
         msg: "You do not have permission to view this booking"
@@ -722,7 +737,8 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
     return res.status(200).json({
       success: true,
-      booking: bookingWithSignedFiles
+      booking: bookingWithSignedFiles,
+      viewerRole: isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional',
     });
 
   } catch (error: any) {

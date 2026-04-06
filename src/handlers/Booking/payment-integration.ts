@@ -31,6 +31,7 @@ const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'payment_pending',
   'booked',
   'in_progress',
+  'professional_completed',
   'completed',
   'cancelled',
   'dispute',
@@ -46,7 +47,8 @@ const ALLOWED_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
   quote_rejected: ['quoted'],
   payment_pending: ['booked', 'cancelled'],
   booked: ['in_progress', 'completed', 'cancelled', 'dispute'],
-  in_progress: ['completed', 'cancelled', 'dispute'],
+  in_progress: ['professional_completed', 'cancelled', 'dispute'],
+  professional_completed: ['completed', 'dispute', 'cancelled'],
   completed: [],
   cancelled: [],
   dispute: ['completed', 'cancelled', 'refunded'],
@@ -112,7 +114,7 @@ const ensureWarrantyCoverageSnapshot = async (booking: any) => {
 };
 
 const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
-const COMPLETABLE_BOOKING_STATUSES: BookingStatus[] = ['booked', 'in_progress', 'dispute'];
+const COMPLETABLE_BOOKING_STATUSES: BookingStatus[] = ['booked', 'in_progress', 'professional_completed', 'dispute'];
 
 const getProfessionalId = async (booking: any) => {
   if (booking.professional) return booking.professional;

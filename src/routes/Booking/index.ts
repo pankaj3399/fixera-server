@@ -12,8 +12,14 @@ import {
 import { respondToQuoteWithPayment, ensurePaymentIntent, updateBookingStatusWithPayment } from '../../handlers/Booking/payment-integration';
 import { getDiscountPreview } from '../../handlers/Booking/discountPreview';
 import { submitCustomerReview, submitProfessionalReview, replyToCustomerReview } from '../../handlers/Booking/reviews';
+import {
+  professionalCompleteBooking,
+  customerConfirmCompletion,
+  createExtraCostPaymentIntent,
+  customerDisputeExtraCosts,
+} from '../../handlers/Booking/completion';
 import { protect } from '../../middlewares/auth';
-import { uploadReviewImages } from '../../utils/s3Upload';
+import { upload, uploadReviewImages } from '../../utils/s3Upload';
 
 const router = express.Router();
 
@@ -47,6 +53,12 @@ router.post('/:bookingId/payment-intent', ensurePaymentIntent);
 
 // Update booking status (with automatic payment transfer on completion)
 router.put('/:bookingId/status', updateBookingStatusWithPayment);
+
+// Completion flow
+router.post('/:bookingId/professional-complete', upload.array('attachments', 10), professionalCompleteBooking);
+router.post('/:bookingId/customer-confirm-completion', customerConfirmCompletion);
+router.post('/:bookingId/extra-cost-payment-intent', createExtraCostPaymentIntent);
+router.post('/:bookingId/dispute-extra-costs', customerDisputeExtraCosts);
 
 // Cancel booking
 router.post('/:bookingId/cancel', cancelBooking);

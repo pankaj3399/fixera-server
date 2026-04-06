@@ -162,7 +162,10 @@ export type IdempotencyOperation =
   | 'transfer'
   | 'refund'
   | 'account-create'
-  | 'onboarding-link';
+  | 'onboarding-link'
+  | 'extra-cost-payment-intent'
+  | 'unit-underuse-refund'
+  | 'dispute-resolution-refund';
 
 export interface IdempotencyKeyParams {
   bookingId: string;
