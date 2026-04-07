@@ -211,20 +211,35 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
 
   // Only update if not already authorized
   if (booking.payment.status === 'pending') {
-    booking.payment.status = 'authorized';
-    booking.payment.authorizedAt = new Date();
+    const now = new Date();
+    const msIdx = (booking.payment as any).milestoneIndex;
+    const updateFields: Record<string, any> = {
+      'payment.status': 'authorized',
+      'payment.authorizedAt': now,
+      status: 'booked',
+    };
     if (paymentIntent.latest_charge) {
-      booking.payment.stripeChargeId = paymentIntent.latest_charge as string;
+      updateFields['payment.stripeChargeId'] = paymentIntent.latest_charge as string;
     }
-    booking.status = 'booked';
-    await booking.save();
+    if (typeof msIdx === 'number' && Array.isArray(booking.milestonePayments) && booking.milestonePayments[msIdx]) {
+      updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
+      updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+    }
+
+    const filter: Record<string, any> = { _id: booking._id, 'payment.status': 'pending' };
+    if (typeof msIdx === 'number') {
+      filter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
+    }
+
+    const updated = await Booking.findOneAndUpdate(filter, { $set: updateFields }, { new: true });
+    if (!updated) return;
 
     await Payment.findOneAndUpdate(
       { booking: booking._id },
       {
         status: 'authorized',
-        authorizedAt: booking.payment.authorizedAt,
-        stripeChargeId: booking.payment.stripeChargeId,
+        authorizedAt: now,
+        ...(paymentIntent.latest_charge ? { stripeChargeId: paymentIntent.latest_charge as string } : {}),
       }
     );
 

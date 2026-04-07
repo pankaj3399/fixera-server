@@ -111,7 +111,7 @@ export const createPaymentIntent = async (
     const booking = await Booking.findById(bookingId)
       .populate('customer')
       .populate('professional')
-      .populate('project', 'professionalId title');
+      .populate('project', 'professionalId title extraOptions');
 
     if (!booking) {
       return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } };
@@ -169,6 +169,18 @@ export const createPaymentIntent = async (
     }
     const customer = booking.customer as any;
     const projectInfo = booking.project as any;
+    const selectedExtraOptionsTotal = Array.isArray(booking.selectedExtraOptions)
+      ? booking.selectedExtraOptions.reduce(
+          (sum: number, entry: any) => {
+            if (typeof entry?.bookedPrice === 'number') return sum + entry.bookedPrice;
+            if (typeof entry === 'number' && Array.isArray(projectInfo?.extraOptions) && entry >= 0 && entry < projectInfo.extraOptions.length) {
+              return sum + (projectInfo.extraOptions[entry]?.price || 0);
+            }
+            return sum;
+          },
+          0
+        )
+      : 0;
 
     // Check if professional has Stripe connected
     if (!professional.stripe?.accountId) {
@@ -198,15 +210,84 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    // Calculate auto-discount (includes points if requested)
-    const discountBreakdown = await calculateAutoDiscount(
+    let chargeAmount = booking.quote.amount;
+    let milestoneIndex: number | null = null;
+    let milestoneOrder: number | null = null;
+    if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
+      const sorted = booking.milestonePayments
+        .map((m: any, idx: number) => ({ ...m.toObject?.() || m, _originalIndex: idx }))
+        .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0));
+
+      const isPayable = (m: any) => {
+        if (m.status === 'paid') return false;
+        const cond = m.dueCondition;
+        if (cond === 'on_start') return true;
+        if (cond === 'on_milestone_start') return m.workStatus === 'in_progress' || m.workStatus === 'completed';
+        if (cond === 'on_milestone_completion') {
+          return m.workStatus === 'completed';
+        }
+        if (cond === 'on_project_completion') {
+          return sorted.every((s: any) => s.workStatus === 'completed');
+        }
+        if (cond === 'custom_date') {
+          return m.customDueDate && new Date(m.customDueDate) <= new Date();
+        }
+        return true;
+      };
+
+      const nextPayable = sorted.find(isPayable);
+      if (nextPayable) {
+        chargeAmount = nextPayable.amount;
+        milestoneIndex = nextPayable._originalIndex;
+        milestoneOrder = nextPayable.order ?? 0;
+      } else {
+        return {
+          success: false,
+          error: {
+            code: 'NO_MILESTONE_DUE',
+            message: 'No milestone is currently due for payment.'
+          }
+        };
+      }
+    }
+    if (selectedExtraOptionsTotal > 0) {
+      if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
+        const minOrder = Math.min(...booking.milestonePayments.map((m: any) => m.order ?? 0));
+        if (milestoneOrder === minOrder) {
+          chargeAmount += selectedExtraOptionsTotal;
+        }
+      } else {
+        chargeAmount += selectedExtraOptionsTotal;
+      }
+    }
+
+    const fullBookingAmount = booking.quote.amount;
+    const fullDiscountBreakdown = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
-      booking.quote.amount,
+      fullBookingAmount,
       customer.totalSpent || 0,
       pointsToRedeem
     );
+
+    let discountBreakdown = fullDiscountBreakdown;
+    if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
+      const ratio = chargeAmount / fullBookingAmount;
+      const proratedLoyalty = Math.round(fullDiscountBreakdown.loyaltyDiscount.amount * ratio * 100) / 100;
+      const proratedRepeat = Math.round(fullDiscountBreakdown.repeatBuyerDiscount.amount * ratio * 100) / 100;
+      const proratedPoints = Math.round(fullDiscountBreakdown.pointsDiscount.discountAmount * ratio * 100) / 100;
+      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints;
+      discountBreakdown = {
+        ...fullDiscountBreakdown,
+        loyaltyDiscount: { ...fullDiscountBreakdown.loyaltyDiscount, amount: proratedLoyalty },
+        repeatBuyerDiscount: { ...fullDiscountBreakdown.repeatBuyerDiscount, amount: proratedRepeat },
+        pointsDiscount: { ...fullDiscountBreakdown.pointsDiscount, discountAmount: proratedPoints },
+        totalDiscount: proratedTotal,
+        originalAmount: chargeAmount,
+        finalAmount: chargeAmount - proratedTotal,
+      };
+    }
 
     // Use discounted amount for VAT and payment calculations
     const discountedQuoteAmount = discountBreakdown.finalAmount;
@@ -289,6 +370,7 @@ export const createPaymentIntent = async (
       vatAmount,
       vatRate: vatCalculation.vatRate,
       totalWithVat: totalAmount,
+      ...(milestoneIndex !== null && { milestoneIndex }),
       ...(discountBreakdown.totalDiscount > 0 && {
         discount: {
           loyaltyTier: discountBreakdown.loyaltyDiscount.tier,
@@ -326,6 +408,7 @@ export const createPaymentIntent = async (
           platformCommission,
           professionalPayout,
           stripePaymentIntentId: paymentIntent.id,
+          ...(milestoneIndex !== null && { milestoneIndex }),
           metadata: {
             environment: STRIPE_CONFIG.environment,
             projectId: projectInfo?._id?.toString?.(),
@@ -432,15 +515,34 @@ export const confirmPayment = async (req: Request, res: Response) => {
       // Payment charged successfully — funds in Fixera's Stripe account
       console.log(`[PAYMENT CONFIRM] PaymentIntent status is succeeded, updating booking`);
 
-      booking.payment!.status = 'authorized';
-      booking.payment!.authorizedAt = new Date();
-      booking.payment!.capturedAt = new Date();
+      const now = new Date();
+      const msIdx = booking.payment!.milestoneIndex;
+      const updateFields: Record<string, any> = {
+        'payment.status': 'authorized',
+        'payment.authorizedAt': now,
+        'payment.capturedAt': now,
+        status: 'booked',
+      };
       if (paymentIntent.latest_charge) {
-        booking.payment!.stripeChargeId = paymentIntent.latest_charge as string;
+        updateFields['payment.stripeChargeId'] = paymentIntent.latest_charge as string;
       }
-      booking.status = 'booked';
+      if (typeof msIdx === 'number' && Array.isArray(booking.milestonePayments) && booking.milestonePayments[msIdx]) {
+        updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
+        updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+      }
 
-      await booking.save();
+      const milestoneFilter: Record<string, any> = { _id: booking._id };
+      if (typeof msIdx === 'number') {
+        milestoneFilter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
+      }
+
+      await Booking.findOneAndUpdate(milestoneFilter, { $set: updateFields });
+      const refreshed = await Booking.findById(booking._id);
+      if (refreshed) {
+        booking.payment = refreshed.payment;
+        booking.status = refreshed.status;
+        booking.milestonePayments = refreshed.milestonePayments;
+      }
 
       await Payment.findOneAndUpdate(
         { booking: booking._id },

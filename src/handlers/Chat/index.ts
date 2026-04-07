@@ -86,26 +86,42 @@ export const createOrGetConversation = async (
 ) => {
   const userId = getRequestUserId(req);
   const userRole = req.user?.role;
-  const { professionalId } = req.body as {
+  const { professionalId, customerId } = req.body as {
     professionalId?: string;
+    customerId?: string;
   };
 
   if (!userId) {
     return res.status(401).json({ success: false, msg: "Authentication required" });
   }
 
-  if (userRole !== "customer") {
+  if (userRole !== "customer" && userRole !== "professional") {
     return res.status(403).json({
       success: false,
-      msg: "Only customers can start new conversations",
+      msg: "Only customers and professionals can start conversations",
     });
   }
 
-  if (!professionalId || !mongoose.Types.ObjectId.isValid(professionalId)) {
-    return res.status(400).json({ success: false, msg: "Valid professionalId is required" });
+  let resolvedProfessionalId = professionalId;
+  let resolvedCustomerId = customerId;
+
+  if (userRole === "customer") {
+    resolvedCustomerId = userId;
+    if (!resolvedProfessionalId || !mongoose.Types.ObjectId.isValid(resolvedProfessionalId)) {
+      return res.status(400).json({ success: false, msg: "Valid professionalId is required" });
+    }
+  } else {
+    resolvedProfessionalId = userId;
+    if (!resolvedCustomerId || !mongoose.Types.ObjectId.isValid(resolvedCustomerId)) {
+      return res.status(400).json({ success: false, msg: "Valid customerId is required" });
+    }
   }
 
-  const professional = await User.findById(professionalId).select("role professionalStatus");
+  const [professional, customer] = await Promise.all([
+    User.findById(resolvedProfessionalId).select("role professionalStatus"),
+    User.findById(resolvedCustomerId).select("role"),
+  ]);
+
   if (!professional || professional.role !== "professional") {
     return res.status(404).json({ success: false, msg: "Professional not found" });
   }
@@ -117,10 +133,14 @@ export const createOrGetConversation = async (
     });
   }
 
+  if (!customer || customer.role !== "customer") {
+    return res.status(404).json({ success: false, msg: "Customer not found" });
+  }
+
   // One conversation per customer-professional pair
   const pairQuery = {
-    customerId: toObjectId(userId),
-    professionalId: toObjectId(professionalId),
+    customerId: toObjectId(resolvedCustomerId),
+    professionalId: toObjectId(resolvedProfessionalId),
   };
 
   const populateFields = [
@@ -138,8 +158,8 @@ export const createOrGetConversation = async (
 
   try {
     conversation = await Conversation.create({
-      customerId: toObjectId(userId),
-      professionalId: toObjectId(professionalId),
+      customerId: toObjectId(resolvedCustomerId),
+      professionalId: toObjectId(resolvedProfessionalId),
       initiatedBy: toObjectId(userId),
     });
   } catch (error: any) {

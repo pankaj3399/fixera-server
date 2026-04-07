@@ -13,7 +13,7 @@ export interface IChatAttachment {
   fileSize?: number;
 }
 
-export type ChatMessageType = "text" | "review_notification" | "warranty_notification";
+export type ChatMessageType = "text" | "review_notification" | "warranty_notification" | "quotation_notification";
 
 export interface IReviewNotificationMeta {
   bookingId: string;
@@ -32,6 +32,17 @@ export interface IWarrantyNotificationMeta {
   status?: string;
 }
 
+export interface IQuotationNotificationMeta {
+  bookingId: string;
+  quotationNumber: string;
+  version: number;
+  scope: string;
+  totalAmount: number;
+  currency: string;
+  validUntil: string;
+  status: 'quoted' | 'quote_accepted' | 'quote_rejected';
+}
+
 export interface IChatMessage extends Document {
   _id: Types.ObjectId;
   conversationId: Types.ObjectId;
@@ -44,6 +55,7 @@ export interface IChatMessage extends Document {
   readBy: IChatMessageReadReceipt[];
   reviewMeta?: IReviewNotificationMeta;
   warrantyMeta?: IWarrantyNotificationMeta;
+  quotationMeta?: IQuotationNotificationMeta;
   replyTo?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -69,7 +81,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
     },
     messageType: {
       type: String,
-      enum: ["text", "review_notification", "warranty_notification"],
+      enum: ["text", "review_notification", "warranty_notification", "quotation_notification"],
       default: "text",
       required: true,
     },
@@ -118,6 +130,16 @@ const ChatMessageSchema = new Schema<IChatMessage>(
       bookingId: { type: String },
       status: { type: String },
     },
+    quotationMeta: {
+      bookingId: { type: String },
+      quotationNumber: { type: String },
+      version: { type: Number },
+      scope: { type: String },
+      totalAmount: { type: Number },
+      currency: { type: String },
+      validUntil: { type: String },
+      status: { type: String, enum: ['quoted', 'quote_accepted', 'quote_rejected'] },
+    },
     readBy: [
       {
         userId: {
@@ -145,7 +167,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
 // document-level operations (create/save). Mongoose update operations
 // (updateOne/findOneAndUpdate) do not invoke this with document context.
 ChatMessageSchema.path("text").validate(function (value: string | undefined) {
-  if (this.messageType === "review_notification" || this.messageType === "warranty_notification") return true;
+  if (this.messageType === "review_notification" || this.messageType === "warranty_notification" || this.messageType === "quotation_notification") return true;
   const hasText = typeof value === "string" && value.trim().length > 0;
   const hasImages = Array.isArray(this.images) && this.images.length > 0;
   const hasAttachments = Array.isArray(this.attachments) && this.attachments.length > 0;

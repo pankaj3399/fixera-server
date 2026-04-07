@@ -50,7 +50,7 @@ export interface IQuotationMilestone {
   title: string;
   amount: number;
   description?: string;
-  dueCondition: 'on_start' | 'on_milestone_completion' | 'on_project_completion' | 'custom_date';
+  dueCondition: 'on_start' | 'on_milestone_start' | 'on_milestone_completion' | 'on_project_completion' | 'custom_date';
   customDueDate?: Date;
   order: number;
   status: 'pending' | 'invoiced' | 'paid' | 'overdue';
@@ -139,6 +139,7 @@ export interface IBooking extends Document {
       currency: string;
     };
     attachments?: string[]; // S3 URLs for uploaded files
+    additionalNotes?: string;
   };
 
   // Quote from professional (legacy simple quote)
@@ -155,6 +156,7 @@ export interface IBooking extends Document {
   customerRejectionReason?: string;
   milestonePayments?: IBookingMilestone[];
   selectedSubprojectIndex?: number;
+  selectedExtraOptions?: { extraOptionId: string; bookedPrice: number }[];
 
   // Booking location (customer's location from their profile)
   location: {
@@ -170,6 +172,7 @@ export interface IBooking extends Document {
   payment?: {
     // Core payment info
     amount: number;
+    milestoneIndex?: number;
     currency: string;
     method?: 'card' | 'bank_transfer' | 'cash';
     status: 'pending' | 'authorized' | 'completed' | 'failed' | 'refunded' | 'partially_refunded' | 'disputed';
@@ -451,7 +454,8 @@ const BookingSchema = new Schema({
     },
     attachments: [{
       type: String // S3 URLs
-    }]
+    }],
+    additionalNotes: { type: String, trim: true, maxlength: 2000 },
   },
 
   // Quote
@@ -530,7 +534,7 @@ const BookingSchema = new Schema({
       description: { type: String, maxlength: 500 },
       dueCondition: {
         type: String,
-        enum: ['on_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+        enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
         required: true
       },
       customDueDate: { type: Date },
@@ -569,7 +573,7 @@ const BookingSchema = new Schema({
     description: { type: String, maxlength: 500 },
     dueCondition: {
       type: String,
-      enum: ['on_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+      enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
       required: true
     },
     customDueDate: { type: Date },
@@ -590,6 +594,10 @@ const BookingSchema = new Schema({
       message: 'selectedSubprojectIndex must be an integer',
     },
   },
+  selectedExtraOptions: [{
+    extraOptionId: { type: String, required: true },
+    bookedPrice: { type: Number, required: true, min: 0 },
+  }],
 
   // Location
   location: {
@@ -620,6 +628,7 @@ const BookingSchema = new Schema({
   payment: {
     // Core payment info
     amount: { type: Number, min: 0 },
+    milestoneIndex: { type: Number },
     currency: {
       type: String,
       enum: ['USD', 'EUR', 'GBP', 'CAD', 'AUD'],
