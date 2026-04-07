@@ -55,8 +55,8 @@ const ALLOWED_TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
   quote_accepted: ['payment_pending', 'booked', 'cancelled'],
   quote_rejected: ['quoted'],
   payment_pending: ['booked', 'cancelled'],
-  booked: ['rescheduling_requested', 'in_progress', 'completed', 'cancelled', 'dispute'],
-  rescheduling_requested: ['booked', 'cancelled'],
+  booked: ['in_progress', 'completed', 'cancelled', 'dispute'],
+  rescheduling_requested: [],
   in_progress: ['professional_completed', 'cancelled', 'dispute'],
   professional_completed: ['completed', 'dispute', 'cancelled'],
   completed: [],
@@ -136,11 +136,13 @@ const isDuplicateKeyError = (error: any): boolean => error?.code === 11000;
 const COMPLETABLE_BOOKING_STATUSES: BookingStatus[] = ['booked', 'in_progress', 'professional_completed', 'dispute'];
 
 const getProfessionalId = async (booking: any) => {
-  if (booking.professional) return booking.professional;
+  if (booking.professional) {
+    return booking.professional?._id?.toString?.() || booking.professional?.toString?.();
+  }
   if (!booking.project) return undefined;
 
   const project = await Project.findById(booking.project).select('professionalId');
-  return project?.professionalId;
+  return project?.professionalId?.toString?.() || project?.professionalId;
 };
 
 const createStatusHistoryEntry = (
@@ -154,6 +156,21 @@ const createStatusHistoryEntry = (
   note,
 });
 
+const MAX_STATUS_HISTORY_NOTE_LENGTH = 500;
+const MAX_RESCHEDULE_REASON_LENGTH = 500;
+
+const normalizeOptionalText = (value: unknown) => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+};
+
+const truncateStatusHistoryNote = (note: string) => {
+  const normalized = note.trim();
+  if (normalized.length <= MAX_STATUS_HISTORY_NOTE_LENGTH) return normalized;
+  return `${normalized.slice(0, MAX_STATUS_HISTORY_NOTE_LENGTH - 1).trimEnd()}…`;
+};
+
 const snapshotCurrentSchedule = (booking: any) => ({
   scheduledStartDate: booking.scheduledStartDate,
   scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
@@ -162,6 +179,7 @@ const snapshotCurrentSchedule = (booking: any) => ({
   scheduledBufferUnit: booking.scheduledBufferUnit,
   scheduledStartTime: booking.scheduledStartTime,
   scheduledEndTime: booking.scheduledEndTime,
+  assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
 });
 
 const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
@@ -241,6 +259,9 @@ const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = undefined;
       scheduleData.scheduledStartTime = typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined;
       scheduleData.scheduledEndTime = undefined;
+      if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
+        scheduleData.assignedTeamMembers = booking.assignedTeamMembers;
+      }
     } else {
       const validation = await validateProjectScheduleSelection({
         projectId,
@@ -286,6 +307,8 @@ const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledEndTime = window.scheduledEndTime;
       if (window.assignedTeamMembers?.length) {
         scheduleData.assignedTeamMembers = window.assignedTeamMembers;
+      } else if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
+        scheduleData.assignedTeamMembers = booking.assignedTeamMembers;
       }
     }
 
@@ -315,6 +338,7 @@ const buildScheduleUpdatePayload = async ({
       scheduledBufferUnit: booking.scheduledBufferUnit,
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
       scheduledEndTime: booking.scheduledEndTime,
+      assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
     },
   };
 };
@@ -578,6 +602,16 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       return res.status(403).json({
         success: false,
         error: { code: 'UNAUTHORIZED', message: 'Not authorized' }
+      });
+    }
+
+    if (requestedStatus === 'rescheduling_requested') {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INVALID_STATUS',
+          message: 'Use the dedicated reschedule flow to request rescheduling'
+        }
       });
     }
 
@@ -970,6 +1004,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
     const { bookingId } = req.params;
     const userId = (req as any).user?._id?.toString();
     const { scheduledStartDate, scheduledStartTime, reason, note } = req.body;
+    const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+    const normalizedNote = normalizeOptionalText(note);
 
     if (!userId) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
@@ -979,8 +1015,14 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'MISSING_DATE', message: 'A proposed start date is required' } });
     }
 
-    if (!reason || typeof reason !== 'string' || reason.trim().length < 3) {
-      return res.status(400).json({ success: false, error: { code: 'MISSING_REASON', message: 'A rescheduling reason is required' } });
+    if (!normalizedReason || normalizedReason.length < 3 || normalizedReason.length > MAX_RESCHEDULE_REASON_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'MISSING_REASON',
+          message: `A rescheduling reason between 3 and ${MAX_RESCHEDULE_REASON_LENGTH} characters is required`
+        }
+      });
     }
 
     const booking = await Booking.findById(bookingId)
@@ -992,7 +1034,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Booking not found' } });
     }
 
-    const professionalId = booking.professional?._id?.toString?.() || booking.professional?.toString?.();
+    const professionalId = await getProfessionalId(booking);
     if (professionalId !== userId) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the assigned professional can request rescheduling' } });
     }
@@ -1016,8 +1058,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       status: 'pending',
       requestedBy: (req as any).user._id,
       requestedAt: new Date(),
-      reason: reason.trim(),
-      note: typeof note === 'string' ? note.trim() : undefined,
+      reason: normalizedReason,
+      note: normalizedNote,
       previousSchedule: snapshotCurrentSchedule(booking),
       proposedSchedule: {
         scheduledStartDate: proposedSchedule.data.scheduledStartDate,
@@ -1027,11 +1069,16 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
         scheduledBufferUnit: proposedSchedule.data.scheduledBufferUnit,
         scheduledStartTime: proposedSchedule.data.scheduledStartTime,
         scheduledEndTime: proposedSchedule.data.scheduledEndTime,
+        assignedTeamMembers: proposedSchedule.data.assignedTeamMembers,
       },
     } as any;
     booking.statusHistory = booking.statusHistory || [];
     booking.statusHistory.push(
-      createStatusHistoryEntry('rescheduling_requested', (req as any).user._id, `Professional requested rescheduling: ${reason.trim()}`)
+      createStatusHistoryEntry(
+        'rescheduling_requested',
+        (req as any).user._id,
+        truncateStatusHistoryNote(`Professional requested rescheduling: ${normalizedReason}`)
+      )
     );
 
     await booking.save();
@@ -1124,6 +1171,7 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
     const { bookingId } = req.params;
     const userId = (req as any).user?._id?.toString();
     const { newExecutionEndDate, note } = req.body;
+    const normalizedNote = normalizeOptionalText(note);
 
     if (!userId) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
@@ -1142,7 +1190,7 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Booking not found' } });
     }
 
-    const professionalId = booking.professional?._id?.toString?.() || booking.professional?.toString?.();
+    const professionalId = await getProfessionalId(booking);
     if (professionalId !== userId) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the assigned professional can extend execution' } });
     }
@@ -1179,9 +1227,9 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
       createStatusHistoryEntry(
         'in_progress',
         (req as any).user._id,
-        typeof note === 'string' && note.trim()
-          ? `Execution extended: ${note.trim()}`
-          : `Execution end date moved to ${nextExecutionEndDate.toISOString()}`
+        normalizedNote
+          ? truncateStatusHistoryNote(`Execution extended: ${normalizedNote}`)
+          : truncateStatusHistoryNote(`Execution end date moved to ${nextExecutionEndDate.toISOString()}`)
       )
     );
 

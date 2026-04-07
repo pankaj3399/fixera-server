@@ -6,6 +6,7 @@ import PointTransaction from "../../models/pointTransaction";
 import ProfessionalLevelConfig from "../../models/professionalLevelConfig";
 import Payment from "../../models/payment";
 import Booking from "../../models/booking";
+import Project from "../../models/project";
 import { calculateLoyaltyStatus } from "../../utils/loyaltySystem";
 import { addPoints, deductPoints } from "../../utils/pointsSystem";
 import { updateProfessionalLevel } from "../../utils/professionalLevelSystem";
@@ -514,8 +515,28 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
       const matchingCustomers = await User.find({ role: "customer", name: nameRegex }).select("_id").lean();
       const customerIds = matchingCustomers.map((c: any) => c._id);
       if (customerIds.length > 0) {
-        const matchingBookings = await Booking.find({ customer: { $in: customerIds } }).select("professional").lean();
-        customerNameProfessionalIds = [...new Set(matchingBookings.filter((b: any) => b.professional).map((b: any) => String(b.professional)))];
+        const matchingBookings = await Booking.find({
+          customer: { $in: customerIds },
+          $or: [
+            { professional: { $exists: true, $ne: null } },
+            { project: { $exists: true, $ne: null } },
+          ],
+        }).select("professional project").lean();
+        const directProfessionalIds = matchingBookings
+          .filter((b: any) => b.professional)
+          .map((b: any) => String(b.professional));
+        const projectIds = [...new Set(
+          matchingBookings
+            .filter((b: any) => b.project)
+            .map((b: any) => String(b.project))
+        )];
+        const projectProfessionals = projectIds.length > 0
+          ? await Project.find({ _id: { $in: projectIds } }).select("professionalId").lean()
+          : [];
+        const projectProfessionalIds = projectProfessionals
+          .filter((project: any) => project.professionalId)
+          .map((project: any) => String(project.professionalId));
+        customerNameProfessionalIds = [...new Set([...directProfessionalIds, ...projectProfessionalIds])];
       } else {
         customerNameProfessionalIds = [];
       }
@@ -670,7 +691,7 @@ export const listCustomerManagement = async (req: Request, res: Response) => {
     let addressCustomerIds: string[] | null = null;
     if (address) {
       const addressRegex = new RegExp(escapeRegex(address), "i");
-      const matchingBookings = await Booking.find({ address: addressRegex }).select("customer").lean();
+      const matchingBookings = await Booking.find({ "location.address": addressRegex }).select("customer").lean();
       addressCustomerIds = [...new Set(matchingBookings.map((b: any) => String(b.customer)))];
     }
 

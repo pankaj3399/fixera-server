@@ -118,6 +118,7 @@ export interface IBookingScheduleSnapshot {
   scheduledBufferUnit?: "hours" | "days";
   scheduledStartTime?: string;
   scheduledEndTime?: string;
+  assignedTeamMembers?: Types.ObjectId[];
 }
 
 export interface IBooking extends Document {
@@ -776,6 +777,10 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      assignedTeamMembers: [{
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+      }],
     },
     proposedSchedule: {
       scheduledStartDate: { type: Date },
@@ -785,6 +790,10 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      assignedTeamMembers: [{
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+      }],
     },
     respondedAt: { type: Date },
     respondedBy: {
