@@ -5,6 +5,15 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
 
+export function parsePostalCity(lastLine: string): { postalCode?: string; city: string } {
+  const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-][\dA-Z]{2,5})?)\s+(.+)$/i)
+    || lastLine.match(/^([A-Z]\d[\dA-Z](?:\s[\dA-Z]{2,4})?)\s+(.+)$/i);
+  if (match) {
+    return { postalCode: match[1].trim(), city: match[2].trim() };
+  }
+  return { city: lastLine.trim() };
+}
+
 export const validateVAT = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { vatNumber } = req.body;
@@ -34,20 +43,12 @@ export const validateVAT = async (req: Request, res: Response, next: NextFunctio
     if (validationResult.companyAddress) {
       const addressLines = validationResult.companyAddress.split('\n').filter(line => line.trim());
       const lastLine = addressLines[addressLines.length - 1] || '';
-      let city = '';
-      let postalCode = '';
-      const postalCityMatch = lastLine.match(/^([A-Z0-9-]{3,10})\s+(.+)$/i);
-      if (postalCityMatch) {
-        postalCode = postalCityMatch[1];
-        city = postalCityMatch[2].trim();
-      } else if (addressLines.length >= 2) {
-        city = lastLine.trim();
-      }
+      const parsed = parsePostalCity(lastLine);
       cleanedAddress = {
         fullAddress: validationResult.companyAddress,
         streetAddress: addressLines[0] || '',
-        city,
-        postalCode,
+        city: parsed.city || (addressLines.length >= 2 ? lastLine.trim() : ''),
+        postalCode: parsed.postalCode || '',
         country: formattedVAT.substring(0, 2)
       };
     }
@@ -148,15 +149,13 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const postalCityMatch = lastLine.match(/^([A-Z0-9-]{3,10})\s+(.+)$/i);
-          if (postalCityMatch) {
-            if (!user.businessInfo.postalCode) {
-              user.businessInfo.postalCode = postalCityMatch[1];
-            }
-            if (!user.businessInfo.city) {
-              user.businessInfo.city = postalCityMatch[2].trim();
-            }
-          } else if (addressLines.length >= 2 && !user.businessInfo.city) {
+          const parsed = parsePostalCity(lastLine);
+          if (parsed.postalCode && !user.businessInfo.postalCode) {
+            user.businessInfo.postalCode = parsed.postalCode;
+          }
+          if (parsed.city && !user.businessInfo.city) {
+            user.businessInfo.city = parsed.city;
+          } else if (!parsed.postalCode && addressLines.length >= 2 && !user.businessInfo.city) {
             user.businessInfo.city = lastLine.trim();
           }
         }
@@ -210,15 +209,13 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const postalCityMatch = lastLine.match(/^([A-Z0-9-]{3,10})\s+(.+)$/i);
-          if (postalCityMatch) {
-            if (!user.companyAddress.postalCode) {
-              user.companyAddress.postalCode = postalCityMatch[1];
-            }
-            if (!user.companyAddress.city) {
-              user.companyAddress.city = postalCityMatch[2].trim();
-            }
-          } else if (addressLines.length >= 2 && !user.companyAddress.city) {
+          const parsed = parsePostalCity(lastLine);
+          if (parsed.postalCode && !user.companyAddress.postalCode) {
+            user.companyAddress.postalCode = parsed.postalCode;
+          }
+          if (parsed.city && !user.companyAddress.city) {
+            user.companyAddress.city = parsed.city;
+          } else if (!parsed.postalCode && addressLines.length >= 2 && !user.companyAddress.city) {
             user.companyAddress.city = lastLine.trim();
           }
         }
