@@ -772,6 +772,10 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
       action?: "suspend" | "reactivate";
     };
 
+    if (action && action !== "suspend" && action !== "reactivate") {
+      return res.status(400).json({ success: false, msg: "Invalid action. Allowed actions: suspend, reactivate" });
+    }
+
     const customer = await User.findOne({ _id: customerId, role: "customer" });
     if (!customer) {
       return res.status(404).json({ success: false, msg: "Customer not found" });
