@@ -10,13 +10,14 @@ import PointTransaction from "../models/pointTransaction";
 import Meeting from "../models/meeting";
 import WarrantyClaim from "../models/warrantyClaim";
 import ChatReport from "../models/chatReport";
-import { deleteFromS3, parseS3KeyFromUrl } from "../utils/s3Upload";
+import { deleteFromS3, parseS3KeyFromUrl, isAllowedS3Url } from "../utils/s3Upload";
 
 dotenv.config();
 
 async function deleteS3Files(urls: (string | undefined | null)[]) {
   for (const url of urls) {
     if (!url) continue;
+    if (!isAllowedS3Url(url)) continue;
     const key = parseS3KeyFromUrl(url);
     if (!key) continue;
     try {
