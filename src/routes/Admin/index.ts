@@ -62,6 +62,7 @@ import {
   resolveDispute,
   getDisputeAnalytics,
 } from "../../handlers/Admin/disputeManagement";
+import { deleteUser } from "../../handlers/Admin/userDeletion";
 import { runWarrantyClaimChecks } from "../../utils/warrantyClaimScheduler";
 import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineScheduler";
 
@@ -131,6 +132,9 @@ adminRouter.route('/disputes').get(getDisputes);
 adminRouter.route('/disputes/analytics').get(getDisputeAnalytics);
 adminRouter.route('/disputes/:bookingId').get(getDisputeDetails);
 adminRouter.route('/disputes/:bookingId/resolve').post(resolveDispute);
+
+// User deletion route
+adminRouter.route('/users/:userId').delete(deleteUser);
 
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);

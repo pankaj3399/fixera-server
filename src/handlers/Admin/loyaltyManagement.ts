@@ -769,7 +769,7 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
       action
     } = req.body as {
       loyaltyLevel?: string;
-      action?: "suspend" | "reactivate" | "delete";
+      action?: "suspend" | "reactivate";
     };
 
     const customer = await User.findOne({ _id: customerId, role: "customer" });
@@ -786,10 +786,6 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
     }
     if (action === "suspend") customer.accountStatus = "suspended";
     if (action === "reactivate") customer.accountStatus = "active";
-    if (action === "delete") {
-      customer.deletedAt = new Date();
-      customer.deletedBy = adminId;
-    }
 
     await customer.save();
 
@@ -801,8 +797,7 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
           _id: customer._id,
           loyaltyLevel: customer.loyaltyLevel,
           manualCustomerLevelOverride: customer.manualCustomerLevelOverride,
-          accountStatus: customer.accountStatus || "active",
-          deletedAt: customer.deletedAt || null
+          accountStatus: customer.accountStatus || "active"
         }
       }
     });
