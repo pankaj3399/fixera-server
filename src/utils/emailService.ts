@@ -172,6 +172,65 @@ export const sendWelcomeEmail = async (email: string, userName: string): Promise
   }
 };
 
+export const sendProfessionalWelcomeEmail = async (email: string, professionalName: string): Promise<boolean> => {
+  try {
+    const safeProfessionalName = escapeHtml(professionalName);
+
+    const emailContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader("Welcome to Fixera Professionals")}
+
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Welcome ${safeProfessionalName}!</h2>
+
+          <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
+            Your professional onboarding has been submitted successfully. You can now access your dashboard and profile while our team reviews your account.
+          </p>
+
+          <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h3 style="color: #2E7D32; margin: 0 0 15px 0; font-size: 18px;">Next Steps</h3>
+            <p style="color: #333; margin: 0 0 15px 0; line-height: 1.6;">
+              Review your business profile, keep your availability updated, and watch for approval from the Fixera team.
+            </p>
+            <div style="text-align: center; margin-top: 20px;">
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
+                 style="background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; margin-right: 10px;">
+                Open Dashboard
+              </a>
+              <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/profile"
+                 style="background: #2563eb; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+                Open Profile
+              </a>
+            </div>
+          </div>
+
+          <p style="color: #666; line-height: 1.6; margin-top: 30px;">
+            Once approved, you will be able to create projects and start working with customers on Fixera.
+          </p>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const emailAPI = createEmailAPI();
+    const sendSmtpEmail = new SendSmtpEmail();
+    sendSmtpEmail.to = [{ email }];
+    sendSmtpEmail.subject = "Welcome to Fixera Professionals";
+    sendSmtpEmail.htmlContent = emailContent;
+    sendSmtpEmail.sender = {
+      name: "Fixera Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    console.error('Failed to send professional welcome email:', error);
+    return false;
+  }
+};
+
 // Send ID expired email to professionals
 export const sendIdExpiredEmail = async (email: string, userName: string): Promise<boolean> => {
   try {

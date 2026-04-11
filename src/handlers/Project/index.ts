@@ -225,12 +225,20 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
+    const professional = await User.findById(professionalId).select('role professionalStatus stripe');
+    if (!professional || professional.role !== 'professional') {
+      return res.status(403).json({ error: "Only approved professionals can manage projects" });
+    }
+
+    if (professional.professionalStatus !== 'approved') {
+      return res.status(403).json({
+        error: "Professional approval is required before creating projects",
+        code: "PROFESSIONAL_APPROVAL_REQUIRED"
+      });
+    }
+
     if (!projectData.id) {
-      const professional = await User.findById(professionalId).select('role stripe');
-      if (
-        professional?.role === 'professional' &&
-        (!professional.stripe?.accountId || !professional.stripe?.onboardingCompleted)
-      ) {
+      if (!professional.stripe?.accountId || !professional.stripe?.onboardingCompleted) {
         return res.status(403).json({
           error: "Complete Stripe setup before creating projects",
           code: "STRIPE_ONBOARDING_REQUIRED"
@@ -1387,6 +1395,18 @@ export const submitProject = async (req: Request, res: Response) => {
     if (!professionalId) {
       console.log("[PROJECT] No professional ID found");
       return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const professional = await User.findById(professionalId).select('role professionalStatus');
+    if (!professional || professional.role !== 'professional') {
+      return res.status(403).json({ error: "Only approved professionals can submit projects" });
+    }
+
+    if (professional.professionalStatus !== 'approved') {
+      return res.status(403).json({
+        error: "Professional approval is required before submitting projects",
+        code: "PROFESSIONAL_APPROVAL_REQUIRED"
+      });
     }
 
     const project = await Project.findOne({

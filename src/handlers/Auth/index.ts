@@ -238,7 +238,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       }
     }
 
-    // Kick off OTP sends (email + SMS) and welcome email in parallel, but await to report status
+    // Kick off OTP sends and send customer welcome emails after signup.
     let emailOtpSent = false;
     let phoneOtpSent = false;
     let welcomeEmailSent = false;
@@ -250,11 +250,12 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       console.error('Error sending email OTP during signup:', e);
     }
 
-    // Send welcome email after account creation
-    try {
-      welcomeEmailSent = await sendWelcomeEmail(user.email, user.name);
-    } catch (e) {
-      console.error('Error sending welcome email during signup:', e);
+    if (user.role !== 'professional') {
+      try {
+        welcomeEmailSent = await sendWelcomeEmail(user.email, user.name);
+      } catch (e) {
+        console.error('Error sending welcome email during signup:', e);
+      }
     }
 
     try {

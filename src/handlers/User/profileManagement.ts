@@ -9,17 +9,9 @@ import { getCountryCode } from '../../utils/geocoding';
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 import { NO_PREVIOUS_VALUE, normalizePendingIdChanges } from "../../utils/pendingIdChanges";
 import { isValidUsernameFormat, isTooSimilarToCompanyName, generateUsernameSuggestions } from "../../utils/usernameUtils";
+import { sendProfessionalWelcomeEmail } from "../../utils/emailService";
 
 const phoneUtil = PhoneNumberUtil.getInstance();
-const maskEmail = (email: string): string => {
-  if (!email) return 'Unknown';
-  const [local, domain] = email.split('@');
-  if (!local || !domain) return email;
-  const maskedLocal = local.length > 2 
-    ? local.substring(0, 2) + '*'.repeat(local.length - 2) 
-    : local + '*';
-  return `${maskedLocal}@${domain}`;
-};
 
 const normalizeOnboardingAgreements = (value: any) => {
   if (!value || typeof value !== 'object') {
@@ -705,6 +697,13 @@ export const submitForVerification = async (req: Request, res: Response, next: N
       user.professionalOnboardingCompletedAt = new Date();
     }
     await user.save();
+
+    try {
+      await sendProfessionalWelcomeEmail(user.email, user.name);
+    } catch (emailError) {
+      console.error('Failed to send professional welcome email:', emailError);
+    }
+
     return res.status(200).json({
       success: true,
       msg: "Thanks for submitting. Your profile will be checked within 48 hours.",
