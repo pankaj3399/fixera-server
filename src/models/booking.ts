@@ -532,8 +532,7 @@ const BookingSchema = new Schema({
 
   // New quotation system
   quotationNumber: {
-    type: String,
-    index: true
+    type: String
   },
   quoteVersions: [{
     version: { type: Number, required: true },
@@ -1019,9 +1018,7 @@ const BookingSchema = new Schema({
 
   // Metadata
   bookingNumber: {
-    type: String,
-    unique: true,
-    index: true
+    type: String
   },
   notes: {
     type: String,
@@ -1051,14 +1048,27 @@ BookingSchema.index({ professional: 1, status: 1, 'customerReview.communicationL
 BookingSchema.index({ 'customerReview.isHidden': 1, 'customerReview.hiddenAt': -1 }); // Hidden reviews admin query
 BookingSchema.index({ 'payment.status': 1 }); // Payment tracking
 BookingSchema.index({ status: 1, rfqDeadline: 1 }); // RFQ deadline scheduler
-BookingSchema.index({ quotationNumber: 1 }); // Quotation lookup
-BookingSchema.index({ bookingNumber: 1 }); // Quick lookup by booking number
+BookingSchema.index(
+  { quotationNumber: 1 },
+  { unique: true, partialFilterExpression: { quotationNumber: { $exists: true, $type: 'string' } } }
+); // Quotation lookup
+BookingSchema.index({ bookingNumber: 1 }, { unique: true }); // Quick lookup by booking number
 BookingSchema.index({ 'warrantyCoverage.endsAt': 1 });
 
 // Helper to parse HH:mm to minutes for comparison
 const parseTimeToMinutes = (time: string): number => {
   const [hours, minutes] = time.split(':').map(Number);
   return hours * 60 + minutes;
+};
+
+const getBookingNumberCandidate = async (): Promise<string> => {
+  const year = new Date().getFullYear();
+  return getNextSequence(`bookingNumber-${year}`, `BK-${year}`);
+};
+
+const getQuotationNumberCandidate = async (): Promise<string> => {
+  const year = new Date().getFullYear();
+  return getNextSequence(`quotationNumber-${year}`, `QT-${year}`);
 };
 
 // Pre-save middleware to generate booking number and validate scheduling fields
@@ -1130,15 +1140,12 @@ BookingSchema.pre('save', async function(next) {
   }
 
   if (this.isNew && !this.bookingNumber) {
-    const year = new Date().getFullYear();
-    this.bookingNumber = await getNextSequence(`bookingNumber-${year}`, `BK-${year}`);
+    this.bookingNumber = await getBookingNumberCandidate();
   }
 
   // Generate quotation number if quoteVersions exist and no quotationNumber yet
-  // Uses atomic counter to avoid race conditions with concurrent saves
   if (!this.quotationNumber && this.quoteVersions && this.quoteVersions.length > 0) {
-    const year = new Date().getFullYear();
-    this.quotationNumber = await getNextSequence(`quotationNumber-${year}`, `QT-${year}`);
+    this.quotationNumber = await getQuotationNumberCandidate();
   }
 
   // Initialize status history if empty
