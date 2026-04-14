@@ -22,7 +22,12 @@ const normalizeRfqAnswers = (answers: any[] | undefined) => {
     return [];
   }
 
-  return answers.map((answer) => {
+  return answers.filter((answer) => {
+    if (answer == null) return false;
+    const q = answer.question || "";
+    const a = typeof answer.answer === "string" ? answer.answer.trim() : String(answer.answer ?? "").trim();
+    return q && a;
+  }).map((answer) => {
     const normalizedAnswer: Record<string, any> = {
       questionId: answer?.questionId,
       question: answer?.question || "",
