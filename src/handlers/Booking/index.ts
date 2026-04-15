@@ -22,7 +22,12 @@ const normalizeRfqAnswers = (answers: any[] | undefined) => {
     return [];
   }
 
-  return answers.map((answer) => {
+  return answers.filter((answer) => {
+    if (answer == null) return false;
+    const q = answer.question || "";
+    const a = typeof answer.answer === "string" ? answer.answer.trim() : String(answer.answer ?? "").trim();
+    return q && a;
+  }).map((answer) => {
     const normalizedAnswer: Record<string, any> = {
       questionId: answer?.questionId,
       question: answer?.question || "",
@@ -902,11 +907,35 @@ export const submitPostBookingAnswers = async (
       });
     }
 
-    const normalizedAnswers = answers.map((answer) => ({
-      questionId: answer.questionId || "",
-      question: answer.question || "",
-      answer: (answer.answer || "").trim(),
-    }));
+    const normalizedAnswers = answers.map((answer) => {
+      const rawAnswer = answer.answer;
+      const trimmedAnswer = (typeof rawAnswer === "string" ? rawAnswer : String(rawAnswer ?? "")).trim();
+      const rawQuestionId = answer.questionId;
+      const clientQuestionId = typeof rawQuestionId === "string" ? rawQuestionId : String(rawQuestionId ?? "");
+      const rawQuestion = answer.question;
+      const clientQuestion = typeof rawQuestion === "string" ? rawQuestion : String(rawQuestion ?? "");
+      const matchedQuestion = postBookingQuestions.find((q: any) => {
+        const qId = q._id?.toString() || q.id;
+        if (qId && clientQuestionId === qId) return true;
+        if (q?.question && clientQuestion === q.question) return true;
+        return false;
+      });
+      return {
+        questionId: matchedQuestion?._id?.toString() || matchedQuestion?.id || clientQuestionId,
+        question: matchedQuestion?.question || clientQuestion,
+        answer: trimmedAnswer,
+      };
+    });
+
+    const unresolvedAnswers = normalizedAnswers.filter(
+      (a) => a.answer && (!a.questionId || !a.question)
+    );
+    if (unresolvedAnswers.length > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: `Could not resolve ${unresolvedAnswers.length} answer(s) to a valid question`,
+      });
+    }
 
     const hasMissingRequired = postBookingQuestions.some((question: any) => {
       if (!question?.isRequired) {
@@ -914,11 +943,11 @@ export const submitPostBookingAnswers = async (
       }
 
       const questionId = question._id?.toString() || question.id;
-      const matched = normalizedAnswers.find((answer) => {
-        if (questionId && answer.questionId === questionId) {
+      const matched = normalizedAnswers.find((a) => {
+        if (questionId && a.questionId === questionId) {
           return true;
         }
-        if (question?.question && answer.question === question.question) {
+        if (question?.question && a.question === question.question) {
           return true;
         }
         return false;
@@ -935,7 +964,7 @@ export const submitPostBookingAnswers = async (
     }
 
     booking.postBookingData = normalizedAnswers.filter(
-      (answer) => answer.answer
+      (a) => a.answer && a.question && a.questionId
     ) as any;
 
     await booking.save();
