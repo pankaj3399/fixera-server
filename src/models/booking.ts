@@ -1143,7 +1143,6 @@ BookingSchema.pre('save', async function(next) {
     this.bookingNumber = await getBookingNumberCandidate();
   }
 
-  // Generate quotation number if quoteVersions exist and no quotationNumber yet
   if (!this.quotationNumber && this.quoteVersions && this.quoteVersions.length > 0) {
     this.quotationNumber = await getQuotationNumberCandidate();
   }
