@@ -11,7 +11,7 @@ export interface ProfessionalMetrics {
   avgRating: number;
   onTimePercentage: number;
   responseRate: number;
-  boostedBookings: number; // extra credits from points
+  boostedBookings: number; // extra booking credits from points-to-booking conversion
 }
 
 export interface ProfessionalLevelInfo {
@@ -91,7 +91,7 @@ export const getProfessionalMetrics = async (
   });
   const onTimePercentage = totalAssigned > 0 ? Math.round((completedBookings / totalAssigned) * 100) : 100;
 
-  // Response rate: quoted / total RFQs received
+  // Quote response rate: RFQs that received a quote / total RFQs received
   const totalRfqs = await Booking.countDocuments({
     professional: professionalId,
     status: { $in: ['rfq', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'in_progress', 'completed', 'cancelled'] }
@@ -102,7 +102,7 @@ export const getProfessionalMetrics = async (
   });
   const responseRate = totalRfqs > 0 ? Math.round((respondedRfqs / totalRfqs) * 100) : 100;
 
-  // Points boost: count booking credits purchased, using the ratio stored per transaction
+  // Points-to-booking conversion: count booking credits purchased using the stored ratio per transaction
   const boostQuery = PointTransaction.find({
     userId: new mongoose.Types.ObjectId(professionalId.toString()),
     source: 'boost',
@@ -136,10 +136,10 @@ export const calculateProfessionalLevel = async (
 ): Promise<ProfessionalLevelInfo> => {
   const [config, professional] = await Promise.all([
     ProfessionalLevelConfig.getCurrentConfig(),
-    User.findById(professionalId).select("manualProfessionalLevelOverride").lean()
+    User.findById(professionalId).select('manualProfessionalLevelOverride').lean()
   ]);
   const metrics = await getProfessionalMetrics(professionalId, opts);
-  const activeLevels = config.levels.filter(l => l.isActive).sort((a, b) => a.order - b.order);
+  const activeLevels = config.levels.filter((l) => l.isActive).sort((a, b) => a.order - b.order);
 
   if (activeLevels.length === 0) {
     throw new Error('No active professional levels configured');
@@ -188,18 +188,18 @@ export const calculateProfessionalLevel = async (
       missingCriteria.push(`${nc.minDaysActive - metrics.daysActive} more days active`);
     }
     if (metrics.avgRating < nc.minAvgRating) {
-      missingCriteria.push(`Rating ${metrics.avgRating} → ${nc.minAvgRating} needed`);
+      missingCriteria.push(`Rating ${metrics.avgRating} -> ${nc.minAvgRating} needed`);
     }
     if (metrics.onTimePercentage < nc.minOnTimePercentage) {
-      missingCriteria.push(`On-time ${metrics.onTimePercentage}% → ${nc.minOnTimePercentage}% needed`);
+      missingCriteria.push(`On-time ${metrics.onTimePercentage}% -> ${nc.minOnTimePercentage}% needed`);
     }
     if (metrics.responseRate < nc.minResponseRate) {
-      missingCriteria.push(`Response rate ${metrics.responseRate}% → ${nc.minResponseRate}% needed`);
+      missingCriteria.push(`Quote response rate ${metrics.responseRate}% -> ${nc.minResponseRate}% needed`);
     }
 
     // Progress: percentage of criteria met (simple average)
     const criteriaCount = 5;
-    let metCount = criteriaCount - missingCriteria.length;
+    const metCount = criteriaCount - missingCriteria.length;
     const progress = Math.round((metCount / criteriaCount) * 100);
 
     nextLevel = {
@@ -260,7 +260,7 @@ export const updateProfessionalLevel = async (
   if (oldLevel !== levelInfo.currentLevel) {
     user.professionalLevel = levelInfo.currentLevel;
     await user.save(opts?.session ? { session: opts.session } : {});
-    console.log(`Professional Level: ${user.email} ${oldLevel} → ${levelInfo.currentLevel}`);
+    console.log(`Professional Level: ${user.email} ${oldLevel} -> ${levelInfo.currentLevel}`);
   }
 
   return {
@@ -271,7 +271,7 @@ export const updateProfessionalLevel = async (
 };
 
 /**
- * Professional uses points to boost their booking count toward level requirements.
+ * Professional uses points-to-booking conversion to boost their booking count toward level requirements.
  */
 export const applyPointsBoost = async (
   professionalId: mongoose.Types.ObjectId | string,
@@ -285,14 +285,14 @@ export const applyPointsBoost = async (
     throw new Error('Professional not found');
   }
 
-  // Use the professional's current level to determine boost ratio
+  // Use the professional's current level to determine the points required per booking credit
   const currentLevelName = professional.professionalLevel || 'New';
-  const currentLevel = config.levels.find(l => l.isActive && l.name === currentLevelName);
+  const currentLevel = config.levels.find((l) => l.isActive && l.name === currentLevelName);
   const boostRatio = currentLevel?.pointsBoostRatio || 100;
 
   const boostedBookings = Math.floor(pointsToSpend / boostRatio);
   if (boostedBookings < 1) {
-    throw new Error(`Need at least ${boostRatio} points for 1 booking credit boost`);
+    throw new Error(`Need at least ${boostRatio} points for 1 booking credit`);
   }
 
   // Only spend exact multiple
@@ -309,7 +309,7 @@ export const applyPointsBoost = async (
         professionalId as mongoose.Types.ObjectId,
         actualPointsSpent,
         'boost',
-        `Boosted ${boostedBookings} booking credits toward professional level`,
+        `Applied ${boostedBookings} booking credits toward professional level`,
         { session, metadata: { boostRatio, boostedBookings } }
       );
 

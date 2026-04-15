@@ -1,39 +1,26 @@
 import mongoose from 'mongoose';
 
-const resolveField = (key: string): string | null => {
-  if (key.startsWith('bookingNumber')) return 'bookingNumber';
-  if (key.startsWith('quotationNumber')) return 'quotationNumber';
-  return null;
+type SupportedSequenceField = 'bookingNumber' | 'quotationNumber';
+
+interface SequenceConfig {
+  field: SupportedSequenceField;
+  collection: 'bookings';
+}
+
+const getSequenceConfig = (key: string): SequenceConfig => {
+  if (key.startsWith('bookingNumber')) {
+    return { field: 'bookingNumber', collection: 'bookings' };
+  }
+
+  if (key.startsWith('quotationNumber')) {
+    return { field: 'quotationNumber', collection: 'bookings' };
+  }
+
+  throw new Error(`Unsupported sequence key: ${key}`);
 };
 
-const getMaxExistingSeq = async (
-  db: mongoose.mongo.Db,
-  field: string,
-  prefix: string
-): Promise<number> => {
-  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regexPattern = `^${escapedPrefix}-(\\d+)$`;
-
-  const [result] = await db.collection('bookings').aggregate([
-    { $match: { [field]: { $regex: regexPattern } } },
-    {
-      $project: {
-        numericSeq: {
-          $toInt: {
-            $arrayElemAt: [
-              { $getField: { field: 'captures', input: { $regexFind: { input: `$${field}`, regex: regexPattern } } } },
-              0,
-            ],
-          },
-        },
-      },
-    },
-    { $sort: { numericSeq: -1 } },
-    { $limit: 1 },
-  ]).toArray();
-
-  return result?.numericSeq ?? 0;
-};
+const formatSequenceValue = (prefix: string, seq: number): string =>
+  `${prefix}-${String(seq).padStart(6, '0')}`;
 
 export const getNextSequence = async (key: string, prefix: string): Promise<string> => {
   const db = mongoose.connection.db;
@@ -41,27 +28,34 @@ export const getNextSequence = async (key: string, prefix: string): Promise<stri
     throw new Error(`Database unavailable: cannot generate ${key}`);
   }
 
+  const { field, collection } = getSequenceConfig(key);
   const countersCollection = db.collection<{ _id: string; seq: number }>('counters');
-  const existing = await countersCollection.findOne({ _id: key });
+  const sourceCollection = db.collection(collection);
+  const counterId = `${field}:${prefix}`;
+  const maxAttempts = 10000;
 
-  if (!existing) {
-    const field = resolveField(key);
-    const floor = field ? await getMaxExistingSeq(db, field, prefix) : 0;
-
-    await countersCollection.updateOne(
-      { _id: key },
-      { $max: { seq: floor } },
-      { upsert: true }
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const counter = await countersCollection.findOneAndUpdate(
+      { _id: counterId },
+      { $inc: { seq: 1 } },
+      { upsert: true, returnDocument: 'after' }
     );
+
+    const nextSeq = counter?.seq;
+    if (!Number.isInteger(nextSeq) || nextSeq == null || nextSeq < 1) {
+      throw new Error(`Failed to generate ${key}: counter upsert returned ${JSON.stringify(counter)}`);
+    }
+
+    const candidate = formatSequenceValue(prefix, nextSeq);
+    const existing = await sourceCollection.findOne(
+      { [field]: candidate },
+      { projection: { _id: 1 } }
+    );
+
+    if (!existing) {
+      return candidate;
+    }
   }
 
-  const counter = await countersCollection.findOneAndUpdate(
-    { _id: key },
-    { $inc: { seq: 1 } },
-    { upsert: true, returnDocument: 'after' }
-  );
-  if (!counter?.seq) {
-    throw new Error(`Failed to generate ${key}: counter upsert returned ${JSON.stringify(counter)}`);
-  }
-  return `${prefix}-${String(counter.seq).padStart(6, '0')}`;
+  throw new Error(`Failed to generate ${key}: exhausted ${maxAttempts} attempts for prefix ${prefix}`);
 };
