@@ -602,9 +602,19 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     }
 
-    const booking = await Booking.create(bookingData);
+    let booking: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        booking = await Booking.create(bookingData);
+        break;
+      } catch (err: any) {
+        if (err.code === 11000 && (err.keyPattern?.bookingNumber || err.keyPattern?.quotationNumber) && attempt < 2) {
+          continue;
+        }
+        throw err;
+      }
+    }
 
-    // Populate references for response
     await booking.populate([
       { path: 'customer', select: 'name email phone' },
       { path: 'professional', select: 'name email businessInfo' },
