@@ -8,6 +8,7 @@ export interface IReferral extends Document {
   referralCode: string; // the code used
   status: ReferralStatus;
   referrerRewardAmount: number; // credit amount awarded to referrer
+  referrerRewardType?: 'customer_credit' | 'professional_level_boost';
   referrerRewardIssuedAt?: Date;
   referredUserDiscountApplied: boolean;
   qualifyingBooking?: mongoose.Types.ObjectId; // the booking that triggered completion
@@ -48,6 +49,11 @@ const referralSchema = new Schema<IReferral>({
     type: Number,
     default: 0,
     min: 0
+  },
+  referrerRewardType: {
+    type: String,
+    enum: ['customer_credit', 'professional_level_boost'],
+    required: false
   },
   referrerRewardIssuedAt: {
     type: Date,

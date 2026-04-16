@@ -27,6 +27,8 @@ export const updateReferralConfig = async (req: Request, res: Response, next: Ne
     const {
       isEnabled,
       referrerRewardAmount,
+      referrerCustomerRewardAmount,
+      referrerProfessionalRewardAmount,
       referredCustomerDiscountType,
       referredCustomerDiscountValue,
       referredCustomerDiscountMaxAmount,
@@ -42,6 +44,8 @@ export const updateReferralConfig = async (req: Request, res: Response, next: Ne
 
     if (typeof isEnabled === 'boolean') config.isEnabled = isEnabled;
     if (referrerRewardAmount !== undefined) config.referrerRewardAmount = referrerRewardAmount;
+    if (referrerCustomerRewardAmount !== undefined) config.referrerCustomerRewardAmount = referrerCustomerRewardAmount;
+    if (referrerProfessionalRewardAmount !== undefined) config.referrerProfessionalRewardAmount = referrerProfessionalRewardAmount;
     if (referredCustomerDiscountType) config.referredCustomerDiscountType = referredCustomerDiscountType;
     if (referredCustomerDiscountValue !== undefined) config.referredCustomerDiscountValue = referredCustomerDiscountValue;
     if (referredCustomerDiscountMaxAmount !== undefined) config.referredCustomerDiscountMaxAmount = referredCustomerDiscountMaxAmount;

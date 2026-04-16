@@ -73,12 +73,9 @@ const sendQuotationChatMessage = async (
 
     if (!conversation) return;
 
-    const commissionPercent = await getSafeCommissionPercent();
-    const customerAmount = +(totalAmount * (1 + commissionPercent / 100)).toFixed(2);
-
     const label = isUpdate ? 'Updated Quotation' : 'New Quotation';
     const validDateStr = formatQuotationValidDate(validUntil);
-    const text = `${label}: ${booking.quotationNumber || ''} (v${version})\n\nScope: ${scope}\nAmount: ${currency} ${customerAmount.toFixed(2)}\nValid until: ${validDateStr}\n\nView and respond to this quotation in your bookings dashboard.`;
+    const text = `${label}: ${booking.quotationNumber || ''} (v${version})\n\nScope: ${scope}\nAmount: ${currency} ${totalAmount.toFixed(2)}\nValid until: ${validDateStr}\n\nView and respond to this quotation in your bookings dashboard.`;
 
     await ChatMessage.create({
       conversationId: conversation._id,
@@ -91,7 +88,7 @@ const sendQuotationChatMessage = async (
         quotationNumber: booking.quotationNumber || '',
         version,
         scope,
-        totalAmount: customerAmount,
+        totalAmount,
         currency,
         validUntil: validDateStr,
         status: 'quoted',
@@ -171,7 +168,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email')
-      .populate('professional', 'name email');
+      .populate('professional', 'name username email');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -205,7 +202,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
 
       // Send email to customer
       try {
-        await sendRfqAcceptedEmail(customer.email, customer.name, professional.name, booking._id.toString());
+        await sendRfqAcceptedEmail(customer.email, customer.name, professional.username || professional.name, booking._id.toString());
       } catch (e) {
         console.error('Failed to send RFQ accepted email:', e);
       }
@@ -237,7 +234,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     await booking.save();
 
     try {
-      await sendRfqRejectedEmail(customer.email, customer.name, professional.name, rejectionReason);
+      await sendRfqRejectedEmail(customer.email, customer.name, professional.username || professional.name, rejectionReason);
     } catch (e) {
       console.error('Failed to send RFQ rejected email:', e);
     }
@@ -317,7 +314,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email')
-      .populate('professional', 'name email');
+      .populate('professional', 'name username email');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -381,11 +378,14 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const professional = booking.professional as any;
 
     try {
+      const commissionPercent = await getSafeCommissionPercent();
+      const customerAmount = +(totalAmount * (1 + commissionPercent / 100)).toFixed(2);
+      const profDisplayName = professional.username || professional.name;
       const isDirect = booking.rfqResponse === undefined || booking.rfqResponse === null;
       if (isDirect) {
-        await sendDirectQuotationEmail(customer.email, customer.name, professional.name, booking.quotationNumber || '', totalAmount, booking._id.toString());
+        await sendDirectQuotationEmail(customer.email, customer.name, profDisplayName, booking.quotationNumber || '', customerAmount, booking._id.toString());
       } else {
-        await sendQuotationReceivedEmail(customer.email, customer.name, professional.name, booking.quotationNumber || '', totalAmount, booking._id.toString());
+        await sendQuotationReceivedEmail(customer.email, customer.name, profDisplayName, booking.quotationNumber || '', customerAmount, booking._id.toString());
       }
     } catch (e) {
       console.error('Failed to send quotation email:', e);
@@ -462,7 +462,7 @@ export const editQuotation = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email')
-      .populate('professional', 'name email');
+      .populate('professional', 'name username email');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -523,7 +523,7 @@ export const editQuotation = async (req: Request, res: Response) => {
     const professional = booking.professional as any;
 
     try {
-      await sendQuotationUpdatedEmail(customer.email, customer.name, professional.name, booking.quotationNumber || '', newVersionNumber, booking._id.toString());
+      await sendQuotationUpdatedEmail(customer.email, customer.name, professional.username || professional.name, booking.quotationNumber || '', newVersionNumber, booking._id.toString());
     } catch (e) {
       console.error('Failed to send quotation updated email:', e);
     }
@@ -565,7 +565,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'name email')
-      .populate('professional', 'name email');
+      .populate('professional', 'name username email');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -766,7 +766,7 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
         serviceType: linkedProject?.title || 'Direct Quotation',
         description: linkedProject
           ? `Direct quotation for project: ${linkedProject.title}`
-          : `Direct quotation from ${professional.name}`,
+          : `Direct quotation from ${professional.username || professional.name}`,
         answers: [],
       },
       statusHistory: [{

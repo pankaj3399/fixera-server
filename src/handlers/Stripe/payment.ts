@@ -266,6 +266,17 @@ export const createPaymentIntent = async (
       };
     }
 
+    // Fetch commission rate from DB early so milestone amounts include it
+    let commissionPercent: number;
+    try {
+      const platformConfig = await PlatformSettings.getCurrentConfig();
+      commissionPercent = platformConfig.commissionPercent;
+    } catch (configError) {
+      console.warn('Failed to fetch platform config from DB, falling back to env var:', configError);
+      const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
+      commissionPercent = Number.isFinite(parsed) ? parsed : 0;
+    }
+
     // Determine currency
     const currency = determineBookingCurrency(
       booking.quote.currency,
@@ -292,7 +303,7 @@ export const createPaymentIntent = async (
             }
           };
         }
-        chargeAmount = nextPayable.amount;
+        chargeAmount = +(nextPayable.amount * (1 + commissionPercent / 100)).toFixed(2);
         milestoneIndex = nextPayable._originalIndex;
         milestoneOrder = nextPayable.order ?? 0;
       } else {
@@ -365,17 +376,6 @@ export const createPaymentIntent = async (
     const amountValidation = validatePaymentAmount(totalAmount, currency);
     if (!amountValidation.valid) {
       return { success: false, error: { code: 'INVALID_AMOUNT', message: amountValidation.error! } };
-    }
-
-    // Fetch commission rate from DB with env var fallback
-    let commissionPercent: number;
-    try {
-      const platformConfig = await PlatformSettings.getCurrentConfig();
-      commissionPercent = platformConfig.commissionPercent;
-    } catch (configError) {
-      console.warn('Failed to fetch platform config from DB, falling back to env var:', configError);
-      const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
-      commissionPercent = Number.isFinite(parsed) ? parsed : 0;
     }
 
     // Use hybrid discount absorption model

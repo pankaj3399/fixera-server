@@ -17,22 +17,31 @@ export const getReferralStats = async (req: Request, res: Response, next: NextFu
       return res.status(401).json({ success: false, msg: 'Authentication required' });
     }
 
-    const [config, pointsConfig, stats] = await Promise.all([
+    const [config, pointsConfig, stats, user] = await Promise.all([
       ReferralConfig.getCurrentConfig(),
       PointsConfig.getCurrentConfig(),
       getUserReferralStats(userId),
+      User.findById(userId).select('role'),
     ]);
 
     if (!stats) {
       return res.status(404).json({ success: false, msg: 'User not found' });
     }
 
+    const referrerRewardAmount = user?.role === 'professional'
+      ? config.referrerProfessionalRewardAmount
+      : config.referrerCustomerRewardAmount;
+    const referrerRewardType = user?.role === 'professional'
+      ? 'professional_level_boost'
+      : 'customer_credit';
+
     return res.status(200).json({
       success: true,
       data: {
         ...stats,
         programEnabled: config.isEnabled,
-        referrerRewardAmount: config.referrerRewardAmount,
+        referrerRewardAmount,
+        referrerRewardType,
         referredCustomerDiscountType: config.referredCustomerDiscountType,
         referredCustomerDiscountValue: config.referredCustomerDiscountValue,
         referredCustomerDiscountMaxAmount: config.referredCustomerDiscountMaxAmount,

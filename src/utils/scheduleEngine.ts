@@ -322,6 +322,7 @@ const getPrepHoursForDate = (
 export type DurationOverride = {
   execution?: { value: number; unit: 'hours' | 'days' };
   preparation?: { value: number; unit: 'hours' | 'days' };
+  buffer?: { value: number; unit: 'hours' | 'days' };
 };
 
 const getProjectDurations = (project: any, subprojectIndex?: number, override?: DurationOverride) => {
@@ -358,7 +359,14 @@ const getProjectDurations = (project: any, subprojectIndex?: number, override?: 
     return null;
   }
 
-  const buffer = subproject?.buffer || project.bufferDuration || null;
+  const hasValidBufferOverride =
+    override?.buffer &&
+    typeof override.buffer.value === 'number' &&
+    override.buffer.value > 0 &&
+    (override.buffer.unit === 'hours' || override.buffer.unit === 'days');
+  const buffer = hasValidBufferOverride
+    ? override!.buffer
+    : (subproject?.buffer || project.bufferDuration || null);
 
   const effectiveUnit = execution?.unit || rfqFallbackUnit;
   const overridePrep =

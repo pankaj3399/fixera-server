@@ -1287,8 +1287,12 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
     if (!preparationParsed.ok) {
       return res.status(400).json({ success: false, error: preparationParsed.error });
     }
-    const durationOverride = executionParsed.value || preparationParsed.value
-      ? { execution: executionParsed.value, preparation: preparationParsed.value }
+    const bufferParsed = parseDur(req.query.bufferValue, req.query.bufferUnit);
+    if (!bufferParsed.ok) {
+      return res.status(400).json({ success: false, error: bufferParsed.error });
+    }
+    const durationOverride = executionParsed.value || preparationParsed.value || bufferParsed.value
+      ? { execution: executionParsed.value, preparation: preparationParsed.value, buffer: bufferParsed.value }
       : undefined;
 
     const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, durationOverride);
@@ -1386,8 +1390,12 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
     if (!preparationParsedW.ok) {
       return res.status(400).json({ success: false, error: preparationParsedW.error });
     }
-    const durationOverrideW = executionParsedW.value || preparationParsedW.value
-      ? { execution: executionParsedW.value, preparation: preparationParsedW.value }
+    const bufferParsedW = parseDurW(req.query.bufferValue, req.query.bufferUnit);
+    if (!bufferParsedW.ok) {
+      return res.status(400).json({ success: false, error: bufferParsedW.error });
+    }
+    const durationOverrideW = executionParsedW.value || preparationParsedW.value || bufferParsedW.value
+      ? { execution: executionParsedW.value, preparation: preparationParsedW.value, buffer: bufferParsedW.value }
       : undefined;
 
     const window = await buildProjectScheduleWindow({

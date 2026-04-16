@@ -10,6 +10,7 @@ import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../util
 import { NO_PREVIOUS_VALUE, normalizePendingIdChanges } from "../../utils/pendingIdChanges";
 import { isValidUsernameFormat, isTooSimilarToCompanyName, generateUsernameSuggestions } from "../../utils/usernameUtils";
 import { sendProfessionalWelcomeEmail } from "../../utils/emailService";
+import ServiceConfiguration from "../../models/serviceConfiguration";
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 
@@ -318,6 +319,23 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
         return res.status(400).json({
           success: false,
           msg: "Service categories must be an array"
+        });
+      }
+      const rawCountry = user.businessInfo?.country || businessInfo?.country || 'BE';
+      const normalizedCountry = /^[A-Za-z]{2}$/.test(rawCountry)
+        ? rawCountry.toUpperCase()
+        : (getCountryCode(rawCountry) || 'BE');
+      const activeConfigs = await ServiceConfiguration.find({
+        isActive: true,
+        activeCountries: normalizedCountry,
+      }).select('service').lean();
+      const validServices = new Set(activeConfigs.map((c: any) => c.service));
+      const unknownCategories = serviceCategories.filter((s: string) => !validServices.has(s));
+      if (unknownCategories.length > 0) {
+        return res.status(400).json({
+          success: false,
+          msg: "One or more service categories are not available for your country",
+          unknownCategories,
         });
       }
       user.serviceCategories = serviceCategories;

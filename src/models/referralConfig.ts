@@ -2,7 +2,9 @@ import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IReferralConfig extends Document {
   isEnabled: boolean;
-  referrerRewardAmount: number; // e.g., 15 = €15 credit
+  referrerRewardAmount: number; // legacy: unified reward amount
+  referrerCustomerRewardAmount: number; // points awarded to customer referrers (booking credit)
+  referrerProfessionalRewardAmount: number; // points awarded to professional referrers (level boost)
   referredCustomerDiscountType: 'percentage' | 'fixed';
   referredCustomerDiscountValue: number; // e.g., 10 = 10% or €10
   referredCustomerDiscountMaxAmount: number; // max discount cap (e.g., €25)
@@ -23,6 +25,8 @@ export interface IReferralConfigModel extends Model<IReferralConfig> {
 export const DEFAULT_REFERRAL_CONFIG = {
   isEnabled: false,
   referrerRewardAmount: 15,
+  referrerCustomerRewardAmount: 15,
+  referrerProfessionalRewardAmount: 15,
   referredCustomerDiscountType: 'percentage' as const,
   referredCustomerDiscountValue: 10,
   referredCustomerDiscountMaxAmount: 25,
@@ -42,6 +46,16 @@ const referralConfigSchema = new Schema<IReferralConfig>({
   referrerRewardAmount: {
     type: Number,
     default: DEFAULT_REFERRAL_CONFIG.referrerRewardAmount,
+    min: 0
+  },
+  referrerCustomerRewardAmount: {
+    type: Number,
+    default: DEFAULT_REFERRAL_CONFIG.referrerCustomerRewardAmount,
+    min: 0
+  },
+  referrerProfessionalRewardAmount: {
+    type: Number,
+    default: DEFAULT_REFERRAL_CONFIG.referrerProfessionalRewardAmount,
     min: 0
   },
   referredCustomerDiscountType: {
@@ -110,6 +124,18 @@ referralConfigSchema.statics.getCurrentConfig = async function(): Promise<IRefer
     { $setOnInsert: { ...DEFAULT_REFERRAL_CONFIG, lastModified: new Date() } },
     { upsert: true, new: true }
   );
+
+  const backfill: Record<string, number> = {};
+  if (config.referrerCustomerRewardAmount == null) {
+    backfill.referrerCustomerRewardAmount = config.referrerRewardAmount;
+  }
+  if (config.referrerProfessionalRewardAmount == null) {
+    backfill.referrerProfessionalRewardAmount = config.referrerRewardAmount;
+  }
+  if (Object.keys(backfill).length > 0) {
+    await this.updateOne({ _id: config._id }, { $set: backfill });
+    Object.assign(config, backfill);
+  }
 
   return config;
 };

@@ -112,6 +112,7 @@ export const updateLoyaltyConfig = async (req: Request, res: Response, next: Nex
       config.tiers = tiers;
       config.lastModifiedBy = userId;
       config.lastModified = new Date();
+      config.markModified('globalSettings');
     }
 
     await config.save();
