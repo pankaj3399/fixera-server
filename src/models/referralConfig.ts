@@ -125,11 +125,16 @@ referralConfigSchema.statics.getCurrentConfig = async function(): Promise<IRefer
     { upsert: true, new: true }
   );
 
+  const backfill: Record<string, number> = {};
   if (config.referrerCustomerRewardAmount == null) {
-    config.referrerCustomerRewardAmount = config.referrerRewardAmount;
+    backfill.referrerCustomerRewardAmount = config.referrerRewardAmount;
   }
   if (config.referrerProfessionalRewardAmount == null) {
-    config.referrerProfessionalRewardAmount = config.referrerRewardAmount;
+    backfill.referrerProfessionalRewardAmount = config.referrerRewardAmount;
+  }
+  if (Object.keys(backfill).length > 0) {
+    await this.updateOne({ _id: config._id }, { $set: backfill });
+    Object.assign(config, backfill);
   }
 
   return config;

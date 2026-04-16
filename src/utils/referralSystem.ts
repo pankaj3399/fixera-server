@@ -142,16 +142,36 @@ export const processReferralCompletion = async (
     return { completed: false, error: 'Booking amount below minimum threshold' };
   }
 
+  const pendingReferral = await Referral.findOne({
+    referredUser: userId,
+    status: 'pending',
+    expiresAt: { $gt: new Date() }
+  });
+
+  if (!pendingReferral) {
+    return { completed: false, error: 'No pending referral found' };
+  }
+
+  const referrer = await User.findById(pendingReferral.referrer);
+
+  const rewardAmount = referrer?.role === 'professional'
+    ? config.referrerProfessionalRewardAmount
+    : config.referrerCustomerRewardAmount;
+  const rewardType: 'customer_credit' | 'professional_level_boost' = referrer?.role === 'professional'
+    ? 'professional_level_boost'
+    : 'customer_credit';
+
+  // Atomically transition status + reward fields so a crash can't leave a
+  // 'completed' referral without reward data.
   const referral = await Referral.findOneAndUpdate(
-    {
-      referredUser: userId,
-      status: 'pending',
-      expiresAt: { $gt: new Date() }
-    },
+    { _id: pendingReferral._id, status: 'pending' },
     {
       $set: {
         status: 'completed',
         qualifyingBooking: bookingId,
+        referrerRewardAmount: rewardAmount,
+        referrerRewardType: rewardType,
+        referrerRewardIssuedAt: new Date(),
       }
     },
     { new: true }
@@ -161,25 +181,9 @@ export const processReferralCompletion = async (
     return { completed: false, error: 'No pending referral found' };
   }
 
-  const referrer = await User.findById(referral.referrer);
   if (!referrer) {
     return { completed: true };
   }
-
-  const rewardAmount = referrer.role === 'professional'
-    ? config.referrerProfessionalRewardAmount
-    : config.referrerCustomerRewardAmount;
-  const rewardType: 'customer_credit' | 'professional_level_boost' = referrer.role === 'professional'
-    ? 'professional_level_boost'
-    : 'customer_credit';
-
-  await Referral.findByIdAndUpdate(referral._id, {
-    $set: {
-      referrerRewardAmount: rewardAmount,
-      referrerRewardType: rewardType,
-      referrerRewardIssuedAt: new Date()
-    }
-  });
 
   if (rewardAmount <= 0) {
     await User.findByIdAndUpdate(referral.referrer, { $inc: { completedReferrals: 1 } });

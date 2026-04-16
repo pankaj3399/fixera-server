@@ -696,6 +696,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     }
 
     const query: any = {};
+    let professionalProjectIds: any[] | null = null;
 
     // Build query based on user role
     if (user.role === 'customer') {
@@ -704,10 +705,10 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       const projectIds = await Project.find({
         professionalId: userId,
       }).select("_id");
-      const projectIdList = projectIds.map((project) => project._id);
+      professionalProjectIds = projectIds.map((project) => project._id);
       query.$or = [
         { professional: userId },
-        { project: { $in: projectIdList } },
+        { project: { $in: professionalProjectIds } },
       ];
     } else {
       return res.status(403).json({
@@ -725,18 +726,20 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       }
     }
 
-    // Filter by service type (matches project.service, not rfqData.serviceType)
+    // Filter by service type — match project.service OR rfqData.serviceType.
+    // Combined via $and so the role-based $or above is preserved.
     if (service && typeof service === 'string') {
       const matchingProjectIds = await Project.find({ service }).select("_id");
+      const serviceOr: any[] = [{ 'rfqData.serviceType': service }];
       if (matchingProjectIds.length > 0) {
-        query.project = { $in: matchingProjectIds.map(p => p._id) };
-      } else {
-        query.project = null;
+        serviceOr.push({ project: { $in: matchingProjectIds.map(p => p._id) } });
       }
+      query.$and = (query.$and || []).concat([{ $or: serviceOr }]);
     }
 
     if (search && typeof search === 'string') {
-      const regex = new RegExp(search, 'i');
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
       const matchingCustomerIds = await User.find({ name: regex }).select("_id");
       const searchOr: any[] = [
         { 'rfqData.serviceType': regex },
@@ -751,19 +754,16 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
 
     const skip = (Number(page) - 1) * Number(limit);
 
-    // Fetch distinct service types for the filter dropdown (unfiltered by service/search)
-    const roleFilter: any = {};
-    if (user.role === 'customer') {
-      roleFilter.customer = userId;
-    } else {
-      const projectIds = await Project.find({ professionalId: userId }).select("_id");
-      roleFilter.$or = [
-        { professional: userId },
-        { project: { $in: projectIds.map(p => p._id) } },
-      ];
-    }
+    // Compute roleProjectIds for the unfiltered service-dropdown query.
+    const roleProjectIds: any[] = user.role === 'customer'
+      ? (await Booking.distinct('project', { customer: userId })).filter(Boolean)
+      : (professionalProjectIds ?? []);
 
-    const [bookings, total] = await Promise.all([
+    const distinctServicesPromise = roleProjectIds.length > 0
+      ? Project.distinct('service', { _id: { $in: roleProjectIds } })
+      : Promise.resolve([] as string[]);
+
+    const [bookings, total, distinctServices] = await Promise.all([
       Booking.find(query)
         .populate('customer', 'name email phone customerType')
         .populate('professional', 'name email username businessInfo')
@@ -772,14 +772,8 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         .skip(skip)
         .limit(Number(limit)),
       Booking.countDocuments(query),
+      distinctServicesPromise,
     ]);
-
-    const roleProjectIds = user.role === 'customer'
-      ? (await Booking.distinct('project', roleFilter)).filter(Boolean)
-      : (await Project.find({ professionalId: userId }).select("_id")).map(p => p._id);
-    const distinctServices: string[] = roleProjectIds.length > 0
-      ? await Project.distinct('service', { _id: { $in: roleProjectIds } })
-      : [];
 
     return res.status(200).json({
       success: true,
