@@ -5,6 +5,7 @@ import Project from "../../models/project";
 import Booking from "../../models/booking";
 import ServiceCategory from "../../models/serviceCategory";
 import User from "../../models/user";
+import ChatMessage from "../../models/chatMessage";
 import {
   buildProjectScheduleProposals,
   buildProjectScheduleWindow,
@@ -44,6 +45,120 @@ const toBlockedRange = (range?: {
     endDate,
     reason: range.reason,
   };
+};
+
+type ProfessionalStats = {
+  avgRating: number;
+  totalReviews: number;
+  avgCommunication: number;
+  avgValueOfDelivery: number;
+  avgQualityOfService: number;
+  avgResponseTimeMs: number;
+};
+
+const PROFESSIONAL_STATS_TTL_MS = 5 * 60 * 1000;
+const professionalStatsCache = new Map<string, { stats: ProfessionalStats; expiresAt: number }>();
+
+const computeProfessionalStats = async (professionalId: string): Promise<ProfessionalStats> => {
+  const cached = professionalStatsCache.get(professionalId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.stats;
+  }
+
+  try {
+    const profObjectId = new mongoose.Types.ObjectId(professionalId);
+    const [reviewAgg] = await Booking.aggregate([
+      {
+        $match: {
+          professional: profObjectId,
+          status: "completed",
+          "customerReview.communicationLevel": { $exists: true, $ne: null },
+          "customerReview.valueOfDelivery": { $exists: true, $ne: null },
+          "customerReview.qualityOfService": { $exists: true, $ne: null },
+          "customerReview.isHidden": { $ne: true },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          avgCommunication: { $avg: "$customerReview.communicationLevel" },
+          avgValueOfDelivery: { $avg: "$customerReview.valueOfDelivery" },
+          avgQualityOfService: { $avg: "$customerReview.qualityOfService" },
+          totalReviews: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const avgCom = reviewAgg?.avgCommunication || 0;
+    const avgVal = reviewAgg?.avgValueOfDelivery || 0;
+    const avgQual = reviewAgg?.avgQualityOfService || 0;
+    const totalReviews = reviewAgg?.totalReviews || 0;
+    const hasRatings = avgCom > 0 || avgVal > 0 || avgQual > 0;
+    const avgRating = hasRatings ? (avgCom + avgVal + avgQual) / 3 : 0;
+
+    let avgResponseTimeMs = 0;
+    try {
+      const proConvoIds = await ChatMessage.distinct("conversationId", { senderId: profObjectId });
+      let totalResponseMs = 0;
+      let responseCount = 0;
+
+      for (const convoId of proConvoIds) {
+        const cursor = ChatMessage.find(
+          { conversationId: convoId },
+          { senderRole: 1, createdAt: 1 }
+        )
+          .sort({ _id: 1 })
+          .cursor();
+
+        let prevRole: string | null = null;
+        let prevTime = 0;
+
+        for await (const doc of cursor) {
+          const role = doc.senderRole;
+          const time = new Date(doc.createdAt).getTime();
+          if (role === "professional" && prevRole === "customer") {
+            const diff = time - prevTime;
+            if (diff > 0) {
+              totalResponseMs += diff;
+              responseCount++;
+            }
+          }
+          prevRole = role;
+          prevTime = time;
+        }
+      }
+
+      if (responseCount > 0) {
+        avgResponseTimeMs = totalResponseMs / responseCount;
+      }
+    } catch (err) {
+      console.warn("[Project] Failed computing avgResponseTime for professional", professionalId, err);
+    }
+
+    const stats: ProfessionalStats = {
+      avgRating: Math.round(avgRating * 10) / 10,
+      totalReviews,
+      avgCommunication: Math.round(avgCom * 10) / 10,
+      avgValueOfDelivery: Math.round(avgVal * 10) / 10,
+      avgQualityOfService: Math.round(avgQual * 10) / 10,
+      avgResponseTimeMs: Math.round(avgResponseTimeMs),
+    };
+    professionalStatsCache.set(professionalId, {
+      stats,
+      expiresAt: Date.now() + PROFESSIONAL_STATS_TTL_MS,
+    });
+    return stats;
+  } catch (err) {
+    console.warn("[Project] Failed computing professional stats for", professionalId, err);
+    return {
+      avgRating: 0,
+      totalReviews: 0,
+      avgCommunication: 0,
+      avgValueOfDelivery: 0,
+      avgQualityOfService: 0,
+      avgResponseTimeMs: 0,
+    };
+  }
 };
 
 const serializePublicProject = (project: any) => {
@@ -398,7 +513,10 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     const project = await Project.findOne({
       _id: id,
       status: "published",
-    }).populate('professionalId', 'name username businessInfo.companyName businessInfo.timezone email phone companyAvailability companyBlockedRanges');
+    }).populate(
+      'professionalId',
+      'name username businessInfo.companyName businessInfo.timezone businessInfo.city businessInfo.country email phone profileImage professionalLevel adminTags createdAt companyAvailability companyBlockedRanges'
+    );
 
     if (!project) {
       return res.status(404).json({
@@ -407,9 +525,15 @@ export const getPublishedProject = async (req: Request, res: Response) => {
       });
     }
 
+    const professionalId = (project.professionalId as any)?._id || project.professionalId;
+    const professionalStats = professionalId
+      ? await computeProfessionalStats(professionalId.toString())
+      : null;
+
+    const serialized = serializePublicProject(project);
     res.json({
       success: true,
-      project: serializePublicProject(project)
+      project: { ...serialized, professionalStats }
     });
   } catch (error) {
     console.error('Error fetching published project:', error);
