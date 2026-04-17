@@ -1559,3 +1559,48 @@ export const sendDirectQuotationEmail = async (
   `;
   return sendEmail(custEmail, `Quotation from ${profName} - Fixera`, content);
 };
+
+export const sendFavoritesDigestEmail = async (
+  profEmail: string,
+  profName: string,
+  newCount: number,
+  topItems: Array<{ label: string; kind: 'profile' | 'project'; count: number }>,
+  periodLabel: string
+): Promise<boolean> => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const safeName = escapeHtml(profName);
+  const safePeriod = escapeHtml(periodLabel);
+  const itemsHtml = topItems
+    .slice(0, 5)
+    .map((item) => {
+      const safeLabel = escapeHtml(item.label);
+      const kindLabel = item.kind === 'profile' ? 'Your profile' : 'Project';
+      return `
+        <li style="padding: 10px 0; border-bottom: 1px solid #eee; color: #333;">
+          <strong>${safeLabel}</strong>
+          <span style="color: #999; font-size: 13px;"> — ${escapeHtml(kindLabel)}</span>
+          <span style="float: right; color: #e25f82; font-weight: bold;">+${item.count}</span>
+        </li>
+      `;
+    })
+    .join('');
+
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('New Favorites This Week')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${safeName}!</h2>
+        <p style="color: #666; line-height: 1.6; margin: 0 0 20px 0;">
+          Great news — you gained <strong style="color: #e25f82;">${newCount}</strong> new favorite${newCount === 1 ? '' : 's'} ${safePeriod}.
+        </p>
+        ${itemsHtml ? `<ul style="list-style: none; padding: 0; margin: 0 0 20px 0;">${itemsHtml}</ul>` : ''}
+        ${buildEmailButton(`${frontendUrl}/dashboard`, 'View Dashboard', '#e25f82')}
+        <p style="color: #999; font-size: 12px; margin-top: 20px;">
+          You can turn off these emails anytime from your profile notification settings.
+        </p>
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, 'You have new favorites - Fixera', content);
+};

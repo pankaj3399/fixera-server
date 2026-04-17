@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
+import Favorite from '../../models/favorite';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
 
 /**
@@ -251,6 +252,8 @@ export const deleteProject = async (req: Request, res: Response) => {
         message: 'Draft project not found'
       });
     }
+
+    await Favorite.deleteMany({ targetType: 'project', targetId: project._id });
 
     res.status(200).json({
       success: true,

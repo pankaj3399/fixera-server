@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
+import Favorite from '../../models/favorite';
 import {
     sendProjectApprovalEmail,
     sendProjectRejectionEmail,
@@ -258,6 +259,7 @@ export const deleteProjectByAdmin = async (req: Request, res: Response) => {
 
         // Delete the project
         await Project.findByIdAndDelete(id);
+        await Favorite.deleteMany({ targetType: 'project', targetId: id });
 
         // Send email notification
         if (professional && professional.email) {

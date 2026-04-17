@@ -9,6 +9,7 @@ import PointTransaction from "../models/pointTransaction";
 import Meeting from "../models/meeting";
 import WarrantyClaim from "../models/warrantyClaim";
 import ChatReport from "../models/chatReport";
+import Favorite from "../models/favorite";
 import { deleteFromS3, parseS3KeyFromUrl, isAllowedS3Url } from "./s3Upload";
 
 async function deleteS3Files(urls: (string | undefined | null)[]) {
@@ -88,6 +89,7 @@ export async function deleteUserData(userId: mongoose.Types.ObjectId) {
   const conversationIds = conversations.map((c) => c._id);
 
   const projects = await Project.find({ professionalId: userId }).lean();
+  const projectIds = projects.map((p) => p._id);
 
   const warrantyClaims = await WarrantyClaim.find({
     $or: [{ customer: userId }, { professional: userId }],
@@ -109,5 +111,12 @@ export async function deleteUserData(userId: mongoose.Types.ObjectId) {
   await Meeting.deleteMany({ $or: [{ professionalId: userId }, { "attendees.userId": userId.toString() }, { createdBy: userId.toString() }] });
   await WarrantyClaim.deleteMany({ $or: [{ customer: userId }, { professional: userId }] });
   await ChatReport.deleteMany({ reportedBy: userId });
+  await Favorite.deleteMany({
+    $or: [
+      { user: userId },
+      { targetType: "professional", targetId: userId },
+      { targetType: "project", targetId: { $in: projectIds } },
+    ],
+  });
   await User.deleteOne({ _id: userId });
 }
