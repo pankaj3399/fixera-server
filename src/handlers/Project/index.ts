@@ -47,7 +47,24 @@ const toBlockedRange = (range?: {
   };
 };
 
-const computeProfessionalStats = async (professionalId: string) => {
+type ProfessionalStats = {
+  avgRating: number;
+  totalReviews: number;
+  avgCommunication: number;
+  avgValueOfDelivery: number;
+  avgQualityOfService: number;
+  avgResponseTimeMs: number;
+};
+
+const PROFESSIONAL_STATS_TTL_MS = 5 * 60 * 1000;
+const professionalStatsCache = new Map<string, { stats: ProfessionalStats; expiresAt: number }>();
+
+const computeProfessionalStats = async (professionalId: string): Promise<ProfessionalStats> => {
+  const cached = professionalStatsCache.get(professionalId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.stats;
+  }
+
   try {
     const profObjectId = new mongoose.Types.ObjectId(professionalId);
     const [reviewAgg] = await Booking.aggregate([
@@ -116,11 +133,11 @@ const computeProfessionalStats = async (professionalId: string) => {
           avgResponseTimeMs = totalResponseMs / responseCount;
         }
       }
-    } catch {
-      // non-critical
+    } catch (err) {
+      console.warn("[Project] Failed computing avgResponseTime for professional", professionalId, err);
     }
 
-    return {
+    const stats: ProfessionalStats = {
       avgRating: Math.round(avgRating * 10) / 10,
       totalReviews,
       avgCommunication: Math.round(avgCom * 10) / 10,
@@ -128,7 +145,13 @@ const computeProfessionalStats = async (professionalId: string) => {
       avgQualityOfService: Math.round(avgQual * 10) / 10,
       avgResponseTimeMs: Math.round(avgResponseTimeMs),
     };
-  } catch {
+    professionalStatsCache.set(professionalId, {
+      stats,
+      expiresAt: Date.now() + PROFESSIONAL_STATS_TTL_MS,
+    });
+    return stats;
+  } catch (err) {
+    console.warn("[Project] Failed computing professional stats for", professionalId, err);
     return {
       avgRating: 0,
       totalReviews: 0,

@@ -660,43 +660,58 @@ export const getConversationInfo = async (req: Request, res: Response) => {
         },
       },
       {
+        $addFields: {
+          _isCompleted: { $eq: ["$status", "completed"] },
+          _customerReviewVisible: {
+            $and: [
+              { $eq: ["$status", "completed"] },
+              { $ne: ["$customerReview.isHidden", true] },
+              { $ne: ["$customerReview.communicationLevel", null] },
+              { $ne: ["$customerReview.valueOfDelivery", null] },
+              { $ne: ["$customerReview.qualityOfService", null] },
+            ],
+          },
+          _professionalReviewVisible: {
+            $and: [
+              { $eq: ["$status", "completed"] },
+              { $ne: ["$professionalReview.isHidden", true] },
+              { $ne: ["$professionalReview.rating", null] },
+            ],
+          },
+        },
+      },
+      {
         $group: {
           _id: null,
           totalBookings: { $sum: 1 },
           completedBookings: {
-            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+            $sum: { $cond: ["$_isCompleted", 1, 0] },
           },
           avgCommunication: {
-            $avg: "$customerReview.communicationLevel",
+            $avg: {
+              $cond: ["$_customerReviewVisible", "$customerReview.communicationLevel", null],
+            },
           },
           avgValueOfDelivery: {
-            $avg: "$customerReview.valueOfDelivery",
+            $avg: {
+              $cond: ["$_customerReviewVisible", "$customerReview.valueOfDelivery", null],
+            },
           },
           avgQualityOfService: {
-            $avg: "$customerReview.qualityOfService",
+            $avg: {
+              $cond: ["$_customerReviewVisible", "$customerReview.qualityOfService", null],
+            },
           },
           avgProfessionalRating: {
-            $avg: "$professionalReview.rating",
+            $avg: {
+              $cond: ["$_professionalReviewVisible", "$professionalReview.rating", null],
+            },
           },
           totalCustomerReviews: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $ne: ["$customerReview.communicationLevel", null] },
-                    { $ne: ["$customerReview.valueOfDelivery", null] },
-                    { $ne: ["$customerReview.qualityOfService", null] },
-                  ],
-                },
-                1,
-                0,
-              ],
-            },
+            $sum: { $cond: ["$_customerReviewVisible", 1, 0] },
           },
           totalProfessionalReviews: {
-            $sum: {
-              $cond: [{ $ne: ["$professionalReview.rating", null] }, 1, 0],
-            },
+            $sum: { $cond: ["$_professionalReviewVisible", 1, 0] },
           },
         },
       },
@@ -765,8 +780,8 @@ export const getConversationInfo = async (req: Request, res: Response) => {
     if (responseCount > 0) {
       avgResponseTimeMs = totalResponseMs / responseCount;
     }
-  } catch {
-    // non-critical
+  } catch (err) {
+    console.warn("[Chat] Failed computing avgResponseTime for conversation", conversationId, err);
   }
 
   // Check if professional is currently absent (company blocked ranges)

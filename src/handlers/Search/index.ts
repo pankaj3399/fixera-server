@@ -286,7 +286,10 @@ async function searchProfessionals(
         { $limit: POPULARITY_CAP },
         projectStage,
       ];
-      const all = await User.aggregate(pipeline);
+      const [all, fullCount] = await Promise.all([
+        User.aggregate(pipeline),
+        User.countDocuments(filter),
+      ]);
       if (all.length >= POPULARITY_CAP) {
         console.warn(
           `[Search Performance] Popularity sort hit the ${POPULARITY_CAP}-row cap. ` +
@@ -296,11 +299,17 @@ async function searchProfessionals(
       const allIds = all.map((p: any) => p._id);
       const allRatings = await aggregateProfessionalRatings(allIds);
       all.sort((a: any, b: any) => {
-        const aRev = allRatings.get(a._id.toString())?.totalReviews || 0;
-        const bRev = allRatings.get(b._id.toString())?.totalReviews || 0;
-        return bRev - aRev;
+        const aKey = a._id.toString();
+        const bKey = b._id.toString();
+        const aRev = allRatings.get(aKey)?.totalReviews || 0;
+        const bRev = allRatings.get(bKey)?.totalReviews || 0;
+        if (bRev !== aRev) return bRev - aRev;
+        const aAvg = allRatings.get(aKey)?.avgRating || 0;
+        const bAvg = allRatings.get(bKey)?.avgRating || 0;
+        if (bAvg !== aAvg) return bAvg - aAvg;
+        return aKey.localeCompare(bKey);
       });
-      total = all.length;
+      total = fullCount;
       professionals = all.slice(skip, skip + limit);
     } else {
       const pipeline: any[] = [
@@ -395,13 +404,19 @@ async function searchProjects(
       if (professionalLevels.length > 0) proFilter.professionalLevel = { $in: professionalLevels };
       if (adminTags.length > 0) proFilter.adminTags = { $in: adminTags };
       const matchedPros = await User.find(proFilter).distinct("_id");
-      filter.professionalId = { $in: matchedPros };
       if (matchedPros.length === 0) {
         return res.json({
           results: [],
           pagination: { total: 0, page: Math.ceil(skip / limit) + 1, limit, totalPages: 0 },
         });
       }
+      if (matchedPros.length > 1000) {
+        console.warn(
+          `[Search Performance] Project professional pre-filter matched ${matchedPros.length} users. ` +
+          `Consider indexing or restructuring to avoid large $in queries.`
+        );
+      }
+      filter.professionalId = { $in: matchedPros };
     }
 
     const isPopularitySort = sortBy === "popularity";
@@ -630,6 +645,7 @@ async function searchProjects(
         if (projects.length >= PROJECT_CAP) {
           console.warn(
             `[Search Performance] Project popularity/rating sort hit the ${PROJECT_CAP}-row cap (geo). ` +
+            `minRating/popularity results beyond this cap are not reflected in pagination. ` +
             `Consider denormalizing project rating stats.`
           );
         }
@@ -731,9 +747,15 @@ async function searchProjects(
       }
       if (isPopularitySort) {
         baseResults.sort((a: any, b: any) => {
-          const aR = projectRatingMap!.get(a._id?.toString())?.totalReviews || 0;
-          const bR = projectRatingMap!.get(b._id?.toString())?.totalReviews || 0;
-          return bR - aR;
+          const aKey = a._id?.toString() || "";
+          const bKey = b._id?.toString() || "";
+          const aR = projectRatingMap!.get(aKey)?.totalReviews || 0;
+          const bR = projectRatingMap!.get(bKey)?.totalReviews || 0;
+          if (bR !== aR) return bR - aR;
+          const aAvg = projectRatingMap!.get(aKey)?.avgRating || 0;
+          const bAvg = projectRatingMap!.get(bKey)?.avgRating || 0;
+          if (bAvg !== aAvg) return bAvg - aAvg;
+          return aKey.localeCompare(bKey);
         });
       }
     }
