@@ -400,22 +400,30 @@ async function searchProjects(
     };
 
     if (professionalLevels.length > 0 || adminTags.length > 0) {
+      const MAX_MATCHED_PROS = 1000;
       const proFilter: any = { role: "professional", professionalStatus: "approved" };
       if (professionalLevels.length > 0) proFilter.professionalLevel = { $in: professionalLevels };
       if (adminTags.length > 0) proFilter.adminTags = { $in: adminTags };
-      const matchedPros = await User.find(proFilter).distinct("_id");
-      if (matchedPros.length === 0) {
+      const matchedProsCount = await User.countDocuments(proFilter);
+      if (matchedProsCount === 0) {
         return res.json({
           results: [],
           pagination: { total: 0, page: Math.ceil(skip / limit) + 1, limit, totalPages: 0 },
         });
       }
-      if (matchedPros.length > 1000) {
+      if (matchedProsCount > MAX_MATCHED_PROS) {
         console.warn(
-          `[Search Performance] Project professional pre-filter matched ${matchedPros.length} users. ` +
-          `Consider indexing or restructuring to avoid large $in queries.`
+          `[Search Performance] Project professional pre-filter matched ${matchedProsCount} users ` +
+          `(exceeds MAX_MATCHED_PROS=${MAX_MATCHED_PROS}). Short-circuiting to empty result. ` +
+          `Narrow the professionalLevels/adminTags filters or denormalize these fields onto Project.`
         );
+        return res.json({
+          results: [],
+          pagination: { total: 0, page: Math.ceil(skip / limit) + 1, limit, totalPages: 0 },
+          warning: "Professional filter matched too many users; please narrow the filters.",
+        });
       }
+      const matchedPros = await User.find(proFilter).distinct("_id");
       filter.professionalId = { $in: matchedPros };
     }
 
