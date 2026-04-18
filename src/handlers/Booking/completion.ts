@@ -16,7 +16,6 @@ import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
-  countUnpaidMilestones,
   ensureWarrantyCoverageSnapshot,
   getProfessionalId,
   markMilestonesCompleted,
@@ -69,7 +68,9 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       });
     }
 
-    const unpaidMilestoneCount = countUnpaidMilestones(booking);
+    const unpaidMilestoneCount = (booking.milestonePayments || []).filter(
+      (m: any) => m.status !== 'paid' && (Number(m.amount) || 0) > 0
+    ).length;
     if (unpaidMilestoneCount > 0) {
       return res.status(400).json({
         success: false,
@@ -472,7 +473,9 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       });
     }
 
-    const unpaidMilestoneCount = countUnpaidMilestones(booking);
+    const unpaidMilestoneCount = (booking.milestonePayments || []).filter(
+      (m: any) => m.status !== 'paid' && (Number(m.amount) || 0) > 0
+    ).length;
     if (unpaidMilestoneCount > 0) {
       return res.status(400).json({
         success: false,
