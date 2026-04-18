@@ -49,11 +49,6 @@ export const toggleFavorite = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Invalid targetId" });
     }
 
-    const exists = await verifyTargetExists(targetType, targetObjectId);
-    if (!exists) {
-      return res.status(404).json({ success: false, msg: "Target not found" });
-    }
-
     const existing = await Favorite.findOne({
       user: userId,
       targetType,
@@ -65,6 +60,10 @@ export const toggleFavorite = async (req: Request, res: Response) => {
       await Favorite.deleteOne({ _id: existing._id });
       favorited = false;
     } else {
+      const exists = await verifyTargetExists(targetType, targetObjectId);
+      if (!exists) {
+        return res.status(404).json({ success: false, msg: "Target not found" });
+      }
       try {
         await Favorite.create({ user: userId, targetType, targetId: targetObjectId });
         favorited = true;
@@ -132,7 +131,7 @@ export const listUserFavorites = async (req: Request, res: Response) => {
             .lean()
         : [],
       projectIds.length
-        ? Project.find({ _id: { $in: projectIds } })
+        ? Project.find({ _id: { $in: projectIds }, status: "published" })
             .select(
               "title category service media distance subprojects professionalId status"
             )
@@ -160,39 +159,29 @@ export const listUserFavorites = async (req: Request, res: Response) => {
       projectOwners.map((o: any) => [o._id.toString(), o])
     );
 
-    const items = favorites
-      .map((fav: any) => {
-        const idStr = fav.targetId.toString();
-        if (fav.targetType === "professional") {
-          const prof = profMap.get(idStr);
-          if (!prof) return null;
-          return {
-            _id: fav._id,
-            targetType: "professional" as const,
-            targetId: fav.targetId,
-            favoritedAt: fav.createdAt,
-            professional: prof,
-          };
-        }
-        const project = projectMap.get(idStr);
-        if (!project) return null;
-        const ownerId = project.professionalId?.toString();
+    const items = favorites.map((fav: any) => {
+      const idStr = fav.targetId.toString();
+      if (fav.targetType === "professional") {
         return {
           _id: fav._id,
-          targetType: "project" as const,
+          targetType: "professional" as const,
           targetId: fav.targetId,
           favoritedAt: fav.createdAt,
-          project: {
-            ...project,
-            professional: ownerId ? projectOwnerMap.get(ownerId) || null : null,
-          },
+          professional: profMap.get(idStr) || null,
         };
-      })
-      .filter(Boolean);
-
-    const droppedInPage = favorites.length - items.length;
-    const adjustedTotal = Math.max(0, total - droppedInPage);
-    const hasMore = skip + items.length < adjustedTotal;
+      }
+      const project: any = projectMap.get(idStr);
+      const ownerId = project?.professionalId?.toString();
+      return {
+        _id: fav._id,
+        targetType: "project" as const,
+        targetId: fav.targetId,
+        favoritedAt: fav.createdAt,
+        project: project
+          ? { ...project, professional: ownerId ? projectOwnerMap.get(ownerId) || null : null }
+          : null,
+      };
+    });
 
     return res.json({
       success: true,
@@ -200,8 +189,8 @@ export const listUserFavorites = async (req: Request, res: Response) => {
         items,
         page,
         limit,
-        total: adjustedTotal,
-        hasMore,
+        total,
+        hasMore: skip + favorites.length < total,
       },
     });
   } catch (error) {
@@ -299,7 +288,7 @@ export const getProfessionalFavoriteStats = async (req: Request, res: Response) 
     }
     const professionalId = new mongoose.Types.ObjectId(user._id || user.id);
 
-    const userProjects = await Project.find({ professionalId })
+    const userProjects = await Project.find({ professionalId, status: "published" })
       .select("_id title")
       .lean();
     const projectIds = userProjects.map((p: any) => p._id);
