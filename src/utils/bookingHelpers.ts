@@ -182,3 +182,13 @@ export const awardBookingCompletionPoints = async (
     'Earned for completed booking'
   );
 };
+
+export const getUnpaidMilestoneCount = (
+  milestonePayments?: Array<{ status?: string; amount?: number }>
+): number => {
+  if (!Array.isArray(milestonePayments) || milestonePayments.length === 0) return 0;
+  return milestonePayments.filter((m) => m.status !== 'paid' && (Number(m.amount) || 0) > 0).length;
+};
+
+export const countUnpaidMilestones = (booking: { milestonePayments?: Array<{ status?: string; amount?: number }> }): number =>
+  getUnpaidMilestoneCount(booking.milestonePayments);

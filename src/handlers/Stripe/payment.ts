@@ -144,14 +144,12 @@ const isMilestoneCurrentlyPayable = (
   if (dueCondition === 'on_milestone_completion') {
     return milestone.workStatus === 'completed';
   }
-  if (dueCondition === 'on_project_completion') {
-    return sortedMilestones.every((candidate) => candidate.workStatus === 'completed');
-  }
   if (dueCondition === 'custom_date') {
+    if (milestone.workStatus === 'completed') return true;
     return !!milestone.customDueDate && new Date(milestone.customDueDate) <= new Date();
   }
 
-  return true;
+  return false;
 };
 
 /**
