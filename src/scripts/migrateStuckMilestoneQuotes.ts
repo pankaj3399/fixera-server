@@ -6,6 +6,7 @@ dotenv.config();
 
 const isCustomDatePayable = (m: any): boolean => {
   if (m?.dueCondition !== "custom_date") return false;
+  if (m.workStatus === "completed") return true;
   if (!m.customDueDate) return false;
   return new Date(m.customDueDate).getTime() <= Date.now();
 };
@@ -34,9 +35,9 @@ const hasLegitimateDeferral = (milestones: any[]): boolean =>
   milestones.some((m: any) => {
     const cond = m?.dueCondition;
     if (cond === "on_milestone_completion") {
-      return true;
+      return m.workStatus !== "completed";
     }
-    if (cond === "custom_date" && m.customDueDate) {
+    if (cond === "custom_date" && m.workStatus !== "completed" && m.customDueDate) {
       return new Date(m.customDueDate).getTime() > Date.now();
     }
     return false;

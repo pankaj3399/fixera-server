@@ -154,7 +154,13 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               error: { code: 'VALIDATION_ERROR', message: `Invalid condition at index ${cost.referenceIndex}` }
             });
           }
-          const conditionNet = Number(condition.additionalCost) || 0;
+          const conditionNet = Number(condition.additionalCost);
+          if (!Number.isFinite(conditionNet)) {
+            return res.status(400).json({
+              success: false,
+              error: { code: 'VALIDATION_ERROR', message: `Condition at index ${cost.referenceIndex} has an invalid additionalCost` }
+            });
+          }
           validatedExtraCosts.push({
             type: 'condition',
             name: condition.name,
@@ -177,7 +183,13 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               error: { code: 'VALIDATION_ERROR', message: `Invalid option at index ${cost.referenceIndex}` }
             });
           }
-          const optionNet = Number(option.price) || 0;
+          const optionNet = Number(option.price);
+          if (!Number.isFinite(optionNet)) {
+            return res.status(400).json({
+              success: false,
+              error: { code: 'VALIDATION_ERROR', message: `Option at index ${cost.referenceIndex} has an invalid price` }
+            });
+          }
           validatedExtraCosts.push({
             type: 'option',
             name: option.name,
