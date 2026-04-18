@@ -143,6 +143,8 @@ export interface IUser extends Document {
     referredBy?: Types.ObjectId;
     totalReferrals?: number;
     completedReferrals?: number;
+    // Favorite notification tracking (professional only)
+    lastFavoritesViewedAt?: Date;
     employee?: {
         companyId?: string;
         invitedBy?: string;
@@ -553,6 +555,10 @@ const UserSchema = new Schema({
         default: 0,
         min: 0
     },
+    lastFavoritesViewedAt: {
+        type: Date,
+        required: false
+    },
     employee: {
         companyId: { type: String, required: false },
         invitedBy: { type: String, required: false },
@@ -663,6 +669,7 @@ UserSchema.pre("save", function (next) {
     if (this.role !== "professional") {
         this.set("stripe", undefined);
         this.set("onboardingAgreements", undefined);
+        this.set("lastFavoritesViewedAt", undefined);
     }
 
     // Clear fields that employees don't need - they only need:

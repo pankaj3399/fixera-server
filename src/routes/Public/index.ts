@@ -11,6 +11,10 @@ import {
 } from "../../handlers/Project";
 import { getProfessionalReviews, getProjectReviews } from "../../handlers/Booking/reviews";
 import { validateReferralCodePublic } from "../../handlers/User/referralManagement";
+import {
+  getPublicProfessionalFavoriteCount,
+  getPublicProjectFavoriteCount,
+} from "../../handlers/Favorites";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -60,5 +64,13 @@ publicRouter
 publicRouter
   .route("/projects/:projectId/reviews")
   .get(schedulingRateLimiter, getProjectReviews);
+
+// Public favorite counts (social proof)
+publicRouter
+  .route("/professionals/:id/favorites-count")
+  .get(schedulingRateLimiter, getPublicProfessionalFavoriteCount);
+publicRouter
+  .route("/projects/:id/favorites-count")
+  .get(schedulingRateLimiter, getPublicProjectFavoriteCount);
 
 export default publicRouter;

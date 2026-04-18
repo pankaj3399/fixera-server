@@ -24,6 +24,21 @@ import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
+let cachedWindowFieldsSupport: boolean | null = null;
+const mongoHasWindowFields = async (): Promise<boolean> => {
+  if (cachedWindowFieldsSupport !== null) return cachedWindowFieldsSupport;
+  try {
+    const admin = mongoose.connection.db?.admin();
+    if (!admin) return (cachedWindowFieldsSupport = false);
+    const info = await admin.serverInfo();
+    const major = parseInt(String(info?.version || "0").split(".")[0], 10);
+    cachedWindowFieldsSupport = Number.isFinite(major) && major >= 5;
+  } catch {
+    cachedWindowFieldsSupport = false;
+  }
+  return cachedWindowFieldsSupport;
+};
+
 const toIsoDate = (value?: Date | string | null) => {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -57,12 +72,36 @@ type ProfessionalStats = {
 };
 
 const PROFESSIONAL_STATS_TTL_MS = 5 * 60 * 1000;
+const PROFESSIONAL_STATS_CACHE_MAX_SIZE = 1000;
 const professionalStatsCache = new Map<string, { stats: ProfessionalStats; expiresAt: number }>();
+
+const evictExpiredProfessionalStats = () => {
+  const now = Date.now();
+  for (const [key, value] of professionalStatsCache) {
+    if (value.expiresAt <= now) {
+      professionalStatsCache.delete(key);
+    }
+  }
+};
+
+const enforceProfessionalStatsCapacity = () => {
+  while (professionalStatsCache.size > PROFESSIONAL_STATS_CACHE_MAX_SIZE) {
+    const oldestKey = professionalStatsCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    professionalStatsCache.delete(oldestKey);
+  }
+};
 
 const computeProfessionalStats = async (professionalId: string): Promise<ProfessionalStats> => {
   const cached = professionalStatsCache.get(professionalId);
   if (cached && cached.expiresAt > Date.now()) {
+    professionalStatsCache.delete(professionalId);
+    professionalStatsCache.set(professionalId, cached);
     return cached.stats;
+  }
+  if (professionalStatsCache.size > PROFESSIONAL_STATS_CACHE_MAX_SIZE) {
+    evictExpiredProfessionalStats();
+    enforceProfessionalStatsCapacity();
   }
 
   try {
@@ -99,37 +138,60 @@ const computeProfessionalStats = async (professionalId: string): Promise<Profess
     let avgResponseTimeMs = 0;
     try {
       const proConvoIds = await ChatMessage.distinct("conversationId", { senderId: profObjectId });
-      let totalResponseMs = 0;
-      let responseCount = 0;
-
-      for (const convoId of proConvoIds) {
-        const cursor = ChatMessage.find(
-          { conversationId: convoId },
-          { senderRole: 1, createdAt: 1 }
-        )
-          .sort({ _id: 1 })
-          .cursor();
-
-        let prevRole: string | null = null;
-        let prevTime = 0;
-
-        for await (const doc of cursor) {
-          const role = doc.senderRole;
-          const time = new Date(doc.createdAt).getTime();
-          if (role === "professional" && prevRole === "customer") {
-            const diff = time - prevTime;
-            if (diff > 0) {
-              totalResponseMs += diff;
-              responseCount++;
+      if (proConvoIds.length > 0) {
+        const supportsWindowFields = await mongoHasWindowFields();
+        if (supportsWindowFields) {
+          const [responseAgg] = await ChatMessage.aggregate([
+            { $match: { conversationId: { $in: proConvoIds } } },
+            { $sort: { conversationId: 1, _id: 1 } },
+            {
+              $setWindowFields: {
+                partitionBy: "$conversationId",
+                sortBy: { _id: 1 },
+                output: {
+                  prevSenderRole: { $shift: { output: "$senderRole", by: -1 } },
+                  prevCreatedAt: { $shift: { output: "$createdAt", by: -1 } },
+                },
+              },
+            },
+            { $match: { senderRole: "professional", prevSenderRole: "customer" } },
+            { $project: { diff: { $subtract: ["$createdAt", "$prevCreatedAt"] } } },
+            { $match: { diff: { $gt: 0 } } },
+            { $group: { _id: null, totalMs: { $sum: "$diff" }, count: { $sum: 1 } } },
+          ]);
+          if (responseAgg?.count > 0) {
+            avgResponseTimeMs = responseAgg.totalMs / responseAgg.count;
+          }
+        } else {
+          const CONVO_BATCH_SIZE = 50;
+          const PER_CONVO_LIMIT = 100;
+          let totalMs = 0;
+          let count = 0;
+          for (let i = 0; i < proConvoIds.length; i += CONVO_BATCH_SIZE) {
+            const batch = proConvoIds.slice(i, i + CONVO_BATCH_SIZE);
+            const perConvo = await Promise.all(
+              batch.map((conversationId) =>
+                ChatMessage.find({ conversationId })
+                  .sort({ conversationId: 1, _id: -1 })
+                  .limit(PER_CONVO_LIMIT)
+                  .select("conversationId senderRole createdAt")
+                  .lean()
+              )
+            );
+            for (const desc of perConvo) {
+              const messages = desc.reverse();
+              let prev: any = null;
+              for (const m of messages) {
+                if (prev && prev.senderRole === "customer" && m.senderRole === "professional") {
+                  const diff = new Date(m.createdAt as any).getTime() - new Date(prev.createdAt as any).getTime();
+                  if (diff > 0) { totalMs += diff; count += 1; }
+                }
+                prev = m;
+              }
             }
           }
-          prevRole = role;
-          prevTime = time;
+          if (count > 0) avgResponseTimeMs = totalMs / count;
         }
-      }
-
-      if (responseCount > 0) {
-        avgResponseTimeMs = totalResponseMs / responseCount;
       }
     } catch (err) {
       console.warn("[Project] Failed computing avgResponseTime for professional", professionalId, err);
@@ -143,10 +205,12 @@ const computeProfessionalStats = async (professionalId: string): Promise<Profess
       avgQualityOfService: Math.round(avgQual * 10) / 10,
       avgResponseTimeMs: Math.round(avgResponseTimeMs),
     };
+    professionalStatsCache.delete(professionalId);
     professionalStatsCache.set(professionalId, {
       stats,
       expiresAt: Date.now() + PROFESSIONAL_STATS_TTL_MS,
     });
+    enforceProfessionalStatsCapacity();
     return stats;
   } catch (err) {
     console.warn("[Project] Failed computing professional stats for", professionalId, err);

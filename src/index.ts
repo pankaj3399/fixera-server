@@ -22,6 +22,7 @@ import quotationRouter from './routes/Quotation';
 import stripeRouter from './routes/Stripe';
 import chatRouter from './routes/Chat';
 import warrantyClaimRouter from './routes/WarrantyClaim';
+import favoritesRouter from './routes/Favorites';
 
 const app: Express = express();
 
@@ -67,6 +68,7 @@ app.use('/api/stripe', stripeRouter);
 app.use('/api/professional', professionalPaymentRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/warranty-claims', warrantyClaimRouter);
+app.use('/api/favorites', favoritesRouter);
 
 // Error handler (must be last)
 app.use(errorHandler);

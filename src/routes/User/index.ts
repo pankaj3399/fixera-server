@@ -39,6 +39,7 @@ import {
 } from "../../handlers/Professional/fileUpload";
 import { validateAddress, getGoogleMapsConfig } from "../../handlers/User/googleMaps";
 import { getReferralStats, generateUserReferralCode, addLateReferralCode } from "../../handlers/User/referralManagement";
+import { getProfessionalFavoriteStats, dismissFavoriteNotifications } from "../../handlers/Favorites";
 
 const userRouter = Router();
 
@@ -132,6 +133,10 @@ userRouter.route("/projects/upload/attachment").post(upload.single('attachment')
 // Google Maps Routes
 userRouter.route("/validate-address").post(validateAddress)
 userRouter.route("/google-maps-config").get(getGoogleMapsConfig)
+
+// Professional favorites stats + in-app notification dismissal
+userRouter.route("/professional/favorites-stats").get(getProfessionalFavoriteStats)
+userRouter.route("/professional/favorites-notifications/seen").post(dismissFavoriteNotifications)
 
 // Platform commission (read-only for professionals)
 userRouter.route("/commission-rate").get(async (req, res) => {

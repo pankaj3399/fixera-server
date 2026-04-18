@@ -1559,3 +1559,4 @@ export const sendDirectQuotationEmail = async (
   `;
   return sendEmail(custEmail, `Quotation from ${profName} - Fixera`, content);
 };
+

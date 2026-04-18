@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
+import Favorite from '../../models/favorite';
+import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import {
     sendProjectApprovalEmail,
     sendProjectRejectionEmail,
@@ -258,6 +260,13 @@ export const deleteProjectByAdmin = async (req: Request, res: Response) => {
 
         // Delete the project
         await Project.findByIdAndDelete(id);
+        try {
+            await Favorite.deleteMany({ targetType: 'project', targetId: id });
+        } catch (cleanupErr) {
+            console.warn('Favorite cleanup failed after admin project delete', { projectId: id, error: cleanupErr });
+        } finally {
+            invalidateFavoritesOverviewCache();
+        }
 
         // Send email notification
         if (professional && professional.email) {

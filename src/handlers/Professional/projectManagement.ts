@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
+import Favorite from '../../models/favorite';
+import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
 
 /**
@@ -250,6 +252,14 @@ export const deleteProject = async (req: Request, res: Response) => {
         success: false,
         message: 'Draft project not found'
       });
+    }
+
+    try {
+      await Favorite.deleteMany({ targetType: 'project', targetId: project._id });
+    } catch (cleanupErr) {
+      console.warn('Favorite cleanup failed after project delete', { projectId: project._id, error: cleanupErr });
+    } finally {
+      invalidateFavoritesOverviewCache();
     }
 
     res.status(200).json({
