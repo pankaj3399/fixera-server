@@ -149,7 +149,7 @@ const isMilestoneCurrentlyPayable = (
     return !!milestone.customDueDate && new Date(milestone.customDueDate) <= new Date();
   }
 
-  return true;
+  return false;
 };
 
 /**

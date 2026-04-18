@@ -23,7 +23,8 @@ const isMilestonePayable = (m: any, allMilestones: any[]): boolean => {
   if (cond === "custom_date") {
     return isCustomDatePayable(m);
   }
-  return true;
+  if (cond === "on_project_completion") return false;
+  return false;
 };
 
 const hasPayableMilestone = (milestones: any[]): boolean =>

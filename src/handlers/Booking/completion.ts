@@ -110,8 +110,6 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
 
     if (Array.isArray(extraCostsInput) && extraCostsInput.length > 0) {
       const project = booking.project as any;
-      const commissionPercent = await getPlatformCommissionPercent();
-      const applyCommission = (net: number) => net * (1 + (commissionPercent || 0) / 100);
 
       for (const cost of extraCostsInput) {
         if (!cost.type || !cost.justification) {
@@ -157,15 +155,14 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
             });
           }
           const conditionNet = Number(condition.additionalCost) || 0;
-          const conditionGross = applyCommission(conditionNet);
           validatedExtraCosts.push({
             type: 'condition',
             name: condition.name,
             justification: cost.justification,
-            amount: conditionGross,
+            amount: conditionNet,
             referenceIndex: cost.referenceIndex,
           });
-          extraCostTotal += conditionGross;
+          extraCostTotal += conditionNet;
         } else if (costType === 'option') {
           if (cost.referenceIndex == null) {
             return res.status(400).json({
@@ -181,15 +178,14 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
             });
           }
           const optionNet = Number(option.price) || 0;
-          const optionGross = applyCommission(optionNet);
           validatedExtraCosts.push({
             type: 'option',
             name: option.name,
             justification: cost.justification,
-            amount: optionGross,
+            amount: optionNet,
             referenceIndex: cost.referenceIndex,
           });
-          extraCostTotal += optionGross;
+          extraCostTotal += optionNet;
         } else if (costType === 'other') {
           if (cost.amount == null || cost.name == null) {
             return res.status(400).json({
