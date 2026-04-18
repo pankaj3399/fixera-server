@@ -18,6 +18,7 @@ import {
   awardBookingCompletionPoints,
   ensureWarrantyCoverageSnapshot,
   getProfessionalId,
+  getUnpaidMilestoneCount,
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
 
@@ -68,9 +69,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       });
     }
 
-    const unpaidMilestoneCount = (booking.milestonePayments || []).filter(
-      (m: any) => m.status !== 'paid' && (Number(m.amount) || 0) > 0
-    ).length;
+    const unpaidMilestoneCount = getUnpaidMilestoneCount(booking.milestonePayments);
     if (unpaidMilestoneCount > 0) {
       return res.status(400).json({
         success: false,
@@ -473,9 +472,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       });
     }
 
-    const unpaidMilestoneCount = (booking.milestonePayments || []).filter(
-      (m: any) => m.status !== 'paid' && (Number(m.amount) || 0) > 0
-    ).length;
+    const unpaidMilestoneCount = getUnpaidMilestoneCount(booking.milestonePayments);
     if (unpaidMilestoneCount > 0) {
       return res.status(400).json({
         success: false,
