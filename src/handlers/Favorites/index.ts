@@ -24,7 +24,7 @@ const verifyTargetExists = async (
     const user = await User.findOne({ _id: targetId, role: "professional" }).select("_id").lean();
     return Boolean(user);
   }
-  const project = await Project.findById(targetId).select("_id").lean();
+  const project = await Project.findOne({ _id: targetId, status: "published" }).select("_id").lean();
   return Boolean(project);
 };
 
@@ -192,7 +192,7 @@ export const listUserFavorites = async (req: Request, res: Response) => {
 
     const droppedInPage = favorites.length - items.length;
     const adjustedTotal = Math.max(0, total - droppedInPage);
-    const hasMore = skip + favorites.length < total;
+    const hasMore = skip + items.length < adjustedTotal;
 
     return res.json({
       success: true,

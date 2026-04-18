@@ -10,6 +10,7 @@ import Meeting from "../models/meeting";
 import WarrantyClaim from "../models/warrantyClaim";
 import ChatReport from "../models/chatReport";
 import Favorite from "../models/favorite";
+import { invalidateFavoritesOverviewCache } from "../handlers/Admin/favoritesAdmin";
 import { deleteFromS3, parseS3KeyFromUrl, isAllowedS3Url } from "./s3Upload";
 
 async function deleteS3Files(urls: (string | undefined | null)[]) {
@@ -111,12 +112,15 @@ export async function deleteUserData(userId: mongoose.Types.ObjectId) {
   await Meeting.deleteMany({ $or: [{ professionalId: userId }, { "attendees.userId": userId.toString() }, { createdBy: userId.toString() }] });
   await WarrantyClaim.deleteMany({ $or: [{ customer: userId }, { professional: userId }] });
   await ChatReport.deleteMany({ reportedBy: userId });
-  await Favorite.deleteMany({
+  const favResult = await Favorite.deleteMany({
     $or: [
       { user: userId },
       { targetType: "professional", targetId: userId },
       { targetType: "project", targetId: { $in: projectIds } },
     ],
   });
+  if ((favResult.deletedCount ?? 0) > 0) {
+    invalidateFavoritesOverviewCache();
+  }
   await User.deleteOne({ _id: userId });
 }
