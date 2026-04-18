@@ -62,7 +62,7 @@ async function migrateStuckMilestoneQuotes() {
 
     let fixed = 0;
     let skippedAlreadyOk = 0;
-    let skippedHasPaid = 0;
+    let skippedAllPaid = 0;
     let skippedEmpty = 0;
     let skippedLegitDefer = 0;
 
@@ -73,8 +73,9 @@ async function migrateStuckMilestoneQuotes() {
         continue;
       }
 
-      if (milestones.some((m: any) => m.status === "paid")) {
-        skippedHasPaid++;
+      const unpaidMilestones = milestones.filter((m: any) => m.status !== "paid");
+      if (unpaidMilestones.length === 0) {
+        skippedAllPaid++;
         continue;
       }
 
@@ -88,12 +89,14 @@ async function migrateStuckMilestoneQuotes() {
         continue;
       }
 
-      const earliest = [...milestones].sort(
+      const earliest = [...unpaidMilestones].sort(
         (a: any, b: any) => (a.order ?? 0) - (b.order ?? 0)
       )[0];
       const targetOrder = earliest.order ?? 0;
 
-      const idx = milestones.findIndex((m: any) => (m.order ?? 0) === targetOrder);
+      const idx = milestones.findIndex(
+        (m: any) => (m.order ?? 0) === targetOrder && m.status !== "paid"
+      );
       if (idx < 0) {
         skippedEmpty++;
         continue;
@@ -114,7 +117,7 @@ async function migrateStuckMilestoneQuotes() {
           );
           if (versionDoc && Array.isArray(versionDoc.milestones)) {
             const vIdx = versionDoc.milestones.findIndex(
-              (m: any) => (m.order ?? 0) === targetOrder
+              (m: any) => (m.order ?? 0) === targetOrder && m.status !== "paid"
             );
             if (vIdx >= 0) {
               (versionDoc.milestones as any)[vIdx].dueCondition = "on_start";
@@ -131,7 +134,7 @@ async function migrateStuckMilestoneQuotes() {
     console.log("\nMigration Summary:");
     console.log(`  Bookings fixed${dryRun ? " (would)" : ""}: ${fixed}`);
     console.log(`  Skipped (already has payable milestone): ${skippedAlreadyOk}`);
-    console.log(`  Skipped (a milestone already paid): ${skippedHasPaid}`);
+    console.log(`  Skipped (all milestones already paid): ${skippedAllPaid}`);
     console.log(`  Skipped (legitimate deferral: completion-gated or future custom_date): ${skippedLegitDefer}`);
     console.log(`  Skipped (empty/malformed): ${skippedEmpty}`);
   } finally {

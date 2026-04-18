@@ -155,7 +155,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
             });
           }
           const conditionNet = Number(condition.additionalCost);
-          if (!Number.isFinite(conditionNet)) {
+          if (!Number.isFinite(conditionNet) || conditionNet < 0) {
             return res.status(400).json({
               success: false,
               error: { code: 'VALIDATION_ERROR', message: `Condition at index ${cost.referenceIndex} has an invalid additionalCost` }
@@ -184,7 +184,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
             });
           }
           const optionNet = Number(option.price);
-          if (!Number.isFinite(optionNet)) {
+          if (!Number.isFinite(optionNet) || optionNet < 0) {
             return res.status(400).json({
               success: false,
               error: { code: 'VALIDATION_ERROR', message: `Option at index ${cost.referenceIndex} has an invalid price` }
