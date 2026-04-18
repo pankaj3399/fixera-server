@@ -51,7 +51,7 @@ export interface IQuotationMilestone {
   title: string;
   amount: number;
   description?: string;
-  dueCondition: 'on_start' | 'on_milestone_start' | 'on_milestone_completion' | 'on_project_completion' | 'custom_date';
+  dueCondition: 'on_start' | 'on_milestone_start' | 'on_milestone_completion' | 'custom_date';
   customDueDate?: Date;
   order: number;
   status: 'pending' | 'invoiced' | 'paid' | 'overdue';
@@ -558,7 +558,7 @@ const BookingSchema = new Schema({
       description: { type: String, maxlength: 500 },
       dueCondition: {
         type: String,
-        enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+        enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'custom_date'],
         required: true
       },
       customDueDate: { type: Date },
@@ -597,7 +597,7 @@ const BookingSchema = new Schema({
     description: { type: String, maxlength: 500 },
     dueCondition: {
       type: String,
-      enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'on_project_completion', 'custom_date'],
+      enum: ['on_start', 'on_milestone_start', 'on_milestone_completion', 'custom_date'],
       required: true
     },
     customDueDate: { type: Date },

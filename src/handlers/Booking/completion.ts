@@ -16,6 +16,7 @@ import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
+  countUnpaidMilestones,
   ensureWarrantyCoverageSnapshot,
   getProfessionalId,
   markMilestonesCompleted,
@@ -68,6 +69,17 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       });
     }
 
+    const unpaidMilestoneCount = countUnpaidMilestones(booking);
+    if (unpaidMilestoneCount > 0) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'MILESTONES_UNPAID',
+          message: `Cannot confirm completion: ${unpaidMilestoneCount} milestone payment(s) are still unpaid.`
+        }
+      });
+    }
+
     const { notes, extraCosts: extraCostsRaw } = req.body;
     let extraCostsInput = extraCostsRaw;
     if (typeof extraCostsRaw === 'string') {
@@ -98,6 +110,8 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
 
     if (Array.isArray(extraCostsInput) && extraCostsInput.length > 0) {
       const project = booking.project as any;
+      const commissionPercent = await getPlatformCommissionPercent();
+      const applyCommission = (net: number) => net * (1 + (commissionPercent || 0) / 100);
 
       for (const cost of extraCostsInput) {
         if (!cost.type || !cost.justification) {
@@ -136,20 +150,22 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
             });
           }
           const condition = project?.termsConditions?.[cost.referenceIndex];
-          if (!condition || !condition.additionalCost) {
+          if (!condition) {
             return res.status(400).json({
               success: false,
-              error: { code: 'VALIDATION_ERROR', message: `Invalid condition at index ${cost.referenceIndex} or no additional cost configured` }
+              error: { code: 'VALIDATION_ERROR', message: `Invalid condition at index ${cost.referenceIndex}` }
             });
           }
+          const conditionNet = Number(condition.additionalCost) || 0;
+          const conditionGross = applyCommission(conditionNet);
           validatedExtraCosts.push({
             type: 'condition',
             name: condition.name,
             justification: cost.justification,
-            amount: condition.additionalCost,
+            amount: conditionGross,
             referenceIndex: cost.referenceIndex,
           });
-          extraCostTotal += condition.additionalCost;
+          extraCostTotal += conditionGross;
         } else if (costType === 'option') {
           if (cost.referenceIndex == null) {
             return res.status(400).json({
@@ -164,14 +180,16 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               error: { code: 'VALIDATION_ERROR', message: `Invalid option at index ${cost.referenceIndex}` }
             });
           }
+          const optionNet = Number(option.price) || 0;
+          const optionGross = applyCommission(optionNet);
           validatedExtraCosts.push({
             type: 'option',
             name: option.name,
             justification: cost.justification,
-            amount: option.price,
+            amount: optionGross,
             referenceIndex: cost.referenceIndex,
           });
-          extraCostTotal += option.price;
+          extraCostTotal += optionGross;
         } else if (costType === 'other') {
           if (cost.amount == null || cost.name == null) {
             return res.status(400).json({
@@ -443,6 +461,17 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       return res.status(400).json({
         success: false,
         error: { code: 'INVALID_STATUS', message: `Cannot confirm completion while booking is "${booking.status}"` }
+      });
+    }
+
+    const unpaidMilestoneCount = countUnpaidMilestones(booking);
+    if (unpaidMilestoneCount > 0) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'MILESTONES_UNPAID',
+          message: `Cannot confirm completion: ${unpaidMilestoneCount} milestone payment(s) are still unpaid.`
+        }
       });
     }
 

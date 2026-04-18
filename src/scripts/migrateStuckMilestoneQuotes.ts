@@ -20,9 +20,6 @@ const isMilestonePayable = (m: any, allMilestones: any[]): boolean => {
   if (cond === "on_milestone_completion") {
     return m.workStatus === "completed";
   }
-  if (cond === "on_project_completion") {
-    return allMilestones.every((s: any) => s.workStatus === "completed");
-  }
   if (cond === "custom_date") {
     return isCustomDatePayable(m);
   }
@@ -35,7 +32,7 @@ const hasPayableMilestone = (milestones: any[]): boolean =>
 const hasLegitimateDeferral = (milestones: any[]): boolean =>
   milestones.some((m: any) => {
     const cond = m?.dueCondition;
-    if (cond === "on_milestone_completion" || cond === "on_project_completion") {
+    if (cond === "on_milestone_completion") {
       return true;
     }
     if (cond === "custom_date" && m.customDueDate) {
