@@ -324,7 +324,7 @@ export const uploadCmsImage = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "No image file provided" });
     }
 
-    const validation = await validateImageFileBuffer(file, 8 * 1024 * 1024);
+    const validation = await validateImageFileBuffer(file, 5 * 1024 * 1024);
     if (!validation.valid) {
       return res.status(400).json({ success: false, msg: validation.error });
     }
