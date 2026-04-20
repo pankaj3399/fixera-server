@@ -891,7 +891,20 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       });
     }
 
-    if (booking.payment?.stripeClientSecret && booking.payment.status === 'pending') {
+    const { pointsToRedeem: pts, discountCode } = req.body || {};
+
+    const requestedCodeLabel = typeof discountCode === 'string' && discountCode.trim()
+      ? discountCode.trim().toUpperCase()
+      : undefined;
+    const storedCodeLabel = (booking.payment as any)?.discount?.codeLabel || undefined;
+    const codeMatchesStored = storedCodeLabel === requestedCodeLabel;
+
+    if (
+      booking.payment?.stripeClientSecret &&
+      booking.payment.status === 'pending' &&
+      codeMatchesStored &&
+      discountCode === undefined
+    ) {
       return res.json({
         success: true,
         data: {
@@ -900,9 +913,13 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
         }
       });
     }
-
-    const { pointsToRedeem: pts } = req.body || {};
-    const paymentResult = await createPaymentIntent(booking._id.toString(), userId, parseInt(pts) || 0);
+    const paymentResult = await createPaymentIntent(
+      booking._id.toString(),
+      userId,
+      parseInt(pts) || 0,
+      undefined,
+      requestedCodeLabel
+    );
     if (!paymentResult.success) {
       return res.status(400).json({
         success: false,

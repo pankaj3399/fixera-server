@@ -10,6 +10,8 @@ import Booking from '../../models/booking';
 import Payment from '../../models/payment';
 import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
+import DiscountCode from '../../models/discountCode';
+import DiscountCodeUsage from '../../models/discountCodeUsage';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
@@ -265,6 +267,28 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
         );
       } catch (pointsError: any) {
         console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
+      }
+    }
+
+    const codeId = (booking.payment as any)?.discount?.codeId;
+    const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
+    const codeLabel = (booking.payment as any)?.discount?.codeLabel;
+    if (codeId && codeAmount > 0 && booking.customer) {
+      try {
+        const existingUsage = await DiscountCodeUsage.findOne({ booking: booking._id });
+        if (!existingUsage) {
+          await DiscountCodeUsage.create({
+            code: codeId,
+            codeString: codeLabel || '',
+            user: booking.customer,
+            booking: booking._id,
+            amountDiscounted: codeAmount,
+            redeemedAt: now
+          });
+          await DiscountCode.findByIdAndUpdate(codeId, { $inc: { usageCount: 1 } });
+        }
+      } catch (codeError: any) {
+        console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
       }
     }
 
