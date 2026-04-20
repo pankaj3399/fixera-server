@@ -21,6 +21,7 @@ import {
   listPublicFaq,
   listCmsSitemapEntries,
 } from "../../handlers/Public/cms";
+import { recordProfessionalView } from "../../handlers/Public/profileView";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -70,6 +71,11 @@ publicRouter
 publicRouter
   .route("/projects/:projectId/reviews")
   .get(schedulingRateLimiter, getProjectReviews);
+
+// Profile view tracking (public, rate-limited, dedup per visitor/day)
+publicRouter
+  .route("/professionals/:id/view")
+  .post(schedulingRateLimiter, recordProfessionalView);
 
 // Public favorite counts (social proof)
 publicRouter

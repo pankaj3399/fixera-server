@@ -5,7 +5,7 @@
 
 import { Request, Response } from 'express';
 import Booking from '../../models/booking';
-import { calculateAutoDiscount } from '../../utils/discountEngine';
+import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 
 /**
  * GET /api/bookings/:bookingId/discount-preview?pointsToRedeem=50
@@ -16,6 +16,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
     const { bookingId } = req.params;
     const userId = (req as any).user?._id?.toString();
     const pointsToRedeem = parseInt(req.query.pointsToRedeem as string) || 0;
+    const discountCodeInput = typeof req.query.code === 'string' ? req.query.code : '';
 
     if (!userId) {
       return res.status(401).json({
@@ -25,7 +26,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'totalSpent points pointsExpiry')
+      .populate('customer', 'totalSpent points pointsExpiry location')
       .populate('project', 'repeatBuyerDiscount professionalId');
 
     if (!booking) {
@@ -71,13 +72,33 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
 
     const customer = booking.customer as any;
 
+    let codeInfo = null as any;
+    let codeError: string | undefined;
+    if (discountCodeInput) {
+      const customerCountry = (booking.customer as any)?.location?.country || booking.location?.country;
+      const serviceType = (booking as any).serviceType;
+      const validation = await validateDiscountCode(
+        discountCodeInput,
+        userId,
+        booking.quote.amount,
+        customerCountry,
+        serviceType
+      );
+      if (validation.ok && validation.info) {
+        codeInfo = validation.info;
+      } else {
+        codeError = validation.error;
+      }
+    }
+
     const discount = await calculateAutoDiscount(
       userId,
       professionalId,
       projectId,
       booking.quote.amount,
       customer.totalSpent || 0,
-      pointsToRedeem
+      pointsToRedeem,
+      codeInfo
     );
 
     return res.json({
@@ -86,6 +107,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
         discount,
         availablePoints: customer.points || 0,
         pointsExpiry: customer.pointsExpiry || null,
+        codeError,
       }
     });
 

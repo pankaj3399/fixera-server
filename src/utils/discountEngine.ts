@@ -8,7 +8,10 @@ import Booking from '../models/booking';
 import Project from '../models/project';
 import PointsConfig from '../models/pointsConfig';
 import User from '../models/user';
+import DiscountCode from '../models/discountCode';
+import DiscountCodeUsage from '../models/discountCodeUsage';
 import { getCurrentTier } from './loyaltySystem';
+import mongoose from 'mongoose';
 
 export interface LoyaltyDiscountInfo {
   percentage: number;
@@ -30,14 +33,100 @@ export interface PointsDiscountInfo {
   conversionRate: number;
 }
 
+export interface CodeDiscountInfo {
+  code: string;
+  codeId: string;
+  type: 'percentage' | 'fixed';
+  value: number;
+  amount: number;
+}
+
 export interface DiscountBreakdown {
   loyaltyDiscount: LoyaltyDiscountInfo;
   repeatBuyerDiscount: RepeatBuyerDiscountInfo;
   pointsDiscount: PointsDiscountInfo;
+  codeDiscount?: CodeDiscountInfo;
   totalDiscount: number;
   originalAmount: number;
   finalAmount: number;
 }
+
+export interface CodeValidationResult {
+  ok: boolean;
+  error?: string;
+  info?: CodeDiscountInfo;
+}
+
+export const validateDiscountCode = async (
+  codeString: string,
+  customerId: string,
+  bookingAmount: number,
+  customerCountry?: string,
+  bookingService?: string
+): Promise<CodeValidationResult> => {
+  if (!codeString || typeof codeString !== 'string') {
+    return { ok: false, error: 'Code is required' };
+  }
+
+  const normalized = codeString.trim().toUpperCase();
+  const code = await DiscountCode.findOne({ code: normalized });
+  if (!code) return { ok: false, error: 'Invalid code' };
+
+  if (!code.isActive) return { ok: false, error: 'This code is no longer active' };
+
+  const now = new Date();
+  if (now < code.validFrom) return { ok: false, error: 'This code is not yet valid' };
+  if (now > code.validUntil) return { ok: false, error: 'This code has expired' };
+
+  if (code.minBookingAmount && bookingAmount < code.minBookingAmount) {
+    return { ok: false, error: `Minimum booking amount is €${code.minBookingAmount}` };
+  }
+
+  if (code.usageLimit && code.usageCount >= code.usageLimit) {
+    return { ok: false, error: 'This code has reached its usage limit' };
+  }
+
+  if (code.activeCountries.length > 0) {
+    if (!customerCountry || !code.activeCountries.includes(customerCountry.toUpperCase())) {
+      return { ok: false, error: 'This code is not valid in your region' };
+    }
+  }
+
+  if (code.applicableServices.length > 0) {
+    if (!bookingService || !code.applicableServices.includes(bookingService)) {
+      return { ok: false, error: 'This code does not apply to this service' };
+    }
+  }
+
+  const userUsageCount = await DiscountCodeUsage.countDocuments({
+    code: code._id,
+    user: new mongoose.Types.ObjectId(customerId)
+  });
+  if (userUsageCount >= code.perUserLimit) {
+    return { ok: false, error: 'You have already used this code' };
+  }
+
+  let amount = code.type === 'percentage'
+    ? Math.round(bookingAmount * (code.value / 100) * 100) / 100
+    : code.value;
+
+  if (code.maxDiscountAmount && amount > code.maxDiscountAmount) {
+    amount = code.maxDiscountAmount;
+  }
+
+  if (amount > bookingAmount) amount = bookingAmount;
+
+  return {
+    ok: true,
+    info: {
+      code: code.code,
+      codeId: (code._id as mongoose.Types.ObjectId).toString(),
+      type: code.type,
+      value: code.value,
+      amount
+    }
+  };
+};
 
 const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
 const hasNumericCap = (value: unknown): value is number =>
@@ -64,7 +153,7 @@ export function calculateDiscountedPayouts(
   platformCommission: number;
   professionalPayout: number;
 } {
-  const { originalAmount, finalAmount, loyaltyDiscount, repeatBuyerDiscount, pointsDiscount } = discount;
+  const { originalAmount, finalAmount, loyaltyDiscount, repeatBuyerDiscount, pointsDiscount, codeDiscount } = discount;
 
   // The amount the professional's world sees (before platform commission)
   // = original amount minus the repeat-buyer discount they offered
@@ -76,8 +165,8 @@ export function calculateDiscountedPayouts(
   // Professional payout = their base amount minus commission
   const professionalPayout = roundToTwo(professionalBaseAmount - platformCommissionOnBase);
 
-  // Platform commission after absorbing loyalty discount and points discount
-  const platformAbsorbed = roundToTwo(loyaltyDiscount.amount + pointsDiscount.discountAmount);
+  const codeAmount = codeDiscount?.amount || 0;
+  const platformAbsorbed = roundToTwo(loyaltyDiscount.amount + pointsDiscount.discountAmount + codeAmount);
   const platformCommission = roundToTwo(platformCommissionOnBase - platformAbsorbed);
 
   // When loyalty+points absorption exceeds the base commission, platform subsidizes
@@ -98,7 +187,8 @@ export const calculateAutoDiscount = async (
   projectId: string | null,
   quoteAmount: number,
   customerTotalSpent: number,
-  pointsToRedeem: number = 0
+  pointsToRedeem: number = 0,
+  codeInfo: CodeDiscountInfo | null = null
 ): Promise<DiscountBreakdown> => {
   const emptyLoyalty: LoyaltyDiscountInfo = { percentage: 0, amount: 0, tier: 'Bronze', capped: false };
   const emptyRepeat: RepeatBuyerDiscountInfo = { percentage: 0, amount: 0, previousBookings: 0, capped: false };
@@ -229,8 +319,12 @@ export const calculateAutoDiscount = async (
     }
   }
 
-  // 4. Combine discounts (additive)
-  const rawTotal = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount);
+  // 4. Attach code discount (pre-validated by caller via validateDiscountCode)
+  let codeDiscount: CodeDiscountInfo | undefined = codeInfo ? { ...codeInfo } : undefined;
+
+  // 5. Combine discounts (additive)
+  const codeAmount = codeDiscount?.amount || 0;
+  const rawTotal = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount + codeAmount);
   let finalAmount = roundToTwo(Math.max(MINIMUM_PAYMENT_AMOUNT, quoteAmount - rawTotal));
 
   // If clamped to minimum, reconcile component amounts proportionally
@@ -240,12 +334,14 @@ export const calculateAutoDiscount = async (
     loyaltyDiscount.amount = roundToTwo(loyaltyDiscount.amount * scale);
     repeatBuyerDiscount.amount = roundToTwo(repeatBuyerDiscount.amount * scale);
     pointsDiscount.discountAmount = roundToTwo(pointsDiscount.discountAmount * scale);
-    // Recalculate points used based on scaled discount — floor to avoid spending more than value received
+    if (codeDiscount) codeDiscount.amount = roundToTwo(codeDiscount.amount * scale);
     if (pointsDiscount.conversionRate > 0) {
       const scaledPoints = Math.floor(pointsDiscount.discountAmount / pointsDiscount.conversionRate);
       pointsDiscount.pointsUsed = Math.min(pointsDiscount.pointsUsed, scaledPoints);
     }
-    totalDiscount = roundToTwo(loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount);
+    totalDiscount = roundToTwo(
+      loyaltyDiscount.amount + repeatBuyerDiscount.amount + pointsDiscount.discountAmount + (codeDiscount?.amount || 0)
+    );
     finalAmount = roundToTwo(quoteAmount - totalDiscount);
   }
 
@@ -263,6 +359,7 @@ export const calculateAutoDiscount = async (
     loyaltyDiscount,
     repeatBuyerDiscount,
     pointsDiscount,
+    codeDiscount,
     totalDiscount,
     originalAmount: quoteAmount,
     finalAmount,
