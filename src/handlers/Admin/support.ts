@@ -46,10 +46,13 @@ export const adminUpdateTicket = async (req: Request, res: Response) => {
     const ticket = await SupportTicket.findById(id);
     if (!ticket) return res.status(404).json({ success: false, msg: "Ticket not found" });
 
-    const nextStatus =
-      typeof req.body?.status === "string" && SUPPORT_TICKET_STATUSES.includes(req.body.status)
-        ? (req.body.status as SupportTicketStatus)
-        : undefined;
+    let nextStatus: SupportTicketStatus | undefined;
+    if (req.body?.status !== undefined) {
+      if (typeof req.body.status !== "string" || !SUPPORT_TICKET_STATUSES.includes(req.body.status as SupportTicketStatus)) {
+        return res.status(400).json({ success: false, msg: `Invalid status: ${req.body.status}` });
+      }
+      nextStatus = req.body.status as SupportTicketStatus;
+    }
 
     const hasReply = typeof req.body?.reply === "string" && req.body.reply.trim();
 
@@ -116,10 +119,13 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
     const doc = await MeetingRequest.findById(id);
     if (!doc) return res.status(404).json({ success: false, msg: "Request not found" });
 
-    const nextStatus =
-      typeof req.body?.status === "string" && MEETING_REQUEST_STATUSES.includes(req.body.status)
-        ? (req.body.status as MeetingRequestStatus)
-        : undefined;
+    let nextStatus: MeetingRequestStatus | undefined;
+    if (req.body?.status !== undefined) {
+      if (typeof req.body.status !== "string" || !MEETING_REQUEST_STATUSES.includes(req.body.status as MeetingRequestStatus)) {
+        return res.status(400).json({ success: false, msg: `Invalid status: ${req.body.status}` });
+      }
+      nextStatus = req.body.status as MeetingRequestStatus;
+    }
 
     let parsedScheduledAt: Date | undefined;
     if (req.body?.scheduledAt !== undefined && req.body?.scheduledAt !== null && req.body?.scheduledAt !== "") {
