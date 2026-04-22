@@ -5,8 +5,10 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const connectDB = async () => {
-  // Short-circuit: mongoose caches the connection, so once connected this is a no-op
-  if (mongoose.connection.readyState === 1) return;
+  // Short-circuit: mongoose caches the connection and serializes concurrent connects,
+  // so skip when already connected (1) or currently connecting (2).
+  const state = mongoose.connection.readyState;
+  if (state === mongoose.ConnectionStates.connected || state === mongoose.ConnectionStates.connecting) return;
   const mongoUri = process.env.MONGODB_URI;
   if (!mongoUri) {
     console.error('❌ MONGODB_URI is not defined in .env file');
