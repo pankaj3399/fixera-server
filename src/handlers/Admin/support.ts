@@ -14,7 +14,10 @@ export const adminListTickets = async (req: Request, res: Response) => {
   try {
     const statusQuery = typeof req.query.status === "string" ? req.query.status : undefined;
     const filter: Record<string, unknown> = {};
-    if (statusQuery && SUPPORT_TICKET_STATUSES.includes(statusQuery as SupportTicketStatus)) {
+    if (statusQuery !== undefined) {
+      if (!SUPPORT_TICKET_STATUSES.includes(statusQuery as SupportTicketStatus)) {
+        return res.status(400).json({ success: false, msg: `Invalid status: ${statusQuery}` });
+      }
       filter.status = statusQuery;
     }
 
@@ -43,10 +46,26 @@ export const adminUpdateTicket = async (req: Request, res: Response) => {
     const ticket = await SupportTicket.findById(id);
     if (!ticket) return res.status(404).json({ success: false, msg: "Ticket not found" });
 
-    if (typeof req.body?.status === "string" && SUPPORT_TICKET_STATUSES.includes(req.body.status)) {
-      ticket.status = req.body.status as SupportTicketStatus;
+    const nextStatus =
+      typeof req.body?.status === "string" && SUPPORT_TICKET_STATUSES.includes(req.body.status)
+        ? (req.body.status as SupportTicketStatus)
+        : undefined;
+
+    const hasReply = typeof req.body?.reply === "string" && req.body.reply.trim();
+
+    if (hasReply) {
+      const effectiveStatus = nextStatus ?? ticket.status;
+      if (effectiveStatus === "closed") {
+        return res.status(400).json({
+          success: false,
+          msg: "Cannot reply on a closed ticket. Reopen it by setting a non-closed status first.",
+        });
+      }
     }
-    if (typeof req.body?.reply === "string" && req.body.reply.trim()) {
+
+    if (nextStatus) ticket.status = nextStatus;
+
+    if (hasReply) {
       const body = req.body.reply.trim().slice(0, 5000);
       ticket.replies.push({
         authorId: admin._id,
@@ -68,7 +87,10 @@ export const adminListMeetingRequests = async (req: Request, res: Response) => {
   try {
     const statusQuery = typeof req.query.status === "string" ? req.query.status : undefined;
     const filter: Record<string, unknown> = {};
-    if (statusQuery && MEETING_REQUEST_STATUSES.includes(statusQuery as MeetingRequestStatus)) {
+    if (statusQuery !== undefined) {
+      if (!MEETING_REQUEST_STATUSES.includes(statusQuery as MeetingRequestStatus)) {
+        return res.status(400).json({ success: false, msg: `Invalid status: ${statusQuery}` });
+      }
       filter.status = statusQuery;
     }
 

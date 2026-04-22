@@ -90,7 +90,7 @@ export const createMeetingRequest = async (req: Request, res: Response) => {
     let durationMinutes = 30;
     if (durationProvided) {
       const durationRaw = Number(req.body.durationMinutes);
-      if (!Number.isFinite(durationRaw) || durationRaw < 15 || durationRaw > 240) {
+      if (!Number.isInteger(durationRaw) || durationRaw < 15 || durationRaw > 240) {
         return res.status(400).json({ success: false, msg: "durationMinutes must be between 15 and 240" });
       }
       durationMinutes = durationRaw;
