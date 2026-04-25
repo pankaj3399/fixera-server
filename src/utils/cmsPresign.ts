@@ -1,6 +1,6 @@
 import { presignS3Url } from "./s3Upload";
 
-const IMG_SRC_RE = /<img\b([^>]*?)\bsrc=(["'])([^"']+)\2([^>]*)>/gi;
+const IMG_SRC_RE = /<img\b([^>]*?)(?<!-)src=(["'])([^"']+)\2([^>]*)>/gi;
 
 const presignOrKeep = async (url?: string | null, expiresIn?: number): Promise<string | undefined> => {
   if (!url) return url ?? undefined;

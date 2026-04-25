@@ -2591,13 +2591,6 @@ export const getProjectAvailableSlotsForDate = async ({
   const availability = resolveAvailability(professional.companyAvailability);
   const timeZone = professional.businessInfo?.timezone || "UTC";
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
-  const baseBlockedData = await buildBlockedData(
-    project,
-    professional,
-    timeZone,
-    customerBlocks
-  );
-  const { blockedDates, blockedRanges } = baseBlockedData;
 
   const resourcePolicy = getResourcePolicy(project);
   const useMultiResource = isMultiResourceMode(project);
@@ -2606,6 +2599,14 @@ export const getProjectAvailableSlotsForDate = async ({
   if (orderedResourceIds.length === 0) {
     return { slots: [], mode: durations.execution.unit };
   }
+
+  const baseBlockedData = await buildBlockedData(
+    project,
+    professional,
+    timeZone,
+    customerBlocks
+  );
+  const { blockedDates, blockedRanges } = baseBlockedData;
 
   let perMemberBlocked: PerMemberBlockedData | undefined;
   if (useMultiResource) {
@@ -2623,6 +2624,12 @@ export const getProjectAvailableSlotsForDate = async ({
     timeZone,
     isHoliday
   );
+
+  const prepEndDay = startOfDayZoned(prepEnd);
+  const queryDay = startOfDayZoned(zonedDate);
+  if (queryDay.getTime() < prepEndDay.getTime()) {
+    return { slots: [], mode: "hours" };
+  }
 
   const rawSlots = getAvailableSlotsForDate(
     zonedDate,
