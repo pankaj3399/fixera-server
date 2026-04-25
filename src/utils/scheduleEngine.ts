@@ -2546,6 +2546,96 @@ export const validateProjectScheduleSelection = async ({
   return { valid: true };
 };
 
+/**
+ * Returns the start times the validator would accept for a given date.
+ * Uses the same data assembly and `getAvailableSlotsForDate` that
+ * `validateProjectScheduleSelection` uses, so the picker and the validator
+ * agree.
+ */
+export const getProjectAvailableSlotsForDate = async ({
+  projectId,
+  subprojectIndex,
+  startDate,
+  customerBlocks,
+}: {
+  projectId: string;
+  subprojectIndex?: number;
+  startDate: string;
+  customerBlocks?: CustomerBlocks;
+}): Promise<{ slots: string[]; mode: "hours" | "days" } | null> => {
+  if (!startDate) return null;
+
+  const { project, professional } = await loadProjectAndProfessional(projectId);
+  if (!project || !professional) return null;
+
+  const durations = getProjectDurations(project, subprojectIndex);
+  if (!durations || !durations.execution?.value) return null;
+
+  const availability = resolveAvailability(professional.companyAvailability);
+  const timeZone = professional.businessInfo?.timezone || "UTC";
+  const { isHoliday } = buildHolidayChecker(professional, timeZone);
+  const baseBlockedData = await buildBlockedData(
+    project,
+    professional,
+    timeZone,
+    customerBlocks
+  );
+  const { blockedDates, blockedRanges } = baseBlockedData;
+
+  const resourcePolicy = getResourcePolicy(project);
+  const useMultiResource = isMultiResourceMode(project);
+  const orderedResourceIds = getOrderedResourceIds(project.resources);
+
+  if (orderedResourceIds.length === 0) {
+    return { slots: [], mode: durations.execution.unit };
+  }
+
+  let perMemberBlocked: PerMemberBlockedData | undefined;
+  if (useMultiResource) {
+    perMemberBlocked = await buildPerMemberBlockedData(
+      project,
+      professional,
+      timeZone,
+      customerBlocks
+    );
+  }
+
+  const prepEnd = calculatePrepEnd(
+    durations.preparation,
+    availability,
+    timeZone,
+    isHoliday
+  );
+
+  const dateParts = startDate.split("-").map(Number);
+  if (dateParts.length < 3) return null;
+  const [year, month, day] = dateParts;
+  const zonedDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+
+  if (durations.execution.unit !== "hours") {
+    return { slots: [], mode: "days" };
+  }
+
+  const rawSlots = getAvailableSlotsForDate(
+    zonedDate,
+    durations.execution.value,
+    availability,
+    blockedDates,
+    blockedRanges,
+    timeZone,
+    prepEnd,
+    durations.buffer,
+    perMemberBlocked,
+    useMultiResource ? resourcePolicy : undefined,
+    useMultiResource ? orderedResourceIds : undefined
+  );
+
+  return {
+    slots: rawSlots.map((s) => s.startTime),
+    mode: "hours",
+  };
+};
+
 export const buildProjectScheduleWindow = async ({
   projectId,
   subprojectIndex,

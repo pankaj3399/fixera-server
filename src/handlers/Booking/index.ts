@@ -685,7 +685,7 @@ export const uploadRFQAttachment = async (req: Request, res: Response) => {
 export const getMyBookings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
-    const { status, page = 1, limit = 20, service, search } = req.query;
+    const { status, page = 1, limit = 20, service, search, addressFilter, customerNameFilter } = req.query;
 
     const user = await User.findById(userId);
     if (!user) {
@@ -750,6 +750,32 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         searchOr.push({ customer: { $in: matchingCustomerIds.map(c => c._id) } });
       }
       query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+    }
+
+    if (addressFilter && typeof addressFilter === 'string' && user.role === 'customer') {
+      const escaped = addressFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      query.$and = (query.$and || []).concat([{
+        $or: [
+          { 'location.address': regex },
+          { 'location.city': regex },
+          { 'location.country': regex },
+        ],
+      }]);
+    }
+
+    if (customerNameFilter && typeof customerNameFilter === 'string' && user.role === 'professional') {
+      const escaped = customerNameFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      const matchingCustomerIds = await User.find({ name: regex }).select("_id");
+      if (matchingCustomerIds.length > 0) {
+        query.$and = (query.$and || []).concat([{
+          customer: { $in: matchingCustomerIds.map(c => c._id) },
+        }]);
+      } else {
+        // No customer matches — force empty result set.
+        query.$and = (query.$and || []).concat([{ customer: null }]);
+      }
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -823,7 +849,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       .populate('professional', professionalFields)
       .populate('project', isAdmin
         ? 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects'
-        : 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions')
+        : 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects')
       .populate('assignedTeamMembers', 'name email');
 
     const booking = await bookingQuery;

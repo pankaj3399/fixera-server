@@ -11,6 +11,7 @@ import {
   buildProjectScheduleWindow,
   DAY_KEYS,
   fromZonedTime,
+  getProjectAvailableSlotsForDate,
   getResourcePolicy,
   getWorkingRangeUtc,
   normalizeRangeEndInclusive,
@@ -1507,6 +1508,47 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       success: false,
       error: "Failed to fetch schedule proposals",
     });
+  }
+};
+
+export const getProjectAvailableSlots = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const date = req.query.date as string | undefined;
+    const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: "date query parameter is required (YYYY-MM-DD)",
+      });
+    }
+
+    const project = await Project.findById(id).select("subprojects");
+    if (!project) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
+
+    const subprojects = Array.isArray(project.subprojects) ? project.subprojects : [];
+    const subprojectIndexResult = parseSubprojectIndex(subprojectIndexRaw, subprojects.length);
+    if (!subprojectIndexResult.valid) {
+      return res.status(400).json({ success: false, error: subprojectIndexResult.error });
+    }
+
+    const result = await getProjectAvailableSlotsForDate({
+      projectId: id as string,
+      subprojectIndex: subprojectIndexResult.index,
+      startDate: date,
+    });
+
+    if (!result) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
+
+    return res.json({ success: true, slots: result.slots, mode: result.mode });
+  } catch (error) {
+    console.error("Error fetching available slots:", error);
+    return res.status(500).json({ success: false, error: "Failed to fetch slots" });
   }
 };
 

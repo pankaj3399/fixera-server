@@ -119,31 +119,33 @@ export const calculateAutoDiscount = async (
   let loyaltyDiscount: LoyaltyDiscountInfo = { ...emptyLoyalty };
   try {
     const config = await LoyaltyConfig.getCurrentConfig();
+    const activeTiers = config.tiers.filter(t => t.isActive);
 
-    if (config.globalSettings.isEnabled) {
-      const activeTiers = config.tiers.filter(t => t.isActive);
+    if (activeTiers.length > 0) {
+      const customer = await User.findById(customerId).select('manualCustomerLevelOverride loyaltyLevel');
+      const preferredTierName = customer?.manualCustomerLevelOverride || customer?.loyaltyLevel;
+      const preferredTier = preferredTierName
+        ? activeTiers.find(t => t.name === preferredTierName)
+        : undefined;
+      const tier = preferredTier || getCurrentTier(activeTiers, customerTotalSpent);
+      loyaltyDiscount.tier = tier.name;
 
-      if (activeTiers.length > 0) {
-        const tier = getCurrentTier(activeTiers, customerTotalSpent);
-        loyaltyDiscount.tier = tier.name;
+      const discountPct = tier.discountPercentage || 0;
+      if (discountPct > 0) {
+        let discountAmount = roundToTwo(quoteAmount * (discountPct / 100));
+        let capped = false;
 
-        const discountPct = tier.discountPercentage || 0;
-        if (discountPct > 0) {
-          let discountAmount = roundToTwo(quoteAmount * (discountPct / 100));
-          let capped = false;
-
-          if (hasNumericCap(tier.maxDiscountAmount) && discountAmount > tier.maxDiscountAmount) {
-            discountAmount = tier.maxDiscountAmount;
-            capped = true;
-          }
-
-          loyaltyDiscount = {
-            percentage: discountPct,
-            amount: discountAmount,
-            tier: tier.name,
-            capped,
-          };
+        if (hasNumericCap(tier.maxDiscountAmount) && discountAmount > tier.maxDiscountAmount) {
+          discountAmount = tier.maxDiscountAmount;
+          capped = true;
         }
+
+        loyaltyDiscount = {
+          percentage: discountPct,
+          amount: discountAmount,
+          tier: tier.name,
+          capped,
+        };
       }
     }
   } catch (error) {

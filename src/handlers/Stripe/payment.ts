@@ -282,7 +282,7 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    let chargeAmount = booking.quote.amount;
+    let chargeAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
     let milestoneIndex: number | null = null;
     let milestoneOrder: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
@@ -325,7 +325,7 @@ export const createPaymentIntent = async (
       }
     }
 
-    const fullBookingAmount = booking.quote.amount;
+    const fullBookingAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
     const fullDiscountBreakdown = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),

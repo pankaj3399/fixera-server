@@ -6,7 +6,6 @@ import { uploadToS3, generateFileName, deleteFromS3 } from '../../utils/s3Upload
 import { captureAndTransferPayment } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import {
-  calculatePlatformCommission,
   generateIdempotencyKey,
   convertToStripeAmount,
   buildPaymentMetadata,
@@ -38,6 +37,7 @@ const getPlatformCommissionPercent = async () => {
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
   let attachmentUrls: string[] = [];
+  let attachmentKeys: string[] = [];
   let completionSaved = false;
   try {
     const { bookingId } = req.params;
@@ -154,7 +154,8 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               error: { code: 'VALIDATION_ERROR', message: `Invalid condition at index ${cost.referenceIndex}` }
             });
           }
-          const conditionNet = Number(condition.additionalCost);
+          const rawCost = condition.additionalCost;
+          const conditionNet = rawCost == null || rawCost === '' ? 0 : Number(rawCost);
           if (!Number.isFinite(conditionNet) || conditionNet < 0) {
             return res.status(400).json({
               success: false,
@@ -226,11 +227,13 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
         for (const file of files) {
           const fileName = generateFileName(file.originalname, userId, 'completion-attachments');
           const result = await uploadToS3(file, fileName);
-          attachmentUrls.push(result.key);
+          attachmentUrls.push(result.url);
+          attachmentKeys.push(result.key);
         }
       } catch (error) {
-        await Promise.allSettled(attachmentUrls.map((key) => deleteFromS3(key)));
+        await Promise.allSettled(attachmentKeys.map((key) => deleteFromS3(key)));
         attachmentUrls = [];
+        attachmentKeys = [];
         throw error;
       }
     }
@@ -273,9 +276,10 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
     ).populate('project');
 
     if (!updatedBooking) {
-      if (attachmentUrls.length > 0) {
-        await Promise.allSettled(attachmentUrls.map((key) => deleteFromS3(key)));
+      if (attachmentKeys.length > 0) {
+        await Promise.allSettled(attachmentKeys.map((key) => deleteFromS3(key)));
         attachmentUrls = [];
+        attachmentKeys = [];
       }
 
       const currentBooking = await Booking.findById(booking._id).select('status');
@@ -299,9 +303,10 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       }
     });
   } catch (error: any) {
-    if (!completionSaved && attachmentUrls.length > 0) {
-      await Promise.allSettled(attachmentUrls.map((key) => deleteFromS3(key)));
+    if (!completionSaved && attachmentKeys.length > 0) {
+      await Promise.allSettled(attachmentKeys.map((key) => deleteFromS3(key)));
       attachmentUrls = [];
+      attachmentKeys = [];
     }
     console.error('Error in professional completion:', error);
     return res.status(500).json({
@@ -383,13 +388,12 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
     const commissionPercent = await getPlatformCommissionPercent();
-    const applicationFeeAmount = convertToStripeAmount(
-      calculatePlatformCommission(extraCostTotal, commissionPercent),
-      currency
-    );
+    const customerGrossAmount = Math.round(extraCostTotal * (1 + commissionPercent / 100) * 100) / 100;
+    const platformCommissionAmount = Math.round((customerGrossAmount - extraCostTotal) * 100) / 100;
+    const applicationFeeAmount = convertToStripeAmount(platformCommissionAmount, currency);
 
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: convertToStripeAmount(extraCostTotal, currency),
+      amount: convertToStripeAmount(customerGrossAmount, currency),
       currency,
       payment_method_types: ['card'],
       transfer_data: {
@@ -412,13 +416,13 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       idempotencyKey: generateIdempotencyKey({
         bookingId: booking._id.toString(),
         operation: 'extra-cost-payment-intent',
-        version: `${convertToStripeAmount(extraCostTotal, currency)}:${booking.extraCosts?.length || 0}`,
+        version: `${convertToStripeAmount(customerGrossAmount, currency)}:${booking.extraCosts?.length || 0}`,
       })
     });
 
     booking.set('payment.extraCostStripePaymentIntentId', paymentIntent.id);
     booking.set('payment.extraCostClientSecret', paymentIntent.client_secret);
-    booking.set('payment.extraCostAmount', extraCostTotal);
+    booking.set('payment.extraCostAmount', customerGrossAmount);
     await booking.save();
 
     return res.json({
@@ -426,6 +430,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       data: {
         clientSecret: paymentIntent.client_secret,
         extraCostTotal,
+        customerChargeAmount: customerGrossAmount,
       }
     });
   } catch (error: any) {
@@ -585,7 +590,8 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     await ensureWarrantyCoverageSnapshot(finalizedBooking);
 
     if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
-      const refundAmount = Math.abs(extraCostTotal);
+      const commissionPercent = await getPlatformCommissionPercent();
+      const refundAmount = Math.round(Math.abs(extraCostTotal) * (1 + commissionPercent / 100) * 100) / 100;
       const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
       await stripe.refunds.create({
         payment_intent: finalizedBooking.payment.stripePaymentIntentId,

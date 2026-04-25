@@ -1,6 +1,16 @@
 import { Request, Response } from "express";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 
+const toSlug = (input: string): string =>
+  (input || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 200);
+
 /**
  * Get all active service categories with nested services
  * This endpoint is used by the frontend to dynamically render the navbar and services page
@@ -40,7 +50,7 @@ export const getActiveServiceCategories = async (
       if (!categoriesMap.has(category)) {
         categoriesMap.set(category, {
           name: category,
-          slug: category.toLowerCase().replace(/\s+/g, "-"),
+          slug: toSlug(category),
           description: `Professional ${category.toLowerCase()} services`,
           icon: categoryIconMap[category] || "Wrench",
           services: [],
@@ -57,7 +67,7 @@ export const getActiveServiceCategories = async (
       if (!existingService) {
         categoryData.services.push({
           name: config.service,
-          slug: config.service.toLowerCase().replace(/\s+/g, "-"),
+          slug: toSlug(config.service),
           description: `Professional ${config.service.toLowerCase()} services`,
           isActive: true,
           countries: [country],

@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import Booking from '../../models/booking';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
+import PlatformSettings from '../../models/platformSettings';
 
 /**
  * GET /api/bookings/:bookingId/discount-preview?pointsToRedeem=50
@@ -71,11 +72,21 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
 
     const customer = booking.customer as any;
 
+    let commissionPercent = 0;
+    try {
+      const platformConfig = await PlatformSettings.getCurrentConfig();
+      commissionPercent = platformConfig.commissionPercent;
+    } catch {
+      const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
+      commissionPercent = Number.isFinite(parsed) ? parsed : 0;
+    }
+    const grossAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
+
     const discount = await calculateAutoDiscount(
       userId,
       professionalId,
       projectId,
-      booking.quote.amount,
+      grossAmount,
       customer.totalSpent || 0,
       pointsToRedeem
     );
