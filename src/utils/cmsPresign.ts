@@ -10,7 +10,7 @@ const presignOrKeep = async (url?: string | null, expiresIn?: number): Promise<s
 
 export async function presignBodyImages(html: string, expiresIn?: number): Promise<string> {
   if (!html || typeof html !== "string") return html;
-  if (!html.includes("<img")) return html;
+  if (!/<img\b/i.test(html)) return html;
 
   const matches: Array<{ full: string; before: string; quote: string; src: string; after: string }> = [];
   IMG_SRC_RE.lastIndex = 0;

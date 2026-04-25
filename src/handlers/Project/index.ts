@@ -1540,6 +1540,20 @@ export const getProjectAvailableSlots = async (req: Request, res: Response) => {
       });
     }
 
+    const [year, month, day] = date.split("-").map(Number);
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    if (
+      Number.isNaN(probe.getTime()) ||
+      probe.getUTCFullYear() !== year ||
+      probe.getUTCMonth() + 1 !== month ||
+      probe.getUTCDate() !== day
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "date query parameter must be a valid calendar date (YYYY-MM-DD)",
+      });
+    }
+
     const project = await Project.findOne({ _id: id, status: "published" }).select("subprojects");
     if (!project) {
       return res.status(404).json({ success: false, error: "Project not found" });

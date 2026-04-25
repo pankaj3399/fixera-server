@@ -685,7 +685,9 @@ export const uploadRFQAttachment = async (req: Request, res: Response) => {
 export const getMyBookings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
-    const { status, page = 1, limit = 20, service, search, addressFilter, customerNameFilter } = req.query;
+    const { status, page, limit, service, search, addressFilter, customerNameFilter } = req.query;
+    const parsedPage = Math.max(1, Math.floor(Number(page) || 1));
+    const parsedLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)));
 
     const user = await User.findById(userId);
     if (!user) {
@@ -753,15 +755,18 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     }
 
     if (addressFilter && typeof addressFilter === 'string' && user.role === 'customer') {
-      const escaped = addressFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(escaped, 'i');
-      query.$and = (query.$and || []).concat([{
-        $or: [
-          { 'location.address': regex },
-          { 'location.city': regex },
-          { 'location.country': regex },
-        ],
-      }]);
+      const trimmedAddress = addressFilter.trim();
+      if (trimmedAddress.length >= 2) {
+        const escaped = trimmedAddress.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(escaped, 'i');
+        query.$and = (query.$and || []).concat([{
+          $or: [
+            { 'location.address': regex },
+            { 'location.city': regex },
+            { 'location.country': regex },
+          ],
+        }]);
+      }
     }
 
     if (customerNameFilter && typeof customerNameFilter === 'string' && user.role === 'professional') {
@@ -775,12 +780,12 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
             customer: { $in: matchingCustomerIds.map(c => c._id) },
           }]);
         } else {
-          query.$and = (query.$and || []).concat([{ customer: null }]);
+          query.$and = (query.$and || []).concat([{ customer: { $in: [] } }]);
         }
       }
     }
 
-    const skip = (Number(page) - 1) * Number(limit);
+    const skip = (parsedPage - 1) * parsedLimit;
 
     // Compute roleProjectIds for the unfiltered service-dropdown query.
     const roleProjectIds: any[] = user.role === 'customer'
@@ -798,7 +803,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         .populate('project', 'title description pricing category service')
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(Number(limit)),
+        .limit(parsedLimit),
       Booking.countDocuments(query),
       distinctServicesPromise,
     ]);
@@ -809,9 +814,9 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       distinctServices: distinctServices.filter(Boolean).sort(),
       pagination: {
         total,
-        page: Number(page),
-        limit: Number(limit),
-        totalPages: Math.ceil(total / Number(limit))
+        page: parsedPage,
+        limit: parsedLimit,
+        totalPages: Math.ceil(total / parsedLimit)
       }
     });
 

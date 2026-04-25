@@ -2565,6 +2565,19 @@ export const getProjectAvailableSlotsForDate = async ({
 }): Promise<{ slots: string[]; mode: "hours" | "days" } | null> => {
   if (!startDate) return null;
 
+  const dateParts = startDate.split("-").map(Number);
+  if (dateParts.length < 3) return null;
+  const [year, month, day] = dateParts;
+  const zonedDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  if (
+    Number.isNaN(zonedDate.getTime()) ||
+    zonedDate.getUTCFullYear() !== year ||
+    zonedDate.getUTCMonth() + 1 !== month ||
+    zonedDate.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
   const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project || !professional) return null;
 
@@ -2573,18 +2586,6 @@ export const getProjectAvailableSlotsForDate = async ({
 
   if (durations.execution.unit !== "hours") {
     return { slots: [], mode: "days" };
-  }
-
-  const dateParts = startDate.split("-").map(Number);
-  if (dateParts.length < 3) return null;
-  const [year, month, day] = dateParts;
-  const zonedDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
-  if (
-    zonedDate.getUTCFullYear() !== year ||
-    zonedDate.getUTCMonth() + 1 !== month ||
-    zonedDate.getUTCDate() !== day
-  ) {
-    return null;
   }
 
   const availability = resolveAvailability(professional.companyAvailability);
