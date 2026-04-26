@@ -2,16 +2,7 @@ import { Request, Response } from 'express';
 import ServiceConfiguration from '../../models/serviceConfiguration';
 import CmsContent from '../../models/cmsContent';
 import { IUser } from '../../models/user';
-
-const toSlug = (input: string): string =>
-    (input || '')
-        .toLowerCase()
-        .trim()
-        .replace(/[^\w\s-]/g, '')
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 200);
+import { toSlug } from '../../utils/slug';
 
 async function ensureServiceLanding(serviceName: string, adminId?: string) {
     try {

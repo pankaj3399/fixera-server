@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import ServiceConfiguration from "../../models/serviceConfiguration";
+import { toSlug } from "../../utils/slug";
 
 /**
  * Get all active service categories with nested services
@@ -40,7 +41,7 @@ export const getActiveServiceCategories = async (
       if (!categoriesMap.has(category)) {
         categoriesMap.set(category, {
           name: category,
-          slug: category.toLowerCase().replace(/\s+/g, "-"),
+          slug: toSlug(category),
           description: `Professional ${category.toLowerCase()} services`,
           icon: categoryIconMap[category] || "Wrench",
           services: [],
@@ -57,7 +58,7 @@ export const getActiveServiceCategories = async (
       if (!existingService) {
         categoryData.services.push({
           name: config.service,
-          slug: config.service.toLowerCase().replace(/\s+/g, "-"),
+          slug: toSlug(config.service),
           description: `Professional ${config.service.toLowerCase()} services`,
           isActive: true,
           countries: [country],

@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import { getGoogleMapsConfig, validateAddress } from "../../handlers/User/googleMaps";
 import { validateVAT } from "../../handlers/User/validateVat";
 import {
+  getProjectAvailableSlots,
   getPublishedProject,
   getProjectScheduleProposals,
   getProjectScheduleWindow,
@@ -59,6 +60,9 @@ publicRouter
 publicRouter
   .route("/projects/:id/schedule-window")
   .get(schedulingRateLimiter, getProjectScheduleWindow);
+publicRouter
+  .route("/projects/:id/available-slots")
+  .get(schedulingRateLimiter, getProjectAvailableSlots);
 
 // Referral code validation (public endpoint for signup)
 publicRouter.route("/referral/validate/:code").get(schedulingRateLimiter, validateReferralCodePublic);

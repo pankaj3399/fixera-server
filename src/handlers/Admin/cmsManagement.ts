@@ -19,16 +19,7 @@ import {
   deleteFromS3,
 } from "../../utils/s3Upload";
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
-
-const toSlug = (input: string): string =>
-  input
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 200);
+import { toSlug } from "../../utils/slug";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 

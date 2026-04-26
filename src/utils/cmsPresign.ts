@@ -1,65 +1,70 @@
-import { presignS3Url, isAllowedS3Url } from "./s3Upload";
+import { presignS3Url } from "./s3Upload";
 
-const IMG_SRC_RE = /(<img\b[^>]*?\bsrc\s*=\s*)(['"])([^'"]+)(\2)/gi;
+const IMG_SRC_RE = /<img\b([^>]*?)(?<!-)src=(["'])([^"']+)\2([^>]*)>/gi;
 
-const DEFAULT_EXPIRES_IN = 7 * 24 * 60 * 60;
-
-async function presignIfAllowed(url: string | undefined, expiresIn: number): Promise<string | undefined> {
-  if (!url) return url;
-  if (!isAllowedS3Url(url)) return url;
+const presignOrKeep = async (url?: string | null, expiresIn?: number): Promise<string | undefined> => {
+  if (!url) return url ?? undefined;
   const signed = await presignS3Url(url, expiresIn);
   return signed ?? url;
-}
+};
 
-export async function presignBodyImages(html: string, expiresIn = DEFAULT_EXPIRES_IN): Promise<string> {
-  if (!html) return html;
+export async function presignBodyImages(html: string, expiresIn?: number): Promise<string> {
+  if (!html || typeof html !== "string") return html;
+  if (!/<img\b/i.test(html)) return html;
 
-  const matches: Array<{ url: string }> = [];
+  const matches: Array<{ full: string; before: string; quote: string; src: string; after: string }> = [];
   IMG_SRC_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = IMG_SRC_RE.exec(html)) !== null) {
-    matches.push({ url: m[3] });
+    matches.push({ full: m[0], before: m[1], quote: m[2], src: m[3], after: m[4] });
   }
   if (matches.length === 0) return html;
 
-  const uniqueUrls = Array.from(new Set(matches.map((x) => x.url)));
-  const resolved: Record<string, string> = {};
-  await Promise.all(
-    uniqueUrls.map(async (u) => {
-      resolved[u] = (await presignIfAllowed(u, expiresIn)) ?? u;
-    })
+  const signedSrcs = await Promise.all(
+    matches.map((entry) => presignS3Url(entry.src, expiresIn).then((s) => s ?? entry.src))
   );
 
-  let out = "";
+  let result = "";
   let cursor = 0;
   IMG_SRC_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = IMG_SRC_RE.exec(html)) !== null) {
-    const start = match.index;
-    const url = match[3];
-    const replacement = `${match[1]}${match[2]}${resolved[url] ?? url}${match[4]}`;
-    out += html.slice(cursor, start) + replacement;
-    cursor = start + match[0].length;
+  let i = 0;
+  let next: RegExpExecArray | null;
+  while ((next = IMG_SRC_RE.exec(html)) !== null) {
+    const entry = matches[i];
+    const replacementSrc = signedSrcs[i];
+    result += html.slice(cursor, next.index);
+    result += `<img${entry.before}src=${entry.quote}${replacementSrc}${entry.quote}${entry.after}>`;
+    cursor = next.index + next[0].length;
+    i += 1;
   }
-  out += html.slice(cursor);
-  return out;
+  result += html.slice(cursor);
+  return result;
 }
 
-export async function presignCmsDoc<T extends Record<string, any>>(doc: T, expiresIn = DEFAULT_EXPIRES_IN): Promise<T> {
-  if (!doc) return doc;
-  const rawSeo = doc.seo && typeof doc.seo === "object" ? (doc.seo as Record<string, any>) : undefined;
-  const [coverImage, ogImage, body] = await Promise.all([
-    presignIfAllowed(doc.coverImage, expiresIn),
-    presignIfAllowed(rawSeo?.ogImage as string | undefined, expiresIn),
-    typeof doc.body === "string" && doc.body ? presignBodyImages(doc.body, expiresIn) : Promise.resolve(doc.body),
-  ]);
-  const next: Record<string, any> = { ...doc, coverImage, body };
-  if (rawSeo) {
-    next.seo = { ...rawSeo, ogImage };
+export async function presignCmsDoc<T extends Record<string, any>>(doc: T, expiresIn?: number): Promise<T> {
+  if (!doc || typeof doc !== "object") return doc;
+
+  const cloned: Record<string, any> = { ...doc };
+
+  if (typeof cloned.coverImage === "string" && cloned.coverImage) {
+    cloned.coverImage = await presignOrKeep(cloned.coverImage, expiresIn);
   }
-  return next as T;
+
+  if (cloned.seo && typeof cloned.seo === "object") {
+    const seoSource = cloned.seo as Record<string, any>;
+    if (typeof seoSource.ogImage === "string" && seoSource.ogImage) {
+      cloned.seo = { ...seoSource, ogImage: await presignOrKeep(seoSource.ogImage, expiresIn) };
+    }
+  }
+
+  if (typeof cloned.body === "string" && cloned.body) {
+    cloned.body = await presignBodyImages(cloned.body, expiresIn);
+  }
+
+  return cloned as T;
 }
 
-export async function presignCmsDocs<T extends Record<string, any>>(docs: T[], expiresIn = DEFAULT_EXPIRES_IN): Promise<T[]> {
-  return Promise.all(docs.map((d) => presignCmsDoc(d, expiresIn)));
+export async function presignCmsDocs<T extends Record<string, any>>(docs: T[], expiresIn?: number): Promise<T[]> {
+  if (!Array.isArray(docs) || docs.length === 0) return docs;
+  return Promise.all(docs.map((doc) => presignCmsDoc(doc, expiresIn)));
 }

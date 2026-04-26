@@ -7,6 +7,7 @@ import {
 } from "../../utils/loyaltySystem";
 import { getPointsBalance, getPointHistory } from "../../utils/pointsSystem";
 import { calculateProfessionalLevel } from "../../utils/professionalLevelSystem";
+import LoyaltyConfig from "../../models/loyaltyConfig";
 import mongoose from 'mongoose';
 
 // Get user's loyalty status (tier info + points)
@@ -32,6 +33,18 @@ export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFu
     const pointsBalance = await getPointsBalance(userId);
 
     const hasManualOverride = !!user.manualCustomerLevelOverride;
+
+    let effectiveTierInfo = loyaltyStatus.tierInfo;
+    if (effectiveLevel && effectiveLevel !== loyaltyStatus.tierInfo?.name) {
+      try {
+        const config = await LoyaltyConfig.getCurrentConfig();
+        const match = config.tiers.find(t => t.isActive !== false && t.name === effectiveLevel);
+        if (match) effectiveTierInfo = match;
+      } catch (lookupError) {
+        console.warn('Loyalty: tier lookup for override failed:', lookupError);
+      }
+    }
+
     return res.status(200).json({
       success: true,
       data: {
@@ -47,7 +60,7 @@ export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFu
           totalBookings: user.totalBookings || 0,
           memberSince: user.createdAt,
           lastUpdate: user.lastLoyaltyUpdate,
-          tierInfo: loyaltyStatus.tierInfo
+          tierInfo: effectiveTierInfo
         },
         benefits
       }

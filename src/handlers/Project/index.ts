@@ -11,6 +11,7 @@ import {
   buildProjectScheduleWindow,
   DAY_KEYS,
   fromZonedTime,
+  getProjectAvailableSlotsForDate,
   getResourcePolicy,
   getWorkingRangeUtc,
   normalizeRangeEndInclusive,
@@ -22,6 +23,7 @@ import {
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
+import { toSlug } from "../../utils/slug";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 let cachedWindowFieldsSupport: boolean | null = null;
@@ -369,11 +371,22 @@ export const getCategoryServices = async (req: Request, res: Response) => {
     const { categorySlug } = req.params;
     const country = (req.query.country as string) || "BE";
 
-    const category = await ServiceCategory.findOne({
+    let category = await ServiceCategory.findOne({
       slug: categorySlug,
       isActive: true,
       countries: country,
     });
+
+    if (!category) {
+      const normalized = toSlug(categorySlug);
+      if (normalized && normalized !== categorySlug) {
+        category = await ServiceCategory.findOne({
+          slug: normalized,
+          isActive: true,
+          countries: country,
+        });
+      }
+    }
 
     if (!category) {
       return res.status(404).json({ error: "Category not found" });
@@ -1507,6 +1520,65 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       success: false,
       error: "Failed to fetch schedule proposals",
     });
+  }
+};
+
+export const getProjectAvailableSlots = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const date = req.query.date as string | undefined;
+    const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
+
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: "date query parameter is required (YYYY-MM-DD)",
+      });
+    }
+
+    const [year, month, day] = date.split("-").map(Number);
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    if (
+      Number.isNaN(probe.getTime()) ||
+      probe.getUTCFullYear() !== year ||
+      probe.getUTCMonth() + 1 !== month ||
+      probe.getUTCDate() !== day
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "date query parameter must be a valid calendar date (YYYY-MM-DD)",
+      });
+    }
+
+    const project = await Project.findOne({ _id: id, status: "published" }).select("subprojects");
+    if (!project) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
+
+    const subprojects = Array.isArray(project.subprojects) ? project.subprojects : [];
+    const subprojectIndexResult = parseSubprojectIndex(subprojectIndexRaw, subprojects.length);
+    if (!subprojectIndexResult.valid) {
+      return res.status(400).json({ success: false, error: subprojectIndexResult.error });
+    }
+
+    const result = await getProjectAvailableSlotsForDate({
+      projectId: id as string,
+      subprojectIndex: subprojectIndexResult.index,
+      startDate: date,
+    });
+
+    if (!result) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
+
+    return res.json({ success: true, slots: result.slots, mode: result.mode });
+  } catch (error) {
+    console.error("Error fetching available slots:", error);
+    return res.status(500).json({ success: false, error: "Failed to fetch slots" });
   }
 };
 
