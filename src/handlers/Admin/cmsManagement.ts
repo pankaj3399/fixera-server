@@ -121,9 +121,13 @@ export const listCmsLandingSlots = async (req: Request, res: Response) => {
       try {
         await CmsContent.insertMany(docsToCreate, { ordered: false });
       } catch (err: any) {
-        // ordered:false + duplicate key races — re-fetch below.
-        if (err?.code !== 11000 && !err?.writeErrors) {
-          console.error("[listCmsLandingSlots] insertMany failed:", err);
+        const allDuplicates =
+          err?.code === 11000 ||
+          (Array.isArray(err?.writeErrors) &&
+            err.writeErrors.length > 0 &&
+            err.writeErrors.every((e: any) => (e?.code ?? e?.err?.code) === 11000));
+        if (!allDuplicates) {
+          console.error("[listCmsLandingSlots] insertMany failed with non-duplicate errors:", err);
         }
       }
       const refreshed = await CmsContent.find({ type: "landing", slug: { $in: missing.map((m) => m.slug) }, locale: "en" }).lean();
