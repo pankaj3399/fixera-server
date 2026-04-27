@@ -128,6 +128,7 @@ export const listCmsLandingSlots = async (req: Request, res: Response) => {
             err.writeErrors.every((e: any) => (e?.code ?? e?.err?.code) === 11000));
         if (!allDuplicates) {
           console.error("[listCmsLandingSlots] insertMany failed with non-duplicate errors:", err);
+          throw err;
         }
       }
       const refreshed = await CmsContent.find({ type: "landing", slug: { $in: missing.map((m) => m.slug) }, locale: "en" }).lean();
