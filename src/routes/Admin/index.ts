@@ -79,6 +79,7 @@ import {
   uploadCmsImage,
   listFaqCategories,
   getCmsPreviewBySlug,
+  listCmsLandingSlots,
 } from "../../handlers/Admin/cmsManagement";
 import { uploadProfileImage as cmsImageMulter } from "../../utils/s3Upload";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
@@ -179,6 +180,7 @@ adminRouter.route('/support/meeting-requests/:id').patch(adminUpdateMeetingReque
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);
 adminRouter.route('/cms/faq-categories').get(listFaqCategories);
+adminRouter.route('/cms/landing-slots').get(listCmsLandingSlots);
 adminRouter.route('/cms/upload-image').post(cmsImageMulter.single('image'), uploadCmsImage);
 adminRouter.route('/cms/preview/:type/:slug').get(getCmsPreviewBySlug);
 adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delete(deleteCmsContent);

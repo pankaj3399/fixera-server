@@ -9,6 +9,7 @@ import CmsContent, {
   FAQ_CATEGORIES,
   FAQ_CATEGORY_SLUGS,
 } from "../../models/cmsContent";
+import ServiceConfiguration from "../../models/serviceConfiguration";
 import connecToDatabase from "../../config/db";
 import { IUser } from "../../models/user";
 import {
@@ -62,6 +63,99 @@ const pickSeo = (input: any) => {
 
 export const listFaqCategories = async (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, data: FAQ_CATEGORIES });
+};
+
+const RESERVED_LANDING_SLOTS: Array<{ slug: string; label: string; usedFor: string }> = [
+  { slug: "about", label: "About", usedFor: "About page (overrides hardcoded content)" },
+];
+
+export const listCmsLandingSlots = async (req: Request, res: Response) => {
+  try {
+    const admin = (req as Request & { admin?: IUser }).admin;
+    await connecToDatabase();
+
+    const configs = await ServiceConfiguration.find({}).select("service category").lean();
+    const seen = new Set<string>();
+    const services: Array<{ slug: string; label: string; category?: string }> = [];
+    for (const c of configs) {
+      const name = (c.service || "").trim();
+      if (!name) continue;
+      const slug = toSlug(name);
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      services.push({ slug, label: name, category: (c.category || "").trim() || undefined });
+    }
+    services.sort((a, b) => a.label.localeCompare(b.label));
+
+    const reservedSlugs = new Set(RESERVED_LANDING_SLOTS.map((r) => r.slug));
+    const slotDefs: Array<{ slug: string; label: string; usedFor: string; category?: string; reserved: boolean }> = [
+      ...RESERVED_LANDING_SLOTS.map((r) => ({ ...r, category: undefined as string | undefined, reserved: true })),
+      ...services
+        .filter((s) => !reservedSlugs.has(s.slug))
+        .map((s) => ({
+          slug: s.slug,
+          label: s.label,
+          usedFor: s.category ? `Service · ${s.category}` : "Service",
+          category: s.category,
+          reserved: false,
+        })),
+    ];
+
+    const slugs = slotDefs.map((s) => s.slug);
+    const existing = await CmsContent.find({ type: "landing", slug: { $in: slugs }, locale: "en" }).lean();
+    const bySlug = new Map(existing.map((doc) => [doc.slug, doc]));
+
+    const missing = slotDefs.filter((s) => !bySlug.has(s.slug));
+    if (missing.length > 0) {
+      const docsToCreate = missing.map((s) => ({
+        type: "landing" as const,
+        title: s.label,
+        slug: s.slug,
+        locale: "en",
+        body: "",
+        status: "draft" as const,
+        author: admin?._id,
+        tags: [],
+        seo: {},
+      }));
+      try {
+        await CmsContent.insertMany(docsToCreate, { ordered: false });
+      } catch (err: any) {
+        // ordered:false + duplicate key races — re-fetch below.
+        if (err?.code !== 11000 && !err?.writeErrors) {
+          console.error("[listCmsLandingSlots] insertMany failed:", err);
+        }
+      }
+      const refreshed = await CmsContent.find({ type: "landing", slug: { $in: missing.map((m) => m.slug) }, locale: "en" }).lean();
+      for (const doc of refreshed) {
+        bySlug.set(doc.slug, doc);
+      }
+    }
+
+    const slots = slotDefs.map((s) => {
+      const item = bySlug.get(s.slug);
+      return {
+        slug: s.slug,
+        label: s.label,
+        usedFor: s.usedFor,
+        category: s.category,
+        reserved: s.reserved,
+        item: item
+          ? {
+              _id: String(item._id),
+              status: item.status,
+              title: item.title,
+              updatedAt: item.updatedAt,
+            }
+          : null,
+      };
+    });
+
+    return res.status(200).json({ success: true, data: { slots } });
+  } catch (error) {
+    console.error("List CMS landing slots error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to list landing slots" });
+  }
 };
 
 export const listCmsContent = async (req: Request, res: Response) => {

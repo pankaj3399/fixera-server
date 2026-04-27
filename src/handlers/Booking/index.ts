@@ -854,7 +854,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
         ? 'name email phone customerType location vatNumber totalSpent'
         : 'name email phone customerType location')
       .populate('professional', professionalFields)
-      .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects')
+      .populate('project', 'title description pricing category service team rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage resources')
       .populate('assignedTeamMembers', 'name email');
 
     const booking = await bookingQuery;
