@@ -142,8 +142,9 @@ export const syncCmsLandingSlots = async (req: Request, res: Response) => {
     const existingSlugs = new Set(existing.map((d) => d.slug));
     const missing = slotDefs.filter((s) => !existingSlugs.has(s.slug));
 
-    if (missing.length === 0) {
-      return res.status(200).json({ success: true, data: { created: 0 } });
+    const attempted = missing.length;
+    if (attempted === 0) {
+      return res.status(200).json({ success: true, data: { attempted: 0, created: 0 } });
     }
 
     const docsToCreate = missing.map((s) => ({
@@ -158,21 +159,28 @@ export const syncCmsLandingSlots = async (req: Request, res: Response) => {
       seo: {},
     }));
 
+    let created = 0;
     try {
-      await CmsContent.insertMany(docsToCreate, { ordered: false });
+      const result = await CmsContent.insertMany(docsToCreate, { ordered: false });
+      created = Array.isArray(result) ? result.length : 0;
     } catch (err: any) {
-      const allDuplicates =
-        err?.code === 11000 ||
-        (Array.isArray(err?.writeErrors) &&
-          err.writeErrors.length > 0 &&
-          err.writeErrors.every((e: any) => (e?.code ?? e?.err?.code) === 11000));
+      const writeErrors: any[] | undefined = Array.isArray(err?.writeErrors) ? err.writeErrors : undefined;
+      const allDuplicates = writeErrors && writeErrors.length > 0
+        ? writeErrors.every((e: any) => (e?.code ?? e?.err?.code) === 11000)
+        : err?.code === 11000;
       if (!allDuplicates) {
         console.error("[syncCmsLandingSlots] insertMany failed with non-duplicate errors:", err);
         throw err;
       }
+      const insertedCount = typeof err?.result?.insertedCount === "number"
+        ? err.result.insertedCount
+        : typeof err?.insertedDocs?.length === "number"
+          ? err.insertedDocs.length
+          : Math.max(0, attempted - (writeErrors?.length ?? 0));
+      created = insertedCount;
     }
 
-    return res.status(200).json({ success: true, data: { created: missing.length } });
+    return res.status(200).json({ success: true, data: { attempted, created } });
   } catch (error) {
     console.error("Sync CMS landing slots error:", error);
     return res.status(500).json({ success: false, msg: "Failed to sync landing slots" });
