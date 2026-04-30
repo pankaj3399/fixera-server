@@ -91,6 +91,12 @@ const presignBookingFiles = async (bookingDoc: any) => {
     );
   }
 
+  if (Array.isArray(booking?.completionAttestation?.attachments) && booking.completionAttestation.attachments.length > 0) {
+    booking.completionAttestation.attachments = await Promise.all(
+      booking.completionAttestation.attachments.map((url: string) => presignMaybeS3Url(url))
+    );
+  }
+
   return booking;
 };
 
