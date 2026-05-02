@@ -12,6 +12,8 @@ import {
 } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
+import LoyaltyConfig from '../../models/loyaltyConfig';
+import { getCurrentTier } from '../../utils/loyaltySystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
@@ -32,6 +34,33 @@ const getPlatformCommissionPercent = async () => {
     console.warn('Failed to fetch platform commission for extra-cost payment, falling back to env var:', configError);
     const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
     return Number.isFinite(parsed) ? parsed : 0;
+  }
+};
+
+const roundToTwo = (value: number) => Math.round(value * 100) / 100;
+
+const computeCustomerLoyaltyDiscount = async (customer: any, commissionInclusiveAmount: number) => {
+  if (commissionInclusiveAmount <= 0) return { tier: 'Bronze', percentage: 0, amount: 0 };
+  try {
+    const config = await LoyaltyConfig.getCurrentConfig();
+    if (!config.globalSettings?.isEnabled) return { tier: 'Bronze', percentage: 0, amount: 0 };
+    const minBookingAmount = config.globalSettings.minBookingAmount || 0;
+    if (commissionInclusiveAmount < minBookingAmount) return { tier: 'Bronze', percentage: 0, amount: 0 };
+    const activeTiers = (config.tiers || []).filter((t: any) => t.isActive);
+    if (activeTiers.length === 0) return { tier: 'Bronze', percentage: 0, amount: 0 };
+    const preferredName = customer?.manualCustomerLevelOverride || customer?.loyaltyLevel;
+    const preferred = preferredName ? activeTiers.find((t: any) => t.name === preferredName) : undefined;
+    const tier = preferred || getCurrentTier(activeTiers, customer?.totalSpent || 0);
+    const percentage = tier.discountPercentage || 0;
+    if (percentage <= 0) return { tier: tier.name, percentage: 0, amount: 0 };
+    let amount = roundToTwo(commissionInclusiveAmount * (percentage / 100));
+    if (typeof tier.maxDiscountAmount === 'number' && Number.isFinite(tier.maxDiscountAmount) && amount > tier.maxDiscountAmount) {
+      amount = tier.maxDiscountAmount;
+    }
+    return { tier: tier.name, percentage, amount };
+  } catch (error) {
+    console.error('Loyalty discount calc failed for extra-cost intent:', error);
+    return { tier: 'Bronze', percentage: 0, amount: 0 };
   }
 };
 
@@ -388,12 +417,18 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
     const commissionPercent = await getPlatformCommissionPercent();
-    const customerGrossAmount = Math.round(extraCostTotal * (1 + commissionPercent / 100) * 100) / 100;
-    const platformCommissionAmount = Math.round((customerGrossAmount - extraCostTotal) * 100) / 100;
-    const applicationFeeAmount = convertToStripeAmount(platformCommissionAmount, currency);
+    const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
+    const loyalty = await computeCustomerLoyaltyDiscount(booking.customer as any, subtotalInclCommission);
+    // Cap the loyalty discount to the platform's commission margin so the professional is never short-paid.
+    const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
+    const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
+    (loyalty as any).cappedAmount = cappedLoyalty;
+    const customerChargeAmount = Math.max(0, roundToTwo(subtotalInclCommission - cappedLoyalty));
+    const platformCommissionAmount = roundToTwo(subtotalInclCommission - extraCostTotal - cappedLoyalty);
+    const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformCommissionAmount), currency);
 
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: convertToStripeAmount(customerGrossAmount, currency),
+      amount: convertToStripeAmount(customerChargeAmount, currency),
       currency,
       payment_method_types: ['card'],
       transfer_data: {
@@ -416,13 +451,13 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       idempotencyKey: generateIdempotencyKey({
         bookingId: booking._id.toString(),
         operation: 'extra-cost-payment-intent',
-        version: `${convertToStripeAmount(customerGrossAmount, currency)}:${booking.extraCosts?.length || 0}`,
+        version: `${convertToStripeAmount(customerChargeAmount, currency)}:${booking.extraCosts?.length || 0}`,
       })
     });
 
     booking.set('payment.extraCostStripePaymentIntentId', paymentIntent.id);
     booking.set('payment.extraCostClientSecret', paymentIntent.client_secret);
-    booking.set('payment.extraCostAmount', customerGrossAmount);
+    booking.set('payment.extraCostAmount', customerChargeAmount);
     await booking.save();
 
     return res.json({
@@ -430,7 +465,9 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       data: {
         clientSecret: paymentIntent.client_secret,
         extraCostTotal,
-        customerChargeAmount: customerGrossAmount,
+        customerChargeAmount,
+        subtotalInclCommission,
+        loyaltyDiscount: loyalty,
       }
     });
   } catch (error: any) {
