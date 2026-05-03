@@ -10,14 +10,20 @@ import { aggregateProjectRatings } from "./aggregateRatings";
  */
 export const getPopularProjects = async (req: Request, res: Response) => {
   try {
-    const { limit = "10" } = req.query;
+    const { limit = "10", service } = req.query;
     const parsed = parseInt(limit as string, 10);
     const limitNum = Math.min(Math.max(Number.isNaN(parsed) ? 10 : parsed, 1), 20);
 
-    // Single aggregation: filter published, lookup completed booking counts,
-    // sort by booking count desc + recency, project only needed fields, limit.
+    const serviceFilter =
+      typeof service === "string" && service.trim() ? service.trim() : null;
+
+    const match: Record<string, unknown> = { status: "published" };
+    if (serviceFilter) {
+      match.service = { $regex: `^${serviceFilter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" };
+    }
+
     const projects: any[] = await Project.aggregate([
-      { $match: { status: "published" } },
+      { $match: match },
       {
         $lookup: {
           from: "bookings",

@@ -36,6 +36,10 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
     const tag = typeof req.query.tag === "string" ? req.query.tag.toLowerCase() : "";
     if (tag) filter.tags = tag;
 
+    const serviceSlug =
+      typeof req.query.serviceSlug === "string" ? req.query.serviceSlug.toLowerCase().trim() : "";
+    if (serviceSlug) filter.relatedServiceSlug = serviceSlug;
+
     await connectDB();
 
     const [items, total] = await Promise.all([

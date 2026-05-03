@@ -44,6 +44,7 @@ export interface ICmsContent extends Document {
   seo: ICmsSeo;
   relatedContent: Types.ObjectId[];
   relatedServices: Types.ObjectId[];
+  relatedServiceSlug?: string;
   viewCount: number;
   createdAt: Date;
   updatedAt: Date;
@@ -89,6 +90,7 @@ const CmsContentSchema = new Schema<ICmsContent>(
     seo: { type: CmsSeoSchema, default: () => ({}) },
     relatedContent: [{ type: Schema.Types.ObjectId, ref: "CmsContent" }],
     relatedServices: [{ type: Schema.Types.ObjectId, ref: "ServiceCategory" }],
+    relatedServiceSlug: { type: String, trim: true, lowercase: true, maxlength: 200 },
     viewCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
@@ -98,6 +100,7 @@ CmsContentSchema.index({ type: 1, slug: 1, locale: 1 }, { unique: true });
 CmsContentSchema.index({ type: 1, status: 1, publishedAt: -1 });
 CmsContentSchema.index({ tags: 1 });
 CmsContentSchema.index({ category: 1 });
+CmsContentSchema.index({ relatedServiceSlug: 1, type: 1, status: 1 });
 CmsContentSchema.index({ title: "text", excerpt: "text" });
 
 CmsContentSchema.pre("save", function (next) {
