@@ -7,6 +7,7 @@ import CmsContent, {
 } from "../../models/cmsContent";
 import connectDB from "../../config/db";
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
+import { toSlug } from "../../utils/slug";
 
 const LISTING_FIELDS =
   "type title slug locale excerpt coverImage tags publishedAt seo category author authorOverride updatedAt";
@@ -37,7 +38,7 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
     if (tag) filter.tags = tag;
 
     const serviceSlug =
-      typeof req.query.serviceSlug === "string" ? req.query.serviceSlug.toLowerCase().trim() : "";
+      typeof req.query.serviceSlug === "string" ? toSlug(req.query.serviceSlug) : "";
     if (serviceSlug) filter.relatedServiceSlug = serviceSlug;
 
     await connectDB();
