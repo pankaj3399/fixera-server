@@ -4,6 +4,39 @@ import CmsContent from '../../models/cmsContent';
 import { IUser } from '../../models/user';
 import { toSlug } from '../../utils/slug';
 
+function respondWithSchemaError(res: Response, error: any, fallbackMessage: string) {
+    if (error?.name === 'ValidationError' && error.errors) {
+        const fieldErrors = Object.entries(error.errors).map(([path, e]: [string, any]) => ({
+            path,
+            kind: e?.kind,
+            message: e?.message,
+            value: e?.value,
+        }));
+        return res.status(400).json({
+            success: false,
+            message: fallbackMessage,
+            fieldErrors,
+        });
+    }
+    if (error?.name === 'CastError') {
+        return res.status(400).json({
+            success: false,
+            message: fallbackMessage,
+            fieldErrors: [{
+                path: error.path,
+                kind: 'CastError',
+                message: error.message,
+                value: error.value,
+            }],
+        });
+    }
+    return res.status(500).json({
+        success: false,
+        message: fallbackMessage,
+        error: error?.message,
+    });
+}
+
 async function ensureServiceLanding(serviceName: string, adminId?: string) {
     try {
         const slug = toSlug(serviceName);
@@ -121,11 +154,8 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
             data: configuration
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error creating service configuration',
-            error: error.message
-        });
+        console.error('[createServiceConfiguration] failed:', error);
+        return respondWithSchemaError(res, error, 'Error creating service configuration');
     }
 };
 
@@ -157,11 +187,8 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
             data: configuration
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error updating service configuration',
-            error: error.message
-        });
+        console.error('[updateServiceConfiguration] failed:', { id: req.params?.id, error });
+        return respondWithSchemaError(res, error, 'Error updating service configuration');
     }
 };
 

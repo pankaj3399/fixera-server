@@ -65,6 +65,33 @@ export const listFaqCategories = async (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, data: FAQ_CATEGORIES });
 };
 
+async function loadServiceSlugOptions(): Promise<Array<{ slug: string; label: string }>> {
+  const configs = await ServiceConfiguration.find({}).select("service").lean();
+  const seen = new Set<string>();
+  const items: Array<{ slug: string; label: string }> = [];
+  for (const c of configs) {
+    const name = (c.service || "").trim();
+    if (!name) continue;
+    const slug = toSlug(name);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    items.push({ slug, label: name });
+  }
+  items.sort((a, b) => a.label.localeCompare(b.label));
+  return items;
+}
+
+export const listCmsServiceOptions = async (_req: Request, res: Response) => {
+  try {
+    await connecToDatabase();
+    const items = await loadServiceSlugOptions();
+    return res.status(200).json({ success: true, data: { items } });
+  } catch (error) {
+    console.error("List CMS service options error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load service options" });
+  }
+};
+
 const RESERVED_LANDING_SLOTS: Array<{ slug: string; label: string; usedFor: string }> = [
   { slug: "about", label: "About", usedFor: "About page (overrides hardcoded content)" },
 ];
@@ -314,6 +341,18 @@ export const createCmsContent = async (req: Request, res: Response) => {
         ? body.authorOverride.trim().slice(0, 120)
         : undefined;
 
+    let relatedServiceSlug: string | undefined;
+    if ((type === "blog" || type === "news") && typeof body.relatedServiceSlug === "string") {
+      const candidate = toSlug(body.relatedServiceSlug);
+      if (candidate) {
+        const allowed = new Set((await loadServiceSlugOptions()).map((s) => s.slug));
+        if (!allowed.has(candidate)) {
+          return res.status(400).json({ success: false, msg: "Invalid related service" });
+        }
+        relatedServiceSlug = candidate;
+      }
+    }
+
     const doc = await CmsContent.create({
       type,
       title,
@@ -330,6 +369,7 @@ export const createCmsContent = async (req: Request, res: Response) => {
       seo: pickSeo(body.seo),
       relatedContent: sanitizeObjectIdArray(body.relatedContent),
       relatedServices: sanitizeObjectIdArray(body.relatedServices),
+      relatedServiceSlug,
     });
 
     const presigned = await presignCmsDoc(doc.toObject());
@@ -433,6 +473,30 @@ export const updateCmsContent = async (req: Request, res: Response) => {
     if (typeof body.authorOverride === "string") {
       const v = body.authorOverride.trim().slice(0, 120);
       doc.authorOverride = v || undefined;
+    }
+
+    if (body.relatedServiceSlug === null) {
+      doc.relatedServiceSlug = undefined;
+    } else if (typeof body.relatedServiceSlug === "string") {
+      if (doc.type === "blog" || doc.type === "news") {
+        const trimmed = body.relatedServiceSlug.trim();
+        if (!trimmed) {
+          doc.relatedServiceSlug = undefined;
+        } else {
+          const candidate = toSlug(trimmed);
+          if (!candidate) {
+            doc.relatedServiceSlug = undefined;
+          } else {
+            const allowed = new Set((await loadServiceSlugOptions()).map((s) => s.slug));
+            if (!allowed.has(candidate)) {
+              return res.status(400).json({ success: false, msg: "Invalid related service" });
+            }
+            doc.relatedServiceSlug = candidate;
+          }
+        }
+      } else {
+        doc.relatedServiceSlug = undefined;
+      }
     }
 
     await doc.save();

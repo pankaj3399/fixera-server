@@ -81,6 +81,7 @@ import {
   getCmsPreviewBySlug,
   listCmsLandingSlots,
   syncCmsLandingSlots,
+  listCmsServiceOptions,
 } from "../../handlers/Admin/cmsManagement";
 import { uploadProfileImage as cmsImageMulter } from "../../utils/s3Upload";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
@@ -183,6 +184,7 @@ adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);
 adminRouter.route('/cms/faq-categories').get(listFaqCategories);
 adminRouter.route('/cms/landing-slots').get(listCmsLandingSlots);
 adminRouter.route('/cms/landing-slots/sync').post(syncCmsLandingSlots);
+adminRouter.route('/cms/service-options').get(listCmsServiceOptions);
 adminRouter.route('/cms/upload-image').post(cmsImageMulter.single('image'), uploadCmsImage);
 adminRouter.route('/cms/preview/:type/:slug').get(getCmsPreviewBySlug);
 adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delete(deleteCmsContent);
