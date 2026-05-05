@@ -83,6 +83,13 @@ import {
   syncCmsLandingSlots,
   listCmsServiceOptions,
 } from "../../handlers/Admin/cmsManagement";
+import {
+  listDiscountCodes,
+  getDiscountCode,
+  createDiscountCode,
+  updateDiscountCode,
+  deleteDiscountCode,
+} from "../../handlers/Admin/discountCodes";
 import { uploadProfileImage as cmsImageMulter } from "../../utils/s3Upload";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
 import {
@@ -178,6 +185,10 @@ adminRouter.route('/support/tickets').get(adminListTickets);
 adminRouter.route('/support/tickets/:id').patch(adminUpdateTicket);
 adminRouter.route('/support/meeting-requests').get(adminListMeetingRequests);
 adminRouter.route('/support/meeting-requests/:id').patch(adminUpdateMeetingRequest);
+
+// Discount code management routes
+adminRouter.route('/discount-codes').get(listDiscountCodes).post(createDiscountCode);
+adminRouter.route('/discount-codes/:id').get(getDiscountCode).patch(updateDiscountCode).delete(deleteDiscountCode);
 
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);

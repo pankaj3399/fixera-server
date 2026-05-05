@@ -4,12 +4,15 @@
  */
 
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Stripe from 'stripe';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import Booking from '../../models/booking';
 import Payment from '../../models/payment';
 import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
+import DiscountCode from '../../models/discountCode';
+import DiscountCodeUsage from '../../models/discountCodeUsage';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
@@ -265,6 +268,70 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
         );
       } catch (pointsError: any) {
         console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
+      }
+    }
+
+    const codeId = (booking.payment as any)?.discount?.codeId;
+    const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
+    const codeLabel = (booking.payment as any)?.discount?.codeLabel;
+    if (codeId && codeAmount > 0 && booking.customer) {
+      const session = await mongoose.startSession();
+      try {
+        let limitReached: 'global' | 'perUser' | null = null;
+        await session.withTransaction(async () => {
+          limitReached = null;
+          const codeDoc = await DiscountCode.findById(codeId).session(session);
+          if (!codeDoc) {
+            limitReached = 'global';
+            return;
+          }
+          const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
+          const userUsage = await DiscountCodeUsage.countDocuments(
+            { code: codeId, user: booking.customer },
+            { session }
+          );
+          if (userUsage >= perUserLimit) {
+            limitReached = 'perUser';
+            return;
+          }
+          const incremented = await DiscountCode.findOneAndUpdate(
+            {
+              _id: codeId,
+              $or: [
+                { usageLimit: { $exists: false } },
+                { usageLimit: null },
+                { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
+              ],
+            },
+            { $inc: { usageCount: 1 } },
+            { new: true, session }
+          );
+          if (!incremented) {
+            limitReached = 'global';
+            return;
+          }
+          await DiscountCodeUsage.create([{
+            code: codeId,
+            codeString: codeLabel || '',
+            user: booking.customer,
+            booking: booking._id,
+            amountDiscounted: codeAmount,
+            redeemedAt: now,
+          }], { session });
+        });
+        if (limitReached === 'global') {
+          console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
+        } else if (limitReached === 'perUser') {
+          console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
+        }
+      } catch (codeError: any) {
+        if (codeError?.code === 11000) {
+          // Duplicate usage for this booking — already recorded by a prior webhook delivery; transaction rolled back, no-op
+        } else {
+          console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
+        }
+      } finally {
+        await session.endSession();
       }
     }
 

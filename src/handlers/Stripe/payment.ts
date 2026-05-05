@@ -160,7 +160,8 @@ export const createPaymentIntent = async (
   bookingId: string,
   userId: string,
   pointsToRedeem: number = 0,
-  requestedMilestoneIndex?: number
+  requestedMilestoneIndex?: number,
+  discountCode?: string
 ): Promise<CreatePaymentIntentResult> => {
   try {
     const booking = await Booking.findById(bookingId)
@@ -195,7 +196,12 @@ export const createPaymentIntent = async (
         typeof requestedMilestoneIndex === 'number'
           ? booking.payment.milestoneIndex === requestedMilestoneIndex
           : true;
-      if (booking.payment.status === 'pending' && isMatchingPendingMilestoneIntent) {
+      const storedCodeLabel = (booking.payment as any)?.discount?.codeLabel;
+      const requestedCodeLabel = discountCode ? discountCode.trim().toUpperCase() : undefined;
+      const codeMatches = (storedCodeLabel || undefined) === (requestedCodeLabel || undefined);
+      const storedPoints = Number((booking.payment as any)?.discount?.pointsRedeemed) || 0;
+      const pointsMatch = storedPoints === (Number(pointsToRedeem) || 0);
+      if (booking.payment.status === 'pending' && isMatchingPendingMilestoneIntent && codeMatches && pointsMatch) {
         console.log(`♻️  Reusing existing PaymentIntent for booking ${booking._id}: ${booking.payment.stripePaymentIntentId}`);
         return {
           success: true,
@@ -203,6 +209,16 @@ export const createPaymentIntent = async (
           paymentIntentId: booking.payment.stripePaymentIntentId,
           milestoneIndex: typeof booking.payment.milestoneIndex === 'number' ? booking.payment.milestoneIndex : null,
         };
+      }
+      if (booking.payment.status === 'pending') {
+        try {
+          await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          console.log(`🗑️  Cancelled superseded PaymentIntent ${booking.payment.stripePaymentIntentId} for booking ${booking._id}`);
+        } catch (cancelErr: any) {
+          if (cancelErr?.code !== 'payment_intent_unexpected_state' && cancelErr?.code !== 'resource_missing') {
+            console.warn(`Failed to cancel superseded PaymentIntent: ${cancelErr?.message || cancelErr}`);
+          }
+        }
       }
     }
 
@@ -326,13 +342,32 @@ export const createPaymentIntent = async (
     }
 
     const fullBookingAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
+
+    let codeInfo: any = null;
+    if (discountCode) {
+      const { validateDiscountCode } = await import('../../utils/discountEngine');
+      const validation = await validateDiscountCode(
+        discountCode,
+        customer._id.toString(),
+        booking.quote.amount,
+        customer.location?.country,
+        (booking as any).serviceType
+      );
+      if (!validation.ok) {
+        return { success: false, error: { code: 'INVALID_DISCOUNT_CODE', message: validation.error || 'Invalid discount code' } };
+      }
+      codeInfo = validation.info;
+    }
+
+
     const fullDiscountBreakdown = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
       fullBookingAmount,
       customer.totalSpent || 0,
-      pointsToRedeem
+      pointsToRedeem,
+      codeInfo
     );
 
     let discountBreakdown = fullDiscountBreakdown;
@@ -341,12 +376,18 @@ export const createPaymentIntent = async (
       const proratedLoyalty = Math.round(fullDiscountBreakdown.loyaltyDiscount.amount * ratio * 100) / 100;
       const proratedRepeat = Math.round(fullDiscountBreakdown.repeatBuyerDiscount.amount * ratio * 100) / 100;
       const proratedPoints = Math.round(fullDiscountBreakdown.pointsDiscount.discountAmount * ratio * 100) / 100;
-      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints;
+      const proratedCode = fullDiscountBreakdown.codeDiscount
+        ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
+        : 0;
+      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode;
       discountBreakdown = {
         ...fullDiscountBreakdown,
         loyaltyDiscount: { ...fullDiscountBreakdown.loyaltyDiscount, amount: proratedLoyalty },
         repeatBuyerDiscount: { ...fullDiscountBreakdown.repeatBuyerDiscount, amount: proratedRepeat },
         pointsDiscount: { ...fullDiscountBreakdown.pointsDiscount, discountAmount: proratedPoints },
+        codeDiscount: fullDiscountBreakdown.codeDiscount
+          ? { ...fullDiscountBreakdown.codeDiscount, amount: proratedCode }
+          : undefined,
         totalDiscount: proratedTotal,
         originalAmount: chargeAmount,
         finalAmount: chargeAmount - proratedTotal,
@@ -433,6 +474,11 @@ export const createPaymentIntent = async (
           repeatBuyerAmount: discountBreakdown.repeatBuyerDiscount.amount,
           pointsRedeemed: discountBreakdown.pointsDiscount.pointsUsed,
           pointsDiscountAmount: discountBreakdown.pointsDiscount.discountAmount,
+          codeDiscountAmount: discountBreakdown.codeDiscount?.amount || 0,
+          codeId: discountBreakdown.codeDiscount?.codeId
+            ? new mongoose.Types.ObjectId(discountBreakdown.codeDiscount.codeId)
+            : undefined,
+          codeLabel: discountBreakdown.codeDiscount?.code || undefined,
           totalDiscount: discountBreakdown.totalDiscount,
           originalAmount: discountBreakdown.originalAmount,
         },
