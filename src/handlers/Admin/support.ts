@@ -162,7 +162,8 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
     }
 
     let parsedScheduledAt: Date | undefined;
-    if (req.body?.scheduledAt !== undefined && req.body?.scheduledAt !== null && req.body?.scheduledAt !== "") {
+    const clearScheduledAt = req.body?.scheduledAt === null || req.body?.scheduledAt === "";
+    if (!clearScheduledAt && req.body?.scheduledAt !== undefined) {
       if (typeof req.body.scheduledAt !== "string" || !req.body.scheduledAt.trim()) {
         return res.status(400).json({ success: false, msg: "Invalid scheduledAt date" });
       }
@@ -174,7 +175,8 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
     }
 
     const willBeScheduled = (nextStatus ?? doc.status) === "scheduled";
-    if (willBeScheduled && !parsedScheduledAt && !doc.scheduledAt) {
+    const effectiveScheduledAt = parsedScheduledAt ?? (clearScheduledAt ? undefined : doc.scheduledAt);
+    if (willBeScheduled && !effectiveScheduledAt) {
       return res.status(400).json({
         success: false,
         msg: "scheduledAt is required when status is 'scheduled'",
@@ -183,6 +185,7 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
 
     if (nextStatus) doc.status = nextStatus;
     if (parsedScheduledAt) doc.scheduledAt = parsedScheduledAt;
+    else if (clearScheduledAt) doc.scheduledAt = undefined;
     if (typeof req.body?.adminResponse === "string") {
       doc.adminResponse = req.body.adminResponse.trim().slice(0, 2000);
     }

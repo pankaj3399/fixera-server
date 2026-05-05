@@ -7,21 +7,25 @@ import ProfileView from '../../models/profileView';
 
 type RangeKey = 'month' | '3months' | '12months' | 'all';
 
+const subtractMonthsClamped = (base: Date, months: number): Date => {
+  const d = new Date(base);
+  const originalDay = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - months);
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(originalDay, lastDay));
+  return d;
+};
+
 const resolveRangeStart = (range: RangeKey): Date | null => {
   const now = new Date();
   switch (range) {
     case 'month':
       return new Date(now.getFullYear(), now.getMonth(), 1);
-    case '3months': {
-      const d = new Date(now);
-      d.setMonth(d.getMonth() - 3);
-      return d;
-    }
-    case '12months': {
-      const d = new Date(now);
-      d.setMonth(d.getMonth() - 12);
-      return d;
-    }
+    case '3months':
+      return subtractMonthsClamped(now, 3);
+    case '12months':
+      return subtractMonthsClamped(now, 12);
     case 'all':
     default:
       return null;
@@ -364,7 +368,8 @@ export const getProfessionalDashboardBookings = async (req: Request, res: Respon
       : 'all';
     const startDate = resolveRangeStart(range);
     const format = (req.query.format as string) === 'csv' ? 'csv' : 'json';
-    const limit = Math.min(parseInt((req.query.limit as string) || '200', 10) || 200, 1000);
+    const parsedLimit = parseInt((req.query.limit as string) || '200', 10);
+    const limit = Math.min(Math.max(parsedLimit || 1, 1), 1000);
 
     const match: any = { professional: professionalId };
     if (startDate) match.createdAt = { $gte: startDate };

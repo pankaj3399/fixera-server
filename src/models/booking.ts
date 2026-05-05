@@ -1060,6 +1060,10 @@ BookingSchema.index(
 ); // Quotation lookup
 BookingSchema.index({ bookingNumber: 1 }, { unique: true }); // Quick lookup by booking number
 BookingSchema.index({ 'warrantyCoverage.endsAt': 1 });
+BookingSchema.index({ professional: 1, createdAt: 1 });
+BookingSchema.index({ professional: 1, status: 1, createdAt: 1 });
+BookingSchema.index({ professional: 1, 'payment.status': 1, createdAt: 1 });
+BookingSchema.index({ professional: 1, project: 1, createdAt: 1 });
 
 // Helper to parse HH:mm to minutes for comparison
 const parseTimeToMinutes = (time: string): number => {
