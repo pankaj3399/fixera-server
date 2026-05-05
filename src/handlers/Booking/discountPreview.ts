@@ -87,7 +87,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
     let codeError: string | undefined;
     if (discountCodeInput) {
       const customerCountry = (booking.customer as any)?.location?.country || booking.location?.country;
-      const serviceType = (booking as any).serviceType;
+      const serviceType = booking.rfqData?.serviceType;
       const validation = await validateDiscountCode(
         discountCodeInput,
         userId,

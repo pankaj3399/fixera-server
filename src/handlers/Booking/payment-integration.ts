@@ -907,8 +907,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       booking.payment?.stripeClientSecret &&
       booking.payment.status === 'pending' &&
       codeMatchesStored &&
-      pointsMatchStored &&
-      discountCode === undefined
+      pointsMatchStored
     ) {
       return res.json({
         success: true,

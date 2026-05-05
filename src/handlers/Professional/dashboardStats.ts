@@ -49,6 +49,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
 
     const [
       totalBookings,
+      allBookingsCount,
       completedBookings,
       cancelledBookings,
       quotedBookings,
@@ -64,6 +65,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
       projectBreakdown,
     ] = await Promise.all([
       Booking.countDocuments({ ...baseMatch, status: { $in: activeStatuses } }),
+      Booking.countDocuments(baseMatch),
       Booking.countDocuments({ ...baseMatch, status: 'completed' }),
       Booking.countDocuments({ ...baseMatch, status: 'cancelled' }),
       Booking.countDocuments({
@@ -302,7 +304,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
           avgOverdueDays,
         },
         funnel: {
-          rfq: totalBookings + cancelledBookings,
+          rfq: allBookingsCount,
           quoted: quotedBookings,
           accepted: acceptedQuoteBookings,
           completed: completedBookings,

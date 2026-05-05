@@ -277,12 +277,12 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
     if (codeId && codeAmount > 0 && booking.customer) {
       const session = await mongoose.startSession();
       try {
-        let limitReached: 'global' | 'perUser' | null = null;
+        let limitReached: 'global' | 'perUser' | 'not_found' | null = null;
         await session.withTransaction(async () => {
           limitReached = null;
           const codeDoc = await DiscountCode.findById(codeId).session(session);
           if (!codeDoc) {
-            limitReached = 'global';
+            limitReached = 'not_found';
             return;
           }
           const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
@@ -323,6 +323,8 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
           console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
         } else if (limitReached === 'perUser') {
           console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
+        } else if (limitReached === 'not_found') {
+          console.warn(`Discount code not found for id ${codeId} (label ${codeLabel || 'unknown'}); skipping usage record for booking ${bookingId}`);
         }
       } catch (codeError: any) {
         if (codeError?.code === 11000) {
