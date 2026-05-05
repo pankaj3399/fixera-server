@@ -8,6 +8,7 @@ import {
   createMeetingRequest,
   listMyMeetingRequests,
 } from "../../handlers/Professional/support";
+import { getProfessionalDashboardStats, getProfessionalDashboardBookings } from "../../handlers/Professional/dashboardStats";
 
 const router = Router();
 
@@ -22,5 +23,9 @@ router.use("/support", authMiddleware(["professional"]));
 router.route("/support/tickets").get(listMyTickets).post(createSupportTicket);
 router.route("/support/tickets/:id/reply").post(replyToMyTicket);
 router.route("/support/meeting-requests").get(listMyMeetingRequests).post(createMeetingRequest);
+
+// Authenticated professional dashboard stats
+router.route("/dashboard/stats").get(authMiddleware(['professional']), getProfessionalDashboardStats);
+router.route("/dashboard/bookings").get(authMiddleware(['professional']), getProfessionalDashboardBookings);
 
 export default router;

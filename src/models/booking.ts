@@ -246,6 +246,9 @@ export interface IBooking extends Document {
       repeatBuyerAmount: number;
       pointsRedeemed: number;
       pointsDiscountAmount: number;
+      codeDiscountAmount?: number;
+      codeId?: mongoose.Types.ObjectId;
+      codeLabel?: string;
       totalDiscount: number;
       originalAmount: number;
     };
@@ -734,6 +737,9 @@ const BookingSchema = new Schema({
       repeatBuyerAmount: { type: Number, default: 0 },
       pointsRedeemed: { type: Number, default: 0 },
       pointsDiscountAmount: { type: Number, default: 0 },
+      codeDiscountAmount: { type: Number, default: 0 },
+      codeId: { type: mongoose.Schema.Types.ObjectId, ref: 'DiscountCode' },
+      codeLabel: { type: String },
       totalDiscount: { type: Number, default: 0 },
       originalAmount: { type: Number, default: 0 },
     }
@@ -1054,6 +1060,10 @@ BookingSchema.index(
 ); // Quotation lookup
 BookingSchema.index({ bookingNumber: 1 }, { unique: true }); // Quick lookup by booking number
 BookingSchema.index({ 'warrantyCoverage.endsAt': 1 });
+BookingSchema.index({ professional: 1, createdAt: 1 });
+BookingSchema.index({ professional: 1, status: 1, createdAt: 1 });
+BookingSchema.index({ professional: 1, 'payment.status': 1, createdAt: 1 });
+BookingSchema.index({ professional: 1, project: 1, createdAt: 1 });
 
 // Helper to parse HH:mm to minutes for comparison
 const parseTimeToMinutes = (time: string): number => {
