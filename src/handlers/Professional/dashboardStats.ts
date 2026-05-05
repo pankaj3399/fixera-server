@@ -165,14 +165,14 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
           $match: {
             professional: professionalId,
             status: 'completed',
-            completedAt: { $ne: null },
+            actualEndDate: { $ne: null },
             scheduledExecutionEndDate: { $ne: null },
             ...(startDate ? { createdAt: { $gte: startDate } } : {}),
           },
         },
         {
           $project: {
-            overdueMs: { $subtract: ['$completedAt', '$scheduledExecutionEndDate'] },
+            overdueMs: { $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] },
           },
         },
         {
@@ -369,7 +369,8 @@ export const getProfessionalDashboardBookings = async (req: Request, res: Respon
     const startDate = resolveRangeStart(range);
     const format = (req.query.format as string) === 'csv' ? 'csv' : 'json';
     const parsedLimit = parseInt((req.query.limit as string) || '200', 10);
-    const limit = Math.min(Math.max(parsedLimit || 1, 1), 1000);
+    const safeLimit = Number.isNaN(parsedLimit) ? 200 : parsedLimit;
+    const limit = Math.min(Math.max(safeLimit, 1), 1000);
 
     const match: any = { professional: professionalId };
     if (startDate) match.createdAt = { $gte: startDate };
@@ -379,7 +380,7 @@ export const getProfessionalDashboardBookings = async (req: Request, res: Respon
       .limit(limit)
       .populate('project', 'title')
       .populate('customer', 'name email')
-      .select('bookingNumber status createdAt scheduledStartDate scheduledExecutionEndDate completedAt payment rfqData project customer')
+      .select('bookingNumber status createdAt scheduledStartDate scheduledExecutionEndDate actualEndDate payment rfqData project customer')
       .lean();
 
     const rows = bookings.map((b: any) => ({
@@ -391,15 +392,15 @@ export const getProfessionalDashboardBookings = async (req: Request, res: Respon
       customer: b.customer?.name || '',
       scheduledStart: b.scheduledStartDate || null,
       scheduledEnd: b.scheduledExecutionEndDate || null,
-      completedAt: b.completedAt || null,
+      completedAt: b.actualEndDate || null,
       gross: Math.round(((b.payment?.amount || 0)) * 100) / 100,
       net: Math.round(((b.payment?.professionalPayout || 0)) * 100) / 100,
       paymentStatus: b.payment?.status || '',
       overdue:
         b.status === 'completed' &&
-        b.completedAt &&
+        b.actualEndDate &&
         b.scheduledExecutionEndDate &&
-        new Date(b.completedAt) > new Date(b.scheduledExecutionEndDate),
+        new Date(b.actualEndDate) > new Date(b.scheduledExecutionEndDate),
     }));
 
     if (format === 'csv') {
