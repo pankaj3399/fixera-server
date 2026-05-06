@@ -22,6 +22,13 @@ import {
   getUnpaidMilestoneCount,
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
+import {
+  sendProfessionalCompletedEmail,
+  sendCustomerConfirmedCompletionEmail,
+  sendDisputeRaisedEmail,
+} from '../../utils/emailService';
+
+const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
 const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -322,6 +329,23 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
     }
 
     completionSaved = true;
+
+    try {
+      const customerUser = updatedBooking.customer ? await User.findById(updatedBooking.customer).select('email name').lean() : null;
+      const professionalUser = await User.findById(authUser._id).select('email name').lean();
+      if (customerUser?.email) {
+        await sendProfessionalCompletedEmail(
+          customerUser.email,
+          customerUser.name || 'Customer',
+          professionalUser?.name || 'Professional',
+          extraCostTotal,
+          String(updatedBooking._id),
+          (updatedBooking as any).payment?.currency || 'EUR'
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send professional-completed email:', emailError?.message || emailError);
+    }
 
     return res.json({
       success: true,
@@ -664,6 +688,23 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       console.error('Error awarding booking completion points:', e);
     }
 
+    try {
+      const [customerUser, professionalUser] = await Promise.all([
+        User.findById(finalizedBooking.customer).select('email name').lean(),
+        proId ? User.findById(proId).select('email name').lean() : null,
+      ]);
+      if (professionalUser?.email) {
+        await sendCustomerConfirmedCompletionEmail(
+          professionalUser.email,
+          professionalUser.name || 'Professional',
+          customerUser?.name || 'Customer',
+          String(finalizedBooking._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send customer-confirmed-completion email:', emailError?.message || emailError);
+    }
+
     return res.json({
       success: true,
       data: {
@@ -758,6 +799,26 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
           message: `Booking status changed to "${currentBooking?.status || booking.status}" before the dispute could be recorded`
         }
       });
+    }
+
+    try {
+      const proId = await getProfessionalId(disputedBooking);
+      const [customerUser, professionalUser] = await Promise.all([
+        User.findById(disputedBooking.customer).select('email name').lean(),
+        proId ? User.findById(proId).select('email name').lean() : null,
+      ]);
+      if (professionalUser?.email && ADMIN_NOTIFICATIONS_EMAIL) {
+        await sendDisputeRaisedEmail(
+          professionalUser.email,
+          ADMIN_NOTIFICATIONS_EMAIL,
+          professionalUser.name || 'Professional',
+          customerUser?.name || 'Customer',
+          reason,
+          String(disputedBooking._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send dispute-raised email:', emailError?.message || emailError);
     }
 
     return res.json({

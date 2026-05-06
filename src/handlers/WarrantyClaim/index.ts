@@ -26,6 +26,12 @@ import {
   presignS3Url,
 } from "../../utils/s3Upload";
 import { SYSTEM_USER_ID } from "../../constants/system";
+import {
+  sendWarrantyClaimOpenedEmail,
+  sendWarrantyProposalSentEmail,
+} from "../../utils/emailService";
+
+const WARRANTY_ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
 const PROFESSIONAL_RESPONSE_DAYS = 5;
 const CUSTOMER_AUTO_CLOSE_DAYS = 7;
@@ -695,6 +701,25 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       text: `Warranty claim ${claim.claimNumber} opened by customer.`,
     });
 
+    try {
+      const [customerUser, professionalUser] = await Promise.all([
+        User.findById(booking.customer).select('email name').lean(),
+        User.findById(professionalId).select('email name').lean(),
+      ]);
+      if (professionalUser?.email && WARRANTY_ADMIN_NOTIFICATIONS_EMAIL) {
+        await sendWarrantyClaimOpenedEmail(
+          professionalUser.email,
+          WARRANTY_ADMIN_NOTIFICATIONS_EMAIL,
+          professionalUser.name || 'Professional',
+          customerUser?.name || 'Customer',
+          String(booking._id),
+          claim.claimNumber || String(claim._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send warranty-claim-opened email:', emailError?.message || emailError);
+    }
+
     return res.status(201).json({
       success: true,
       msg: "Warranty claim opened successfully",
@@ -920,6 +945,25 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       status: claim.status,
       text: `Warranty claim ${claim.claimNumber}: professional submitted a resolve proposal for ${new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(parsedResolveByDate)}.`,
     });
+
+    try {
+      const [customerUser, professionalUser] = await Promise.all([
+        User.findById(claim.customer).select('email name').lean(),
+        User.findById(claim.professional).select('name').lean(),
+      ]);
+      if (customerUser?.email) {
+        await sendWarrantyProposalSentEmail(
+          customerUser.email,
+          customerUser.name || 'Customer',
+          professionalUser?.name || 'Professional',
+          message.trim(),
+          String(claim.booking),
+          claim.claimNumber || String(claim._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send warranty-proposal-sent email:', emailError?.message || emailError);
+    }
 
     return res.status(200).json({
       success: true,

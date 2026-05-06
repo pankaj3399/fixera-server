@@ -12,6 +12,7 @@ import {
   getProfessionalId,
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
+import { sendDisputeResolvedEmail } from '../../utils/emailService';
 
 const DISPUTE_BOOKING_STATES = ['dispute', 'in_dispute', 'under_review'] as const;
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
@@ -350,6 +351,27 @@ export const resolveDispute = async (req: Request, res: Response) => {
       await awardBookingCompletionPoints(proId, resolvedBooking.customer, resolvedBooking._id);
     } catch (e) {
       console.error('Error awarding booking completion points:', e);
+    }
+
+    try {
+      const [customerUser, professionalUser] = await Promise.all([
+        User.findById(resolvedBooking.customer).select('email name').lean(),
+        proId ? User.findById(proId).select('email name').lean() : null,
+      ]);
+      if (customerUser?.email && professionalUser?.email) {
+        await sendDisputeResolvedEmail(
+          customerUser.email,
+          professionalUser.email,
+          customerUser.name || 'Customer',
+          professionalUser.name || 'Professional',
+          resolution,
+          typeof finalExtraCostAmount === 'number' ? finalExtraCostAmount : undefined,
+          String(resolvedBooking._id),
+          (resolvedBooking as any).payment?.currency || 'EUR'
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send dispute-resolved email:', emailError?.message || emailError);
     }
 
     return res.json({

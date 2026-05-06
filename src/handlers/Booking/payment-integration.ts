@@ -28,6 +28,11 @@ import {
   resolveSubprojectIndex,
   normalizeExtraOptions,
 } from '../../utils/bookingHelpers';
+import {
+  sendBookingScheduledEmail,
+  sendRescheduleRequestedEmail,
+  sendRescheduleResolvedEmail,
+} from '../../utils/emailService';
 
 const BOOKING_STATUS_VALUES: BookingStatus[] = [
   'rfq',
@@ -1015,6 +1020,22 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
 
     await booking.save();
 
+    try {
+      const professional = booking.professional as any;
+      const customer = booking.customer as any;
+      if (professional?.email) {
+        await sendBookingScheduledEmail(
+          professional.email,
+          professional.name || 'Professional',
+          customer?.name || 'the customer',
+          (booking as any).scheduledStartDate,
+          String(booking._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send booking-scheduled email:', emailError?.message || emailError);
+    }
+
     return res.json({
       success: true,
       data: { message: 'Schedule set successfully', booking }
@@ -1109,6 +1130,26 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
 
     await booking.save();
 
+    try {
+      const customer = booking.customer as any;
+      const professional = booking.professional as any;
+      if (customer?.email) {
+        const oldDate = booking.rescheduleRequest?.previousSchedule?.scheduledStartDate;
+        const newDate = booking.rescheduleRequest?.proposedSchedule?.scheduledStartDate;
+        await sendRescheduleRequestedEmail(
+          customer.email,
+          customer.name || 'Customer',
+          professional?.name || 'the professional',
+          oldDate,
+          newDate,
+          normalizedReason,
+          String(booking._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send reschedule-requested email:', emailError?.message || emailError);
+    }
+
     return res.json({
       success: true,
       data: { message: 'Rescheduling request submitted', booking },
@@ -1178,6 +1219,21 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     }
 
     await booking.save();
+
+    try {
+      const professional = booking.professional as any;
+      if (professional?.email) {
+        await sendRescheduleResolvedEmail(
+          professional.email,
+          professional.name || 'Professional',
+          action,
+          typeof note === 'string' ? note.trim() : undefined,
+          String(booking._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send reschedule-resolved email:', emailError?.message || emailError);
+    }
 
     return res.json({
       success: true,

@@ -98,6 +98,7 @@ import {
   adminListMeetingRequests,
   adminUpdateMeetingRequest,
 } from "../../handlers/Admin/support";
+import { listEmailLogs } from "../../handlers/Admin/emailLogs";
 
 const adminRouter = Router();
 
@@ -199,6 +200,9 @@ adminRouter.route('/cms/service-options').get(listCmsServiceOptions);
 adminRouter.route('/cms/upload-image').post(cmsImageMulter.single('image'), uploadCmsImage);
 adminRouter.route('/cms/preview/:type/:slug').get(getCmsPreviewBySlug);
 adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delete(deleteCmsContent);
+
+// Email logs
+adminRouter.route('/email-logs').get(listEmailLogs);
 
 // Manual scheduler triggers
 adminRouter.route('/run-warranty-checks').post(async (_req, res) => {

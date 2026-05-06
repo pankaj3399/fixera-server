@@ -10,6 +10,7 @@ import {
 } from "../../utils/scheduleEngine";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
+import { sendBookingCancelledEmail } from "../../utils/emailService";
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
@@ -1277,6 +1278,27 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
     };
 
     await (booking as any).updateStatus('cancelled', userId, `Booking cancelled: ${reason}`);
+
+    try {
+      const [customerUser, professionalUser] = await Promise.all([
+        booking.customer ? User.findById(booking.customer).select('email name').lean() : null,
+        booking.professional ? User.findById(booking.professional).select('email name').lean() : null,
+      ]);
+      if (customerUser?.email && professionalUser?.email) {
+        const cancelledBy: 'customer' | 'professional' = isCustomer ? 'customer' : 'professional';
+        await sendBookingCancelledEmail(
+          customerUser.email,
+          professionalUser.email,
+          customerUser.name || 'Customer',
+          professionalUser.name || 'Professional',
+          reason,
+          cancelledBy,
+          String(booking._id)
+        );
+      }
+    } catch (emailError: any) {
+      console.error('Failed to send booking-cancelled email:', emailError?.message || emailError);
+    }
 
     return res.status(200).json({
       success: true,

@@ -16,6 +16,7 @@ import DiscountCodeUsage from '../../models/discountCodeUsage';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
+import { sendPaymentConfirmedEmail, sendRefundProcessedEmail } from '../../utils/emailService';
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
@@ -338,6 +339,27 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
     }
 
     console.log(`Payment authorized via webhook for booking ${bookingId}`);
+
+    if (booking.payment.status === 'pending') {
+      try {
+        const customerUser = booking.customer ? await User.findById(booking.customer).select('email name').lean() : null;
+        const professionalUser = booking.professional ? await User.findById(booking.professional).select('email name').lean() : null;
+        if (customerUser?.email && professionalUser?.email) {
+          const amountPaid = (booking.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
+          await sendPaymentConfirmedEmail(
+            customerUser.email,
+            professionalUser.email,
+            customerUser.name || 'Customer',
+            professionalUser.name || 'Professional',
+            amountPaid,
+            String(booking._id),
+            (paymentIntent.currency || 'EUR').toUpperCase()
+          );
+        }
+      } catch (emailError: any) {
+        console.error('Failed to send payment-confirmed email:', emailError?.message || emailError);
+      }
+    }
   }
 }
 
@@ -441,6 +463,25 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
   );
 
   console.log(`Charge refunded via webhook for booking ${booking._id}`);
+
+  try {
+    if (booking.customer) {
+      const customerUser = await User.findById(booking.customer).select('email name').lean();
+      if (customerUser?.email) {
+        const isPartial = booking.payment.status === 'partially_refunded';
+        await sendRefundProcessedEmail(
+          customerUser.email,
+          customerUser.name || 'Customer',
+          refundAmount,
+          (charge.currency || 'EUR').toUpperCase(),
+          isPartial,
+          String(booking._id)
+        );
+      }
+    }
+  } catch (emailError: any) {
+    console.error('Failed to send refund-processed email:', emailError?.message || emailError);
+  }
 }
 
 /**
