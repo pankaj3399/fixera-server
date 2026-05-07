@@ -277,6 +277,9 @@ export const resolveDispute = async (req: Request, res: Response) => {
         $set: {
           status: COMPLETED_BOOKING_STATUS,
           actualEndDate: completionDate,
+          'dispute.resolvedAt': completionDate,
+          'dispute.resolution': resolution,
+          'dispute.resolvedBy': adminUser._id,
         },
         $push: {
           statusHistory: {
@@ -299,12 +302,6 @@ export const resolveDispute = async (req: Request, res: Response) => {
           message: `Booking status changed to "${currentBooking?.status || booking.status}" before the dispute could be resolved`
         }
       });
-    }
-
-    if (resolvedBooking.dispute) {
-      resolvedBooking.dispute.resolvedAt = new Date();
-      resolvedBooking.dispute.resolution = resolution;
-      resolvedBooking.dispute.resolvedBy = adminUser._id;
     }
 
     const finalExtraCostAmount = applyExtraCostUpdate(
