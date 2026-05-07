@@ -14,7 +14,6 @@ import {
 } from '../../utils/bookingHelpers';
 import { sendDisputeResolvedEmail } from '../../utils/emailService';
 
-const DISPUTE_BOOKING_STATES = ['dispute', 'in_dispute', 'under_review'] as const;
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
@@ -22,19 +21,14 @@ type DisputeResolutionAction = 'accept_professional' | 'reject_extra_costs' | 'a
 
 const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
-    return { status: COMPLETED_BOOKING_STATUS, 'dispute.resolvedAt': { $ne: null } };
+    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': { $ne: null } };
   }
 
   if (status === 'open') {
-    return { status: ACTIVE_DISPUTE_STATUS, 'dispute.resolvedAt': null };
+    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
   }
 
-  return {
-    $or: [
-      { status: ACTIVE_DISPUTE_STATUS },
-      { status: COMPLETED_BOOKING_STATUS, 'dispute.resolvedAt': { $ne: null } },
-    ]
-  };
+  return { 'dispute.raisedAt': { $exists: true } };
 };
 
 const applyExtraCostUpdate = (
@@ -211,12 +205,12 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
-    if (!DISPUTE_BOOKING_STATES.includes(String(booking.status) as typeof DISPUTE_BOOKING_STATES[number])) {
+    if (!booking.dispute?.raisedAt) {
       return res.status(400).json({
         success: false,
         error: {
           code: 'BOOKING_NOT_IN_DISPUTE',
-          message: `Booking ${bookingId} is not in a dispute state`
+          message: `Booking ${bookingId} has no dispute record`
         }
       });
     }
@@ -397,8 +391,8 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
       totalResolved,
       totalDisputes,
     ] = await Promise.all([
-      Booking.countDocuments({ status: ACTIVE_DISPUTE_STATUS, 'dispute.resolvedAt': null }),
-      Booking.countDocuments({ status: COMPLETED_BOOKING_STATUS, 'dispute.resolvedAt': { $ne: null } }),
+      Booking.countDocuments(buildDisputeFilter('open')),
+      Booking.countDocuments(buildDisputeFilter('resolved')),
       Booking.countDocuments(buildDisputeFilter()),
     ]);
 
