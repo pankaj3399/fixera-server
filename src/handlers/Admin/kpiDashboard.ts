@@ -208,12 +208,30 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
           completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
           bookedValue: {
             $sum: {
-              $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.amount', 0] }, 0],
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$status', 'completed'] },
+                    { $eq: [{ $ifNull: ['$payment.currency', null] }, REPORTING_CURRENCY] },
+                  ],
+                },
+                { $ifNull: ['$payment.amount', 0] },
+                0,
+              ],
             },
           },
           platformRevenue: {
             $sum: {
-              $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.platformCommission', 0] }, 0],
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$status', 'completed'] },
+                    { $eq: [{ $ifNull: ['$payment.currency', null] }, REPORTING_CURRENCY] },
+                  ],
+                },
+                { $ifNull: ['$payment.platformCommission', 0] },
+                0,
+              ],
             },
           },
           quotedCount: {
