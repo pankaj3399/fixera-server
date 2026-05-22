@@ -32,14 +32,19 @@ const parseCountry = (req: Request): string | null => {
   return raw;
 };
 
+const buildExactCountryRegex = (country: string): RegExp => {
+  const escaped = country.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}$`, 'i');
+};
+
 const buildBookingCountryMatch = (country: string | null) => {
   if (!country) return {};
-  return { 'location.country': { $regex: new RegExp(`^${country}$`, 'i') } };
+  return { 'location.country': { $regex: buildExactCountryRegex(country) } };
 };
 
 const buildUserCountryMatch = (country: string | null) => {
   if (!country) return {};
-  const rx = new RegExp(`^${country}$`, 'i');
+  const rx = buildExactCountryRegex(country);
   return {
     $or: [
       { 'location.country': rx },
@@ -103,12 +108,14 @@ const round1 = (n: number | null | undefined) => (n == null || !Number.isFinite(
 
 export const getKpiCountries = async (_req: Request, res: Response) => {
   try {
-    const [bookingCountries, userCountries] = await Promise.all([
+    const [bookingCountries, userLocationCountries, userCompanyAddressCountries, userBusinessInfoCountries] = await Promise.all([
       Booking.distinct('location.country'),
       User.distinct('location.country'),
+      User.distinct('companyAddress.country'),
+      User.distinct('businessInfo.country'),
     ]);
     const set = new Set<string>();
-    for (const c of [...bookingCountries, ...userCountries]) {
+    for (const c of [...bookingCountries, ...userLocationCountries, ...userCompanyAddressCountries, ...userBusinessInfoCountries]) {
       if (c && typeof c === 'string' && c.trim()) set.add(c.trim());
     }
     return res.json({ success: true, data: { countries: Array.from(set).sort((a, b) => a.localeCompare(b)) } });
@@ -184,10 +191,23 @@ export const getKpiSummary = async (req: Request, res: Response) => {
         },
       ]),
       Booking.countDocuments({ 'dispute.raisedAt': { $gte: from, $lte: to }, ...bookingCountryMatch }),
-      WarrantyClaim.countDocuments({ openedAt: { $gte: from, $lte: to } }),
+      WarrantyClaim.aggregate([
+        { $match: { openedAt: { $gte: from, $lte: to } } },
+        { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
+        { $unwind: { path: '$b', preserveNullAndEmptyArrays: true } },
+        ...(country ? [{ $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> }] : []),
+        { $count: 'total' },
+      ]),
       Booking.countDocuments({ status: 'refunded', updatedAt: { $gte: from, $lte: to }, ...bookingCountryMatch }),
       Booking.aggregate([
-        { $match: { status: 'refunded', updatedAt: { $gte: from, $lte: to }, ...bookingCountryMatch } },
+        {
+          $match: {
+            status: 'refunded',
+            updatedAt: { $gte: from, $lte: to },
+            ...bookingCountryMatch,
+            $expr: { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] },
+          },
+        },
         { $group: { _id: null, total: { $sum: { $ifNull: ['$payment.amount', 0] } } } },
       ]),
       Booking.countDocuments({ createdAt: { $gte: from, $lte: to }, ...bookingCountryMatch }),
@@ -265,13 +285,20 @@ export const getKpiSummary = async (req: Request, res: Response) => {
       ]),
       WarrantyClaim.aggregate([
         { $match: { openedAt: { $gte: from, $lte: to }, firstResponseAt: { $type: 'date' } } },
+        ...(country
+          ? [
+              { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
+              { $unwind: { path: '$b', preserveNullAndEmptyArrays: true } },
+              { $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> },
+            ]
+          : []),
         { $project: { hours: { $divide: [{ $subtract: ['$firstResponseAt', '$openedAt'] }, 1000 * 60 * 60] } } },
         { $group: { _id: null, avgHours: { $avg: '$hours' }, count: { $sum: 1 } } },
       ]),
       Booking.countDocuments({ createdAt: { $gte: from, $lte: to }, bookingType: 'professional', ...bookingCountryMatch }),
     ]);
 
-    const totalViews = await ServiceView.countDocuments({ createdAt: { $gte: from, $lte: to }, ...(country ? { country: new RegExp(`^${country}$`, 'i') } : {}) });
+    const totalViews = await ServiceView.countDocuments({ createdAt: { $gte: from, $lte: to }, ...(country ? { country: buildExactCountryRegex(country) } : {}) });
 
     const bs = bookingStats[0] || {};
     const rs = revenueStats[0] || {};
@@ -282,6 +309,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
     const ov = overdueStats[0] || {};
     const wr = warrantyResponseAgg[0] || {};
     const refundAmt = refundAmountAgg[0]?.total || 0;
+    const warrantyCountValue = warrantyCount[0]?.total || 0;
 
     const completedBookings = bs.completedBookings || 0;
     const quotedCount = bs.quotedCount || 0;
@@ -299,7 +327,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
         grossRevenue: Math.round((rs.grossRevenue || 0) * 100) / 100,
         platformRevenue: Math.round((rs.platformRevenue || 0) * 100) / 100,
         disputeRate: round1(safeRate(disputeCount, totalBookings)),
-        warrantyClaimRate: round1(safeRate(warrantyCount, totalBookings)),
+        warrantyClaimRate: round1(safeRate(warrantyCountValue, totalBookings)),
         refundRate: round1(safeRate(refundCount, totalBookings)),
         refundAmount: Math.round(refundAmt * 100) / 100,
         avgTimeToFirstQuoteHours: round1(ttfq.avgHours),
@@ -342,7 +370,7 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
     ]);
 
     const viewRows = await ServiceView.aggregate([
-      { $match: { createdAt: { $gte: from, $lte: to }, ...(country ? { country: new RegExp(`^${country}$`, 'i') } : {}) } },
+      { $match: { createdAt: { $gte: from, $lte: to }, ...(country ? { country: buildExactCountryRegex(country) } : {}) } },
       {
         $group: {
           _id: { $cond: [{ $or: [{ $eq: ['$city', null] }, { $eq: [{ $trim: { input: { $ifNull: ['$city', ''] } } }, ''] }] }, '__unknown__', { $toLower: { $trim: { input: '$city' } } }] },
@@ -372,7 +400,7 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
       { $match: { openedAt: { $gte: from, $lte: to } } },
       { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
       { $unwind: { path: '$b', preserveNullAndEmptyArrays: true } },
-      ...(country ? [{ $match: { 'b.location.country': new RegExp(`^${country}$`, 'i') } as Record<string, unknown> }] : []),
+      ...(country ? [{ $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> }] : []),
       {
         $group: {
           _id: {
@@ -442,7 +470,7 @@ export const getKpiByService = async (req: Request, res: Response) => {
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
     const viewRows = await ServiceView.aggregate([
-      { $match: { createdAt: { $gte: from, $lte: to }, ...(country ? { country: new RegExp(`^${country}$`, 'i') } : {}) } },
+      { $match: { createdAt: { $gte: from, $lte: to }, ...(country ? { country: buildExactCountryRegex(country) } : {}) } },
       { $group: { _id: '$serviceId', views: { $sum: 1 } } },
     ]);
 
