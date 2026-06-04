@@ -244,13 +244,12 @@ export const getDisputes = async (req: Request, res: Response) => {
     ]);
 
     const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
-    const mergedDisputes = pageNum === 1 ? [...externalRows, ...disputes] : disputes;
 
     return res.json({
       success: true,
       data: {
-        disputes: mergedDisputes,
-        externalCount: externalRows.length,
+        disputes,
+        externalDisputes: externalRows,
         pagination: {
           page: pageNum,
           limit: limitNum,
@@ -389,6 +388,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     if (targetStatus === COMPLETED_BOOKING_STATUS) {
       setFields.actualEndDate = completionDate;
     }
+    const originalResolutionAttachments = (booking.dispute as any)?.resolutionAttachments;
     if (sanitizedAttachments.length > 0) {
       setFields['dispute.resolutionAttachments'] = sanitizedAttachments;
     }
@@ -478,6 +478,10 @@ export const resolveDispute = async (req: Request, res: Response) => {
           else rollbackUnset.extraCostTotal = '';
           if (originalAdminAdjustedAmount !== undefined) rollbackSet['dispute.adminAdjustedAmount'] = originalAdminAdjustedAmount;
           else rollbackUnset['dispute.adminAdjustedAmount'] = '';
+        }
+        if (sanitizedAttachments.length > 0) {
+          if (originalResolutionAttachments !== undefined) rollbackSet['dispute.resolutionAttachments'] = originalResolutionAttachments;
+          else rollbackUnset['dispute.resolutionAttachments'] = '';
         }
         await Booking.updateOne(
           { _id: resolvedBooking._id },
