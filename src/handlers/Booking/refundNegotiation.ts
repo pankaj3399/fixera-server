@@ -41,31 +41,9 @@ const finalizeRefund = async (
     return { ok: false, status: 409, message: 'This refund request is already being processed' };
   }
 
+  let result;
   try {
-    const result = await executeRefund(String(booking._id), { amount, reason });
-    request.status = 'approved';
-    request.resolvedAt = new Date();
-    request.refundAmount = result.amount;
-    request.refundedAt = new Date();
-    await request.save();
-
-    booking.status = REFUND_FINALIZED_BOOKING_STATUS;
-    booking.cancellation = {
-      cancelledBy: request.requestedBy,
-      reason,
-      cancelledAt: new Date(),
-      refundAmount: result.amount,
-    } as any;
-    booking.statusHistory = booking.statusHistory || [];
-    booking.statusHistory.push({
-      status: REFUND_FINALIZED_BOOKING_STATUS,
-      timestamp: new Date(),
-      updatedBy: request.requestedBy,
-      note: `Refund issued (${result.amount}) — ${reason}`,
-    });
-    await booking.save();
-
-    return { ok: true, refundAmount: result.amount };
+    result = await executeRefund(String(booking._id), { amount, reason });
   } catch (error: any) {
     await CancellationRequest.updateOne(
       { _id: request._id, status: 'processing' },
@@ -76,6 +54,30 @@ const finalizeRefund = async (
     }
     throw error;
   }
+
+  request.status = 'approved';
+  request.resolvedAt = new Date();
+  request.refundAmount = result.amount;
+  request.refundedAt = new Date();
+  await request.save();
+
+  booking.status = REFUND_FINALIZED_BOOKING_STATUS;
+  booking.cancellation = {
+    cancelledBy: request.requestedBy,
+    reason,
+    cancelledAt: new Date(),
+    refundAmount: result.amount,
+  } as any;
+  booking.statusHistory = booking.statusHistory || [];
+  booking.statusHistory.push({
+    status: REFUND_FINALIZED_BOOKING_STATUS,
+    timestamp: new Date(),
+    updatedBy: request.requestedBy,
+    note: `Refund issued (${result.amount}) — ${reason}`,
+  });
+  await booking.save();
+
+  return { ok: true, refundAmount: result.amount };
 };
 
 const escalateRequest = async (
