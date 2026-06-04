@@ -331,18 +331,23 @@ export const createPaymentIntent = async (
         };
       }
     }
+    const commissionedExtraOptionsTotal = +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+    let milestoneExtraOptionsCharge = 0;
     if (selectedExtraOptionsTotal > 0) {
       if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
         const minOrder = Math.min(...booking.milestonePayments.map((m: any) => m.order ?? 0));
         if (milestoneOrder === minOrder) {
-          chargeAmount += selectedExtraOptionsTotal;
+          milestoneExtraOptionsCharge = commissionedExtraOptionsTotal;
+          chargeAmount += milestoneExtraOptionsCharge;
         }
       } else {
-        chargeAmount += selectedExtraOptionsTotal;
+        chargeAmount += commissionedExtraOptionsTotal;
       }
     }
 
-    const fullBookingAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
+    const fullBookingAmount = +(
+      booking.quote.amount * (1 + commissionPercent / 100) + milestoneExtraOptionsCharge
+    ).toFixed(2);
 
     let codeInfo: any = null;
     if (discountCode) {

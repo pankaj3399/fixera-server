@@ -12,7 +12,8 @@ import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
 import { sendBookingCancelledEmail, sendCancellationRequestRaisedEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
-import CancellationRequest from "../../models/cancellationRequest";
+import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
+import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
@@ -1237,7 +1238,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
   try {
     const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
-    const { reason } = req.body;
+    const { reason, evidence } = req.body;
 
     if (!userId) {
       return res.status(401).json({ success: false, msg: "Authentication required" });
@@ -1275,7 +1276,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
     const existingPending = await CancellationRequest.findOne({
       booking: booking._id,
-      status: { $in: ['pending', 'processing'] },
+      status: { $in: ACTIVE_CANCELLATION_STATUSES },
     });
     if (existingPending) {
       return res.status(409).json({
@@ -1285,18 +1286,23 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     const requestedRole: 'customer' | 'professional' = isCustomer ? 'customer' : 'professional';
+    const sanitizedEvidence = Array.isArray(evidence)
+      ? evidence.filter((value: unknown): value is string => typeof value === 'string').slice(0, 10)
+      : [];
     const cancellationRequest = await CancellationRequest.create({
       booking: booking._id,
       requestedBy: new mongoose.Types.ObjectId(userId),
       requestedRole,
       reason: trimmedReason,
+      evidence: sanitizedEvidence,
       status: 'pending',
+      ...(isCustomer ? { responseDeadline: addBusinessDays(new Date(), REFUND_RESPONSE_BUSINESS_DAYS) } : {}),
     });
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
         booking.customer ? User.findById(booking.customer).select('email name').lean() : null,
-        booking.professional ? User.findById(booking.professional).select('email name businessInfo').lean() : null,
+        booking.professional ? User.findById(booking.professional).select('email name businessInfo username').lean() : null,
       ]);
       const requesterName = isCustomer
         ? customerUser?.name || 'Customer'
@@ -1320,7 +1326,9 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
     return res.status(201).json({
       success: true,
-      msg: "Cancellation request submitted for admin review",
+      msg: isCustomer
+        ? "Refund request sent to the professional. They have 5 business days to respond before it escalates to Fixera."
+        : "Cancellation request submitted for admin review",
       cancellationRequest,
     });
   } catch (error: any) {

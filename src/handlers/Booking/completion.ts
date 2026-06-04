@@ -81,6 +81,19 @@ const computeCustomerLoyaltyDiscount = async (customer: any, commissionInclusive
   }
 };
 
+const computeExtraCostCustomerCharge = async (customer: any, extraCostTotal: number) => {
+  const commissionPercent = await getPlatformCommissionPercent();
+  const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
+  const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
+  const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
+  const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
+  (loyalty as any).cappedAmount = cappedLoyalty;
+  (loyalty as any).amount = cappedLoyalty;
+  const customerChargeAmount = Math.max(0, roundToTwo(subtotalInclCommission - cappedLoyalty));
+  const platformCommissionAmount = roundToTwo(subtotalInclCommission - extraCostTotal - cappedLoyalty);
+  return { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerChargeAmount, platformCommissionAmount };
+};
+
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
   let attachmentUrls: string[] = [];
   let attachmentKeys: string[] = [];
@@ -341,14 +354,17 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
     completionSaved = true;
 
     try {
-      const customerUser = updatedBooking.customer ? await User.findById(updatedBooking.customer).select('email name').lean() : null;
-      const professionalUser = await User.findById(authUser._id).select('email name businessInfo').lean();
+      const customerUser = updatedBooking.customer ? await User.findById(updatedBooking.customer).lean() : null;
+      const professionalUser = await User.findById(authUser._id).select('email name username').lean();
       if (customerUser?.email) {
+        const emailExtraCostTotal = extraCostTotal > 0
+          ? (await computeExtraCostCustomerCharge(customerUser, extraCostTotal)).customerChargeAmount
+          : extraCostTotal;
         await sendProfessionalCompletedEmail(
           customerUser.email,
           customerUser.name || 'Customer',
           getProfessionalDisplayName(professionalUser),
-          extraCostTotal,
+          emailExtraCostTotal,
           String(updatedBooking._id),
           (updatedBooking as any).payment?.currency || 'EUR'
         );
@@ -450,15 +466,8 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     }
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
-    const commissionPercent = await getPlatformCommissionPercent();
-    const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
-    const loyalty = await computeCustomerLoyaltyDiscount(booking.customer as any, subtotalInclCommission);
-    // Cap the loyalty discount to the platform's commission margin so the professional is never short-paid.
-    const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
-    const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
-    (loyalty as any).cappedAmount = cappedLoyalty;
-    const customerChargeAmount = Math.max(0, roundToTwo(subtotalInclCommission - cappedLoyalty));
-    const platformCommissionAmount = roundToTwo(subtotalInclCommission - extraCostTotal - cappedLoyalty);
+    const { subtotalInclCommission, loyalty, customerChargeAmount, platformCommissionAmount } =
+      await computeExtraCostCustomerCharge(booking.customer as any, extraCostTotal);
     const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformCommissionAmount), currency);
 
     const paymentIntent = await stripe.paymentIntents.create({

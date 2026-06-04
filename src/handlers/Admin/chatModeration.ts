@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import ChatReport from "../../models/chatReport";
 import ChatMessage from "../../models/chatMessage";
 import Conversation from "../../models/conversation";
+import Booking from "../../models/booking";
 import User from "../../models/user";
 
 const VALID_STATUSES = ["pending", "reviewed", "dismissed"] as const;
@@ -319,6 +320,11 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
       }
     }
 
+    if (conversation.status !== "active") {
+      conversation.status = "active";
+      await conversation.save();
+    }
+
     const message = await ChatMessage.create({
       conversationId: conversation._id,
       senderId: adminObjectId,
@@ -346,5 +352,124 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("Admin start support chat error:", error);
     return res.status(500).json({ success: false, msg: "Failed to start support chat" });
+  }
+};
+
+export const adminReplySupportChat = async (req: Request, res: Response) => {
+  try {
+    const adminIdRaw = (req as any).admin?._id ?? (req as any).user?._id;
+    const adminId = adminIdRaw?.toString();
+    const { id } = req.params;
+    const { text } = req.body || {};
+    if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
+      return res.status(401).json({ success: false, msg: "Unauthorized" });
+    }
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: "Invalid conversation id" });
+    }
+    if (typeof text !== "string" || !text.trim() || text.length > 2000) {
+      return res.status(400).json({ success: false, msg: "text is required (max 2000 chars)" });
+    }
+
+    const conversation = await Conversation.findById(id);
+    if (!conversation || conversation.type !== "support") {
+      return res.status(404).json({ success: false, msg: "Support conversation not found" });
+    }
+    if (!conversation.supportAdminId || conversation.supportAdminId.toString() !== adminId) {
+      return res.status(403).json({ success: false, msg: "Forbidden" });
+    }
+    if (conversation.status !== "active") {
+      return res.status(409).json({ success: false, msg: "This support conversation is closed" });
+    }
+
+    const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    const targetUser = await User.findById(conversation.supportTargetUserId).select("role").lean();
+    const unreadField = targetUser?.role === "professional" ? "professionalUnreadCount" : "customerUnreadCount";
+
+    const claimed = await Conversation.findOneAndUpdate(
+      { _id: conversation._id, type: "support", status: "active", supportAdminId: adminObjectId },
+      {
+        $set: {
+          lastMessageAt: new Date(),
+          lastMessagePreview: text.trim().slice(0, 200),
+          lastMessageSenderId: adminObjectId,
+        },
+        $inc: { [unreadField]: 1 },
+      }
+    );
+    if (!claimed) {
+      return res.status(409).json({ success: false, msg: "This support conversation is closed" });
+    }
+
+    const message = await ChatMessage.create({
+      conversationId: conversation._id,
+      senderId: adminObjectId,
+      senderRole: "admin",
+      text: text.trim(),
+      messageType: "text",
+      readBy: [{ userId: adminObjectId, readAt: new Date() }],
+    });
+
+    return res.status(201).json({ success: true, data: { messageId: message._id } });
+  } catch (error: any) {
+    console.error("Admin reply support chat error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to send message" });
+  }
+};
+
+export const adminCloseSupportChat = async (req: Request, res: Response) => {
+  try {
+    const adminIdRaw = (req as any).admin?._id ?? (req as any).user?._id;
+    const adminId = adminIdRaw?.toString();
+    const { id } = req.params;
+    if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
+      return res.status(401).json({ success: false, msg: "Unauthorized" });
+    }
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: "Invalid conversation id" });
+    }
+    const conversation = await Conversation.findById(id);
+    if (!conversation || conversation.type !== "support") {
+      return res.status(404).json({ success: false, msg: "Support conversation not found" });
+    }
+    if (!conversation.supportAdminId || conversation.supportAdminId.toString() !== adminId) {
+      return res.status(403).json({ success: false, msg: "Forbidden" });
+    }
+    conversation.status = "archived";
+    await conversation.save();
+    return res.json({ success: true, data: { conversationId: conversation._id, status: "archived" } });
+  } catch (error: any) {
+    console.error("Admin close support chat error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to close support chat" });
+  }
+};
+
+export const adminGetBookingConversation = async (req: Request, res: Response) => {
+  try {
+    const { bookingId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ success: false, msg: "Invalid booking id" });
+    }
+    const booking = await Booking.findById(bookingId).select("customer professional").lean();
+    if (!booking) {
+      return res.status(404).json({ success: false, msg: "Booking not found" });
+    }
+    if (!booking.customer || !booking.professional) {
+      return res.status(404).json({ success: false, msg: "Booking has no customer-professional conversation" });
+    }
+    const conversation = await Conversation.findOne({
+      type: "direct",
+      customerId: booking.customer,
+      professionalId: booking.professional,
+    })
+      .select("_id")
+      .lean();
+    if (!conversation) {
+      return res.status(404).json({ success: false, msg: "No conversation found between customer and professional" });
+    }
+    return res.json({ success: true, data: { conversationId: conversation._id } });
+  } catch (error: any) {
+    console.error("Admin get booking conversation error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load booking conversation" });
   }
 };

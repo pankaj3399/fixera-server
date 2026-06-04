@@ -2219,6 +2219,98 @@ export const sendCancellationRequestRaisedEmail = async (params: {
   return adminSent && otherSent;
 };
 
+// Professional counter-offered a refund amount → customer
+export const sendRefundCounterOfferEmail = async (params: {
+  customerEmail: string;
+  customerName: string;
+  professionalName: string;
+  amount: number;
+  note?: string;
+  bookingId: string;
+  currency?: string;
+}): Promise<boolean> => {
+  const { customerEmail, customerName, professionalName, amount, note, bookingId, currency } = params;
+  const link = buildBookingLink(bookingId);
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Refund Counter-Offer')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(customerName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(professionalName)}</strong> has proposed a refund of
+          <strong>${formatCurrency(amount, currency || 'EUR')}</strong> for your booking.
+        </p>
+        ${note ? `<div style="background: #eef2ff; border-left: 4px solid #6366f1; padding: 15px; margin: 20px 0;"><p style="color: #333; margin: 0;">${escapeHtml(note)}</p></div>` : ''}
+        <p style="color: #666; line-height: 1.6;">Open your booking to accept the offer or refuse and escalate to Fixera.</p>
+        ${buildEmailButton(link, 'Review Offer', '#6366f1')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(customerEmail, 'Refund Counter-Offer - Fixera', content, {
+    template: 'refund_counter_offer',
+    relatedBooking: bookingId,
+  });
+};
+
+// Refund negotiation escalated → admin (and customer notice)
+export const sendRefundEscalatedEmail = async (params: {
+  bookingId: string;
+  reason: 'rejected' | 'refused' | 'no_response';
+  customerEmail?: string;
+  customerName?: string;
+}): Promise<boolean> => {
+  const { bookingId, reason, customerEmail, customerName } = params;
+  const link = buildBookingLink(bookingId);
+  const adminEmail = ADMIN_EMAIL_FALLBACK();
+  const reasonText =
+    reason === 'rejected' ? 'the professional rejected the refund request'
+    : reason === 'refused' ? 'the customer refused the counter-offer'
+    : 'the professional did not respond within 5 business days';
+
+  const adminContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Refund Escalated')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">A refund needs Fixera review</h2>
+        <p style="color: #666; line-height: 1.6;">A refund request has been escalated because ${reasonText}.</p>
+        ${buildEmailButton(link, 'View Booking', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  let adminSent = true;
+  if (adminEmail) {
+    adminSent = await sendEmail(adminEmail, 'Refund Escalated - Fixera Admin Review', adminContent, {
+      template: 'refund_escalated',
+      relatedBooking: bookingId,
+    });
+  } else {
+    console.error('[refund_escalated] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified');
+    adminSent = false;
+  }
+
+  if (customerEmail) {
+    const customerContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        ${getEmailHeader('Refund Escalated to Fixera')}
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(customerName || 'Customer')},</h2>
+          <p style="color: #666; line-height: 1.6;">Your refund request has been escalated to Fixera for review. We'll be in touch shortly.</p>
+          ${buildEmailButton(link, 'View Booking', '#dc2626')}
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+    await sendEmail(customerEmail, 'Refund Escalated to Fixera', customerContent, {
+      template: 'refund_escalated_customer',
+      relatedBooking: bookingId,
+    });
+  }
+
+  return adminSent;
+};
+
 // Refund denied → requester
 export const sendRefundDeniedEmail = async (params: {
   requesterEmail: string;

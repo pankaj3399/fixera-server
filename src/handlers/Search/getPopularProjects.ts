@@ -4,9 +4,10 @@ import User from "../../models/user";
 import { aggregateProjectRatings } from "./aggregateRatings";
 
 /**
- * Get popular published projects for the homepage carousel.
- * Ranked by number of completed bookings, with a recency fallback
- * for projects that have no bookings yet.
+ * Get popular published projects for the homepage / service carousels.
+ * Ranked by a composite popularity score (completed bookings, engaged
+ * bookings and favorites), with a recency fallback for projects that have
+ * no engagement yet.
  */
 export const getPopularProjects = async (req: Request, res: Response) => {
   try {
@@ -21,12 +22,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
 
     const match: Record<string, unknown> = { status: "published" };
     if (serviceFilter) {
-      const slugified = serviceFilter.toLowerCase().replace(/\s+/g, "-").replace(/-+/g, "-");
-      const humanized = serviceFilter.replace(/-+/g, " ").trim();
-      const variants = Array.from(
-        new Set([serviceFilter, slugified, humanized].filter(Boolean))
-      ).map(escapeRegex);
-      match.service = { $regex: `^(${variants.join("|")})$`, $options: "i" };
+      match.service = { $regex: `^${escapeRegex(serviceFilter)}$`, $options: "i" };
     }
 
     const projects: any[] = await Project.aggregate([
@@ -39,22 +35,59 @@ export const getPopularProjects = async (req: Request, res: Response) => {
             {
               $match: {
                 $expr: { $eq: ["$project", "$$projectId"] },
-                status: "completed",
+                status: { $in: ["booked", "in_progress", "professional_completed", "completed"] },
               },
             },
-            { $count: "count" },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                completed: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+              },
+            },
           ],
           as: "bookingStats",
         },
       },
       {
+        $lookup: {
+          from: "favorites",
+          let: { projectId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$targetType", "project"] },
+                    { $eq: ["$targetId", "$$projectId"] },
+                  ],
+                },
+              },
+            },
+            { $count: "count" },
+          ],
+          as: "favoriteStats",
+        },
+      },
+      {
         $addFields: {
-          bookingCount: {
-            $ifNull: [{ $arrayElemAt: ["$bookingStats.count", 0] }, 0],
+          completedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.completed", 0] }, 0] },
+          engagedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.total", 0] }, 0] },
+          favoriteCount: { $ifNull: [{ $arrayElemAt: ["$favoriteStats.count", 0] }, 0] },
+        },
+      },
+      {
+        $addFields: {
+          popularityScore: {
+            $add: [
+              { $multiply: ["$completedBookings", 5] },
+              { $multiply: ["$engagedBookings", 2] },
+              "$favoriteCount",
+            ],
           },
         },
       },
-      { $sort: { bookingCount: -1, createdAt: -1 } },
+      { $sort: { popularityScore: -1, completedBookings: -1, createdAt: -1 } },
       { $limit: limitNum },
       {
         $project: {

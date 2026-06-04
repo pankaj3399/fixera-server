@@ -14,7 +14,8 @@ import {
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { auditLog } from "../../utils/auditLogger";
 
-const VALID_STATUSES = ["pending", "processing", "approved", "denied"] as const;
+const VALID_STATUSES = ["pending", "processing", "negotiating", "escalated", "approved", "denied"] as const;
+const ADMIN_ACTIONABLE_STATUSES = ["pending", "escalated"];
 
 const parsePagination = (query: any) => {
   const page = Math.max(1, Math.floor(Number(query.page) || 1));
@@ -101,8 +102,16 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     }
 
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    const priorDoc = await CancellationRequest.findById(id).select("status").lean();
+    if (!priorDoc) {
+      return res.status(404).json({ success: false, msg: "Cancellation request not found" });
+    }
+    const priorStatus = priorDoc.status;
+    if (!ADMIN_ACTIONABLE_STATUSES.includes(priorStatus)) {
+      return res.status(409).json({ success: false, msg: `Request is already ${priorStatus}` });
+    }
     const cancellation = await CancellationRequest.findOneAndUpdate(
-      { _id: id, status: "pending" },
+      { _id: id, status: priorStatus },
       { $set: { status: "processing", resolvedBy: adminObjectId, resolvedAt: new Date() } },
       { new: true }
     );
@@ -118,7 +127,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     if (!booking) {
       await CancellationRequest.updateOne(
         { _id: cancellation._id, status: "processing" },
-        { $set: { status: "pending" }, $unset: { resolvedBy: "", resolvedAt: "" } }
+        { $set: { status: priorStatus }, $unset: { resolvedBy: "", resolvedAt: "" } }
       );
       return res.status(404).json({ success: false, msg: "Linked booking not found" });
     }
@@ -139,7 +148,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       } catch (error: any) {
         await CancellationRequest.updateOne(
           { _id: cancellation._id, status: "processing" },
-          { $set: { status: "pending" }, $unset: { resolvedBy: "", resolvedAt: "" } }
+          { $set: { status: priorStatus }, $unset: { resolvedBy: "", resolvedAt: "" } }
         );
         if (error instanceof RefundError) {
           return res.status(error.httpStatus).json({
@@ -193,7 +202,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     try {
       const [customerUser, professionalUser] = await Promise.all([
         freshBooking.customer ? User.findById(freshBooking.customer).select("email name").lean() : null,
-        freshBooking.professional ? User.findById(freshBooking.professional).select("email name businessInfo").lean() : null,
+        freshBooking.professional ? User.findById(freshBooking.professional).select("email name businessInfo username").lean() : null,
       ]);
       if (customerUser?.email && professionalUser?.email) {
         await sendBookingCancelledEmail(
@@ -272,7 +281,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
 
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
     const cancellation = await CancellationRequest.findOneAndUpdate(
-      { _id: id, status: "pending" },
+      { _id: id, status: { $in: ADMIN_ACTIONABLE_STATUSES } },
       {
         $set: {
           status: "denied",
@@ -282,7 +291,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
         },
       },
       { new: true }
-    ).populate("requestedBy", "email name businessInfo");
+    ).populate("requestedBy", "email name businessInfo username");
     if (!cancellation) {
       const existing = await CancellationRequest.findById(id).lean();
       if (!existing) {

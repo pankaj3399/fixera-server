@@ -344,7 +344,7 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
     if (booking.payment.status === 'pending') {
       try {
         const customerUser = booking.customer ? await User.findById(booking.customer).select('email name').lean() : null;
-        const professionalUser = booking.professional ? await User.findById(booking.professional).select('email name businessInfo').lean() : null;
+        const professionalUser = booking.professional ? await User.findById(booking.professional).select('email name businessInfo username').lean() : null;
         if (customerUser?.email && professionalUser?.email) {
           const amountPaid = (booking.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
           await sendPaymentConfirmedEmail(

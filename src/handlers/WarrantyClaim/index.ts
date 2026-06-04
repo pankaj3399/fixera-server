@@ -705,7 +705,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
     try {
       const [customerUser, professionalUser] = await Promise.all([
         User.findById(booking.customer).select('email name').lean(),
-        User.findById(professionalId).select('email name businessInfo').lean(),
+        User.findById(professionalId).select('email name businessInfo username').lean(),
       ]);
       if (professionalUser?.email && WARRANTY_ADMIN_NOTIFICATIONS_EMAIL) {
         await sendWarrantyClaimOpenedEmail(
@@ -950,7 +950,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
     try {
       const [customerUser, professionalUser] = await Promise.all([
         User.findById(claim.customer).select('email name').lean(),
-        User.findById(claim.professional).select('name businessInfo').lean(),
+        User.findById(claim.professional).select('name businessInfo username').lean(),
       ]);
       if (customerUser?.email) {
         await sendWarrantyProposalSentEmail(

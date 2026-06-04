@@ -21,6 +21,12 @@ import {
   extendBookingExecution,
 } from '../../handlers/Booking/payment-integration';
 import { getDiscountPreview } from '../../handlers/Booking/discountPreview';
+import {
+  listProfessionalRefundRequests,
+  getBookingCancellationRequest,
+  professionalRespondToCancellation,
+  customerRespondToCounterOffer,
+} from '../../handlers/Booking/refundNegotiation';
 import { submitCustomerReview, submitProfessionalReview, replyToCustomerReview } from '../../handlers/Booking/reviews';
 import {
   professionalCompleteBooking,
@@ -51,6 +57,9 @@ router.get('/my-payments', getMyPayments);
 
 // Get disputes for the current user (customer or professional party)
 router.get('/disputes/mine', getMyDisputes);
+
+// Professional's incoming customer refund requests (must precede /:bookingId)
+router.get('/refund-requests', listProfessionalRefundRequests);
 
 // Get single booking by ID
 router.get('/:bookingId', getBookingById);
@@ -84,6 +93,11 @@ router.post('/:bookingId/dispute-upload', upload.array('files', 10), uploadDispu
 
 // Cancel booking
 router.post('/:bookingId/cancel', cancelBooking);
+
+// Customer-triggered refund negotiation (customer ↔ professional)
+router.get('/:bookingId/cancellation', getBookingCancellationRequest);
+router.post('/:bookingId/cancellation/respond', professionalRespondToCancellation);
+router.post('/:bookingId/cancellation/counter-response', customerRespondToCounterOffer);
 
 // Reviews
 router.post('/:bookingId/customer-review', uploadReviewImages.array('images', 2), submitCustomerReview);
