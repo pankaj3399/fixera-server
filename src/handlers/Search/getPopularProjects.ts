@@ -22,12 +22,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
 
     const match: Record<string, unknown> = { status: "published" };
     if (serviceFilter) {
-      const slugified = serviceFilter.toLowerCase().replace(/\s+/g, "-").replace(/-+/g, "-");
-      const humanized = serviceFilter.replace(/-+/g, " ").trim();
-      const variants = Array.from(
-        new Set([serviceFilter, slugified, humanized].filter(Boolean))
-      ).map(escapeRegex);
-      match.service = { $regex: `^(${variants.join("|")})$`, $options: "i" };
+      match.service = { $regex: `^${escapeRegex(serviceFilter)}$`, $options: "i" };
     }
 
     const projects: any[] = await Project.aggregate([

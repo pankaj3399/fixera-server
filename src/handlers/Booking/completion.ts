@@ -88,6 +88,7 @@ const computeExtraCostCustomerCharge = async (customer: any, extraCostTotal: num
   const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
   const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
   (loyalty as any).cappedAmount = cappedLoyalty;
+  (loyalty as any).amount = cappedLoyalty;
   const customerChargeAmount = Math.max(0, roundToTwo(subtotalInclCommission - cappedLoyalty));
   const platformCommissionAmount = roundToTwo(subtotalInclCommission - extraCostTotal - cappedLoyalty);
   return { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerChargeAmount, platformCommissionAmount };

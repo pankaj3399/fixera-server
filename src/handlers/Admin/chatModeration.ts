@@ -375,6 +375,9 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     if (!conversation || conversation.type !== "support") {
       return res.status(404).json({ success: false, msg: "Support conversation not found" });
     }
+    if (!conversation.supportAdminId || conversation.supportAdminId.toString() !== adminId) {
+      return res.status(403).json({ success: false, msg: "Forbidden" });
+    }
     if (conversation.status !== "active") {
       return res.status(409).json({ success: false, msg: "This support conversation is closed" });
     }
@@ -409,13 +412,21 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
 
 export const adminCloseSupportChat = async (req: Request, res: Response) => {
   try {
+    const adminIdRaw = (req as any).admin?._id ?? (req as any).user?._id;
+    const adminId = adminIdRaw?.toString();
     const { id } = req.params;
+    if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
+      return res.status(401).json({ success: false, msg: "Unauthorized" });
+    }
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, msg: "Invalid conversation id" });
     }
     const conversation = await Conversation.findById(id);
     if (!conversation || conversation.type !== "support") {
       return res.status(404).json({ success: false, msg: "Support conversation not found" });
+    }
+    if (!conversation.supportAdminId || conversation.supportAdminId.toString() !== adminId) {
+      return res.status(403).json({ success: false, msg: "Forbidden" });
     }
     conversation.status = "archived";
     await conversation.save();

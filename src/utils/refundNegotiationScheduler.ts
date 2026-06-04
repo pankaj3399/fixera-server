@@ -27,10 +27,11 @@ export const runRefundNegotiationSlaCheck = async (): Promise<RefundSlaCheckResu
 
   for (const request of overdue) {
     try {
-      request.status = "escalated";
-      request.escalatedAt = new Date();
-      request.escalationReason = "no_response";
-      await request.save();
+      const updateResult = await CancellationRequest.updateOne(
+        { _id: request._id, status: "pending", responseDeadline: { $lte: now } },
+        { $set: { status: "escalated", escalatedAt: new Date(), escalationReason: "no_response" } }
+      );
+      if (updateResult.modifiedCount === 0) continue;
       stats.escalated++;
 
       try {

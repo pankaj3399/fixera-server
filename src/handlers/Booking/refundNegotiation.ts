@@ -29,6 +29,18 @@ const finalizeRefund = async (
   amount: number | undefined,
   reason: string
 ): Promise<{ ok: true; refundAmount: number } | { ok: false; status: number; message: string; code?: string }> => {
+  if (request.status === 'approved' || request.refundedAt) {
+    return { ok: true, refundAmount: request.refundAmount || 0 };
+  }
+
+  const claimed = await CancellationRequest.findOneAndUpdate(
+    { _id: request._id, status: { $in: ['pending', 'negotiating'] } },
+    { $set: { status: 'processing' } }
+  );
+  if (!claimed) {
+    return { ok: false, status: 409, message: 'This refund request is already being processed' };
+  }
+
   try {
     const result = await executeRefund(String(booking._id), { amount, reason });
     request.status = 'approved';
@@ -55,6 +67,10 @@ const finalizeRefund = async (
 
     return { ok: true, refundAmount: result.amount };
   } catch (error: any) {
+    await CancellationRequest.updateOne(
+      { _id: request._id, status: 'processing' },
+      { $set: { status: claimed.status } }
+    ).catch(() => null);
     if (error instanceof RefundError) {
       return { ok: false, status: error.httpStatus, message: error.message, code: error.code };
     }
@@ -134,6 +150,9 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
     if (!userId) return res.status(401).json({ success: false, msg: 'Authentication required' });
     if (!['approve', 'counter', 'reject'].includes(decision)) {
       return res.status(400).json({ success: false, msg: 'decision must be approve, counter, or reject' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ success: false, msg: 'Invalid booking id' });
     }
 
     const booking = await Booking.findById(bookingId);
@@ -221,6 +240,9 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
     if (!userId) return res.status(401).json({ success: false, msg: 'Authentication required' });
     if (!['accept', 'refuse'].includes(decision)) {
       return res.status(400).json({ success: false, msg: 'decision must be accept or refuse' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ success: false, msg: 'Invalid booking id' });
     }
 
     const booking = await Booking.findById(bookingId);

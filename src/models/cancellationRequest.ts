@@ -96,7 +96,7 @@ const CancellationRequestSchema = new Schema<ICancellationRequest>(
   { timestamps: true }
 );
 
-const ACTIVE_CANCELLATION_STATUSES = ["pending", "processing", "negotiating", "escalated"];
+export const ACTIVE_CANCELLATION_STATUSES = ["pending", "processing", "negotiating", "escalated"];
 
 CancellationRequestSchema.index({ booking: 1, status: 1 });
 CancellationRequestSchema.index(

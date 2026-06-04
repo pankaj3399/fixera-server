@@ -112,7 +112,8 @@ export const getPendingProjects = async (req: Request, res: Response) => {
                         email: professional.email,
                         phone: professional.phone,
                         businessInfo: professional.businessInfo,
-                        professionalStatus: professional.professionalStatus
+                        professionalStatus: professional.professionalStatus,
+                        username: professional.username
                     } : null
                 };
                 return await presignProjectFiles(base);
@@ -428,7 +429,8 @@ export const getApprovedProjects = async (req: Request, res: Response) => {
                         email: professional.email,
                         phone: professional.phone,
                         businessInfo: professional.businessInfo,
-                        professionalStatus: professional.professionalStatus
+                        professionalStatus: professional.professionalStatus,
+                        username: professional.username
                     } : null
                 };
                 return await presignProjectFiles(base);

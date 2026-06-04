@@ -878,24 +878,24 @@ export const exportKpiCsv = async (req: Request, res: Response) => {
       rows = data.map((r) => [r.city, r.signUps, r.views, r.totalBookings, r.completedBookings, Number(r.bookedValue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.disputeRate, r.warrantyClaimRate, r.refundRate]);
     } else if (section === 'service') {
       const data = ((await captureJson(getKpiByService, req))?.data?.serviceBookings || []) as Row[];
-      headers = ['Service type', 'RFQs', 'Quotes sent', 'Bookings', 'Completed', 'Gross revenue (EUR)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
-      rows = data.map((r) => [r.serviceType, r.totalRfqs, r.quotedCount, r.bookingsCount, r.completedCount, r.grossRevenue, r.quotationConversionRate, r.avgTtfqHours ?? '']);
+      headers = ['Service type', 'RFQs', 'Quotes sent', 'Bookings', 'Completed', 'Gross revenue (EUR)', 'Platform revenue (EUR)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
+      rows = data.map((r) => [r.serviceType, r.totalRfqs, r.quotedCount, r.bookingsCount, r.completedCount, r.grossRevenue, Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.avgTtfqHours ?? '']);
     } else if (section === 'service-views') {
       const data = ((await captureJson(getKpiByService, req))?.data?.serviceViews || []) as Row[];
       headers = ['Service slug', 'Views'];
       rows = data.map((r) => [r.serviceId, r.views]);
     } else if (section === 'subproject') {
       const data = ((await captureJson(getKpiBySubproject, req))?.data?.rows || []) as Row[];
-      headers = ['Project', 'Subproject', 'RFQs', 'Bookings', 'Completed', 'Disputes', 'Refunds', 'Reschedules', 'Gross revenue (EUR)', 'Price'];
-      rows = data.map((r) => [r.projectTitle, r.subprojectName, r.totalRfqs, r.bookingsCount, r.completedCount, r.disputeCount, r.refundCount, r.reschedulingCount, r.grossRevenue, r.price]);
+      headers = ['Project', 'Subproject', 'RFQs', 'Bookings', 'Completed', 'Disputes', 'Refunds', 'Reschedules', 'Gross revenue (EUR)', 'Platform revenue (EUR)', 'Price'];
+      rows = data.map((r) => [r.projectTitle, r.subprojectName, r.totalRfqs, r.bookingsCount, r.completedCount, r.disputeCount, r.refundCount, r.reschedulingCount, r.grossRevenue, Number(r.platformRevenue ?? 0).toFixed(2), r.price]);
     } else if (section === 'professional') {
       const data = ((await captureJson(getKpiByProfessional, req))?.data?.rows || []) as Row[];
-      headers = ['Name', 'Email', 'City', 'Level', 'Created projects', 'RFQs received', 'Quoted', 'Bookings', 'Completed', 'Disputes', 'Refunds', 'Reschedules', 'Avg TTFQ (h)', 'Avg review', 'Gross revenue (EUR)'];
-      rows = data.map((r) => [r.name, r.email, r.city, r.professionalLevel, r.createdProjects, r.rfqsReceived, r.quotedCount, r.bookingsCount, r.completedCount, r.disputeCount, r.refundCount, r.reschedulingCount, r.avgTtfqHours, r.avgReviewScore, r.grossRevenue]);
+      headers = ['Name', 'Email', 'City', 'Level', 'Created projects', 'RFQs received', 'Quoted', 'Bookings', 'Completed', 'Disputes', 'Refunds', 'Reschedules', 'Avg TTFQ (h)', 'Avg review', 'Gross revenue (EUR)', 'Platform revenue (EUR)'];
+      rows = data.map((r) => [r.name, r.email, r.city, r.professionalLevel, r.createdProjects, r.rfqsReceived, r.quotedCount, r.bookingsCount, r.completedCount, r.disputeCount, r.refundCount, r.reschedulingCount, r.avgTtfqHours, r.avgReviewScore, r.grossRevenue, Number(r.platformRevenue ?? 0).toFixed(2)]);
     } else if (section === 'customer') {
       const data = ((await captureJson(getKpiByCustomer, req))?.data?.rows || []) as Row[];
-      headers = ['Name', 'Email', 'City', 'Loyalty', 'RFQs', 'Bookings', 'Completed', 'Disputes', 'Refunds', 'Reschedules', 'Avg payment time (h)', 'Gross spend (EUR)'];
-      rows = data.map((r) => [r.name, r.email, r.city, r.loyaltyLevel, r.rfqsCreated, r.bookingsCount, r.completedCount, r.disputeCount, r.refundCount, r.reschedulingCount, r.avgPaymentTimeHours, r.grossSpend]);
+      headers = ['Name', 'Email', 'City', 'Loyalty', 'RFQs', 'Bookings', 'Completed', 'Disputes', 'Refunds', 'Reschedules', 'Avg payment time (h)', 'Gross spend (EUR)', 'Platform revenue (EUR)'];
+      rows = data.map((r) => [r.name, r.email, r.city, r.loyaltyLevel, r.rfqsCreated, r.bookingsCount, r.completedCount, r.disputeCount, r.refundCount, r.reschedulingCount, r.avgPaymentTimeHours, r.grossSpend, Number(r.platformRevenue ?? 0).toFixed(2)]);
     } else if (section === 'response') {
       const data = ((await captureJson(getKpiProfessionalResponse, req))?.data?.rows || []) as Row[];
       headers = ['Professional', 'Email', 'City', 'Quotes sent', 'Avg hours', 'Min hours', 'Max hours'];

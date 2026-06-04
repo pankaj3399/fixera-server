@@ -4,7 +4,7 @@ import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
 import CancellationRequest from '../../models/cancellationRequest';
 import Conversation from '../../models/conversation';
-import { captureAndTransferPayment, executeRefund } from '../Stripe/payment';
+import { captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
@@ -250,10 +250,11 @@ export const getDisputes = async (req: Request, res: Response) => {
       success: true,
       data: {
         disputes: mergedDisputes,
+        externalCount: externalRows.length,
         pagination: {
           page: pageNum,
           limit: limitNum,
-          total: total + externalRows.length,
+          total,
           pages: Math.ceil(total / limitNum),
         }
       }
@@ -446,6 +447,38 @@ export const resolveDispute = async (req: Request, res: Response) => {
         );
       }
     }
+
+    if (targetStatus === 'refunded') {
+      const customRefundAmount =
+        !isExtraCostsDispute && action === 'adjust' && Number.isFinite(adjustedAmount) && adjustedAmount > 0
+          ? Number(adjustedAmount)
+          : undefined;
+      try {
+        await executeRefund(resolvedBooking._id.toString(), {
+          amount: customRefundAmount,
+          reason: `Dispute resolution (${disputeType}): ${resolution}`,
+        });
+      } catch (refundError: any) {
+        await Booking.updateOne(
+          { _id: resolvedBooking._id },
+          {
+            $set: { status: ACTIVE_DISPUTE_STATUS },
+            $unset: { 'dispute.resolvedAt': '', 'dispute.resolution': '', 'dispute.resolvedBy': '' },
+            $push: {
+              statusHistory: {
+                status: ACTIVE_DISPUTE_STATUS,
+                timestamp: new Date(),
+                updatedBy: adminUser._id,
+                note: 'Refund failed during dispute resolution; dispute reopened',
+              },
+            },
+          }
+        ).catch((revertError) => console.error('Failed to revert dispute after refund failure:', revertError));
+        const httpStatus = refundError instanceof RefundError ? refundError.httpStatus : 500;
+        const message = refundError instanceof RefundError ? refundError.message : 'Refund failed during dispute resolution';
+        return res.status(httpStatus).json({ success: false, error: { code: 'REFUND_FAILED', message } });
+      }
+    }
   } catch (error: any) {
     console.error('Error resolving dispute:', error);
     try {
@@ -502,19 +535,6 @@ export const resolveDispute = async (req: Request, res: Response) => {
           }
         } else if (isExtraCostsDispute) {
           await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
-        }
-      } else if (targetStatus === 'refunded') {
-        const customRefundAmount =
-          !isExtraCostsDispute && action === 'adjust' && Number.isFinite(adjustedAmount) && adjustedAmount > 0
-            ? Number(adjustedAmount)
-            : undefined;
-        try {
-          await executeRefund(resolvedBooking._id.toString(), {
-            amount: customRefundAmount,
-            reason: `Dispute resolution (${disputeType}): ${resolution}`,
-          });
-        } catch (refundError) {
-          console.error('Refund failed during dispute resolution:', refundError);
         }
       }
     } catch (e) {

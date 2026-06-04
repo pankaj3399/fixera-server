@@ -12,7 +12,7 @@ import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
 import { sendBookingCancelledEmail, sendCancellationRequestRaisedEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
-import CancellationRequest from "../../models/cancellationRequest";
+import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 
 const presignMaybeS3Url = async (url?: string | null) => {
@@ -1276,7 +1276,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
     const existingPending = await CancellationRequest.findOne({
       booking: booking._id,
-      status: { $in: ['pending', 'processing'] },
+      status: { $in: ACTIVE_CANCELLATION_STATUSES },
     });
     if (existingPending) {
       return res.status(409).json({
