@@ -276,12 +276,15 @@ const buildScheduleUpdatePayload = async ({
         scheduleData.assignedTeamMembers = booking.assignedTeamMembers;
       }
     } else {
+      const excludeBookingId = booking?._id ? String(booking._id) : undefined;
+
       const validation = await validateProjectScheduleSelection({
         projectId,
         subprojectIndex: resolvedSubprojectIndex,
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
+        excludeBookingId,
       });
 
       if (!validation.valid) {
@@ -301,6 +304,7 @@ const buildScheduleUpdatePayload = async ({
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
+        excludeBookingId,
       });
 
       if (!window) {

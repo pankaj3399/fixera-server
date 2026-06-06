@@ -356,6 +356,14 @@ export interface IBooking extends Document {
     refundAmount?: number;
   };
 
+  // No-show (e.g. customer cancels citing professional no-show). Drives the No-show KPI.
+  noShow?: {
+    markedAt: Date;
+    markedBy?: Types.ObjectId;
+    reason?: string;
+    source?: string;
+  };
+
   // Professional completion attestation
   completionAttestation?: ICompletionAttestation;
 
@@ -1003,6 +1011,14 @@ const BookingSchema = new Schema({
       type: Number,
       min: 0
     }
+  },
+
+  // No-show (drives the No-show KPI)
+  noShow: {
+    markedAt: { type: Date },
+    markedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    reason: { type: String, maxlength: 1000 },
+    source: { type: String, maxlength: 100 }
   },
 
   // Professional completion attestation

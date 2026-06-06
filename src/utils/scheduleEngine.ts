@@ -432,7 +432,8 @@ const buildBlockedData = async (
   project: any,
   professional: any,
   timeZone: string,
-  customerBlocks?: CustomerBlocks
+  customerBlocks?: CustomerBlocks,
+  excludeBookingId?: string
 ) => {
   const blockedDates = new Set<string>();
   const blockedRanges: Array<{ start: Date; end: Date; reason?: string }> = [];
@@ -487,6 +488,10 @@ const buildBlockedData = async (
       },
     ],
   };
+
+  if (excludeBookingId && mongoose.isValidObjectId(excludeBookingId)) {
+    bookingFilter._id = { $ne: new mongoose.Types.ObjectId(excludeBookingId) };
+  }
 
   if (teamMemberIds.length > 0) {
     // Convert string IDs to ObjectIds for proper MongoDB matching (filtering invalid IDs)
@@ -749,7 +754,8 @@ const buildPerMemberBlockedData = async (
   project: any,
   professional: any,
   timeZone: string,
-  customerBlocks?: CustomerBlocks
+  customerBlocks?: CustomerBlocks,
+  excludeBookingId?: string
 ): Promise<PerMemberBlockedData> => {
   const perMemberData: PerMemberBlockedData = new Map();
 
@@ -787,6 +793,10 @@ const buildPerMemberBlockedData = async (
       },
     ],
   };
+
+  if (excludeBookingId && mongoose.isValidObjectId(excludeBookingId)) {
+    bookingFilter._id = { $ne: new mongoose.Types.ObjectId(excludeBookingId) };
+  }
 
   // Only add team member filters if we have valid ObjectIds
   if (teamMemberObjectIds.length > 0) {
@@ -2418,12 +2428,14 @@ export const validateProjectScheduleSelection = async ({
   startDate,
   startTime,
   customerBlocks,
+  excludeBookingId,
 }: {
   projectId: string;
   subprojectIndex?: number;
   startDate?: string;
   startTime?: string;
   customerBlocks?: CustomerBlocks;
+  excludeBookingId?: string;
 }) => {
   if (!startDate) {
     return { valid: true };
@@ -2453,7 +2465,8 @@ export const validateProjectScheduleSelection = async ({
     project,
     professional,
     timeZone,
-    customerBlocks
+    customerBlocks,
+    excludeBookingId
   );
   const { blockedDates, blockedRanges } = baseBlockedData;
 
@@ -2463,7 +2476,8 @@ export const validateProjectScheduleSelection = async ({
       project,
       professional,
       timeZone,
-      customerBlocks
+      customerBlocks,
+      excludeBookingId
     );
   }
 
@@ -2695,6 +2709,7 @@ export const buildProjectScheduleWindow = async ({
   startTime,
   customerBlocks,
   durationOverride,
+  excludeBookingId,
 }: {
   projectId: string;
   subprojectIndex?: number;
@@ -2702,6 +2717,7 @@ export const buildProjectScheduleWindow = async ({
   startTime?: string;
   customerBlocks?: CustomerBlocks;
   durationOverride?: DurationOverride;
+  excludeBookingId?: string;
 }) => {
   if (!startDate) {
     return null;
@@ -2726,11 +2742,12 @@ export const buildProjectScheduleWindow = async ({
     project,
     professional,
     timeZone,
-    customerBlocks
+    customerBlocks,
+    excludeBookingId
   );
   const { blockedDates, blockedRanges } = baseBlockedData;
   const bufferBlockedData = customerBlocks
-    ? await buildBlockedData(project, professional, timeZone)
+    ? await buildBlockedData(project, professional, timeZone, undefined, excludeBookingId)
     : baseBlockedData;
 
   const resourcePolicy = getResourcePolicy(project);
@@ -2747,7 +2764,8 @@ export const buildProjectScheduleWindow = async ({
       project,
       professional,
       timeZone,
-      customerBlocks
+      customerBlocks,
+      excludeBookingId
     );
 
     // Debug logging for resource blocked dates

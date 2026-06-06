@@ -12,7 +12,7 @@ import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
 import { sendBookingCancelledEmail, sendCancellationRequestRaisedEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
-import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
+import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 
 const presignMaybeS3Url = async (url?: string | null) => {
@@ -1238,19 +1238,24 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
   try {
     const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
-    const { reason, evidence } = req.body;
+    const { reason, evidence, reasonCategory } = req.body;
 
     if (!userId) {
       return res.status(401).json({ success: false, msg: "Authentication required" });
     }
 
-    if (typeof reason !== 'string' || !reason.trim() || reason.trim().length > 1000) {
+    const normalizedCategory =
+      typeof reasonCategory === 'string' && (CANCELLATION_REASON_CATEGORIES as readonly string[]).includes(reasonCategory)
+        ? (reasonCategory as CancellationReasonCategory)
+        : undefined;
+
+    const explanation = typeof reason === 'string' ? reason.trim() : '';
+    if (explanation.length > 1000) {
       return res.status(400).json({
         success: false,
-        msg: "Cancellation reason is required (max 1000 characters)"
+        msg: "Cancellation explanation must be 1000 characters or fewer"
       });
     }
-    const trimmedReason = reason.trim();
 
     const booking = await Booking.findById(bookingId);
     if (!booking) {
@@ -1266,6 +1271,22 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
         msg: "You do not have permission to request cancellation for this booking"
       });
     }
+
+    // Customers must select a reason from the predefined list; professionals may
+    // still submit a free-text reason (their UI has no category dropdown).
+    if (isCustomer && !normalizedCategory) {
+      return res.status(400).json({
+        success: false,
+        msg: "Please select a cancellation reason"
+      });
+    }
+    if (!normalizedCategory && !explanation) {
+      return res.status(400).json({
+        success: false,
+        msg: "A cancellation reason is required"
+      });
+    }
+    const trimmedReason = explanation || (normalizedCategory ? CANCELLATION_REASON_LABELS[normalizedCategory] : '');
 
     if (['completed', 'cancelled', 'refunded'].includes(booking.status)) {
       return res.status(400).json({
@@ -1293,11 +1314,23 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       booking: booking._id,
       requestedBy: new mongoose.Types.ObjectId(userId),
       requestedRole,
+      ...(normalizedCategory ? { reasonCategory: normalizedCategory } : {}),
       reason: trimmedReason,
       evidence: sanitizedEvidence,
       status: 'pending',
       ...(isCustomer ? { responseDeadline: addBusinessDays(new Date(), REFUND_RESPONSE_BUSINESS_DAYS) } : {}),
     });
+
+    // A customer citing a professional no-show feeds the admin No-show KPI.
+    if (isCustomer && normalizedCategory === 'no_show' && !booking.noShow?.markedAt) {
+      booking.noShow = {
+        markedAt: new Date(),
+        markedBy: new mongoose.Types.ObjectId(userId),
+        reason: trimmedReason,
+        source: 'customer_cancellation',
+      };
+      await booking.save();
+    }
 
     try {
       const [customerUser, professionalUser] = await Promise.all([

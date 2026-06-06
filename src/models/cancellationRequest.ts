@@ -12,11 +12,41 @@ export type CancellationProfessionalDecision = "approved" | "counter" | "rejecte
 export type CancellationCustomerDecision = "accepted" | "refused";
 export type CancellationEscalationReason = "rejected" | "refused" | "no_response";
 
+export const CANCELLATION_REASON_CATEGORIES = [
+  "no_show",
+  "not_as_described",
+  "extra_payment_requested",
+  "poor_communication",
+  "no_longer_needed",
+  "found_alternative",
+  "requirements_changed",
+  "scheduling_conflict",
+  "trust_concerns",
+  "other",
+] as const;
+
+export type CancellationReasonCategory =
+  (typeof CANCELLATION_REASON_CATEGORIES)[number];
+
+export const CANCELLATION_REASON_LABELS: Record<CancellationReasonCategory, string> = {
+  no_show: "Professional didn't show up (No-show)",
+  not_as_described: "Service not as described in booking/chat",
+  extra_payment_requested: "Professional requested extra payment not agreed upon",
+  poor_communication: "Poor communication / unresponsive professional",
+  no_longer_needed: "I no longer need the service or booked by mistake",
+  found_alternative: "Found a better or cheaper alternative",
+  requirements_changed: "Project requirements changed significantly",
+  scheduling_conflict: "Scheduling conflict",
+  trust_concerns: "Safety, quality or trust concerns",
+  other: "Other",
+};
+
 export interface ICancellationRequest extends Document {
   _id: Types.ObjectId;
   booking: Types.ObjectId;
   requestedBy: Types.ObjectId;
   requestedRole: "customer" | "professional";
+  reasonCategory?: CancellationReasonCategory;
   reason: string;
   evidence: string[];
   status: CancellationRequestStatus;
@@ -56,6 +86,10 @@ const CancellationRequestSchema = new Schema<ICancellationRequest>(
       type: String,
       enum: ["customer", "professional"],
       required: true,
+    },
+    reasonCategory: {
+      type: String,
+      enum: CANCELLATION_REASON_CATEGORIES,
     },
     reason: {
       type: String,

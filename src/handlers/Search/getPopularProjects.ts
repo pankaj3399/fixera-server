@@ -43,6 +43,21 @@ export const getPopularProjects = async (req: Request, res: Response) => {
                 _id: null,
                 total: { $sum: 1 },
                 completed: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+                reviewed: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ["$status", "completed"] },
+                          { $ne: [{ $ifNull: ["$customerReview.qualityOfService", null] }, null] },
+                          { $ne: ["$customerReview.isHidden", true] },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
               },
             },
           ],
@@ -73,6 +88,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
         $addFields: {
           completedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.completed", 0] }, 0] },
           engagedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.total", 0] }, 0] },
+          reviewedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.reviewed", 0] }, 0] },
           favoriteCount: { $ifNull: [{ $arrayElemAt: ["$favoriteStats.count", 0] }, 0] },
         },
       },
@@ -81,13 +97,14 @@ export const getPopularProjects = async (req: Request, res: Response) => {
           popularityScore: {
             $add: [
               { $multiply: ["$completedBookings", 5] },
+              { $multiply: ["$reviewedBookings", 3] },
               { $multiply: ["$engagedBookings", 2] },
               "$favoriteCount",
             ],
           },
         },
       },
-      { $sort: { popularityScore: -1, completedBookings: -1, createdAt: -1 } },
+      { $sort: { popularityScore: -1, completedBookings: -1, reviewedBookings: -1, createdAt: -1 } },
       { $limit: limitNum },
       {
         $project: {
