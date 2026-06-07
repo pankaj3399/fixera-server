@@ -18,6 +18,36 @@ import {
 import { sendDisputeResolvedEmail } from '../../utils/emailService';
 import { auditLog } from '../../utils/auditLogger';
 import { getProfessionalDisplayName } from '../../utils/displayName';
+import { presignS3Url } from '../../utils/s3Upload';
+import { buildProjectScheduleWindow } from '../../utils/scheduleEngine';
+
+const presignAttachments = async (urls?: unknown): Promise<string[]> => {
+  if (!Array.isArray(urls) || urls.length === 0) return [];
+  return Promise.all(
+    urls.map(async (u) => {
+      if (typeof u !== 'string') return u as string;
+      try {
+        const signed = await presignS3Url(u);
+        return signed || u;
+      } catch {
+        return u;
+      }
+    })
+  );
+};
+
+const presignBookingAttachments = async (booking: any): Promise<void> => {
+  if (!booking) return;
+  if (booking.dispute?.attachments) {
+    booking.dispute.attachments = await presignAttachments(booking.dispute.attachments);
+  }
+  if (booking.dispute?.resolutionAttachments) {
+    booking.dispute.resolutionAttachments = await presignAttachments(booking.dispute.resolutionAttachments);
+  }
+  if (booking.completionAttestation?.attachments) {
+    booking.completionAttestation.attachments = await presignAttachments(booking.completionAttestation.attachments);
+  }
+};
 import {
   isAllowedS3Url,
   generateFileName,
@@ -31,8 +61,8 @@ import {
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
-type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked';
-const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked'];
+type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked' | 'professional_completed';
+const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked', 'professional_completed'];
 
 const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
@@ -245,6 +275,15 @@ export const getDisputes = async (req: Request, res: Response) => {
 
     const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
 
+    await Promise.all(disputes.map((d: any) => presignBookingAttachments(d)));
+    await Promise.all(
+      externalRows.map(async (row: any) => {
+        if (row?.dispute?.attachments) {
+          row.dispute.attachments = await presignAttachments(row.dispute.attachments);
+        }
+      })
+    );
+
     return res.json({
       success: true,
       data: {
@@ -293,9 +332,12 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
+    const bookingObj = booking.toObject();
+    await presignBookingAttachments(bookingObj);
+
     return res.json({
       success: true,
-      data: { booking }
+      data: { booking: bookingObj }
     });
   } catch (error: any) {
     console.error('Error fetching dispute details:', error);
@@ -309,7 +351,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
 export const resolveDispute = async (req: Request, res: Response) => {
   const { bookingId } = req.params;
   const adminUser = (req as any).user || (req as any).admin;
-  const { action, adjustedAmount, resolution, forceStatus, resolutionAttachments } = req.body || {};
+  const { action, adjustedAmount, resolution, forceStatus, resolutionAttachments, forcedStartDate, forcedStartTime } = req.body || {};
 
   let resolvedBooking: any = null;
   let finalExtraCostAmount = 0;
@@ -378,12 +420,63 @@ export const resolveDispute = async (req: Request, res: Response) => {
     isExtraCostsDispute = disputeType === 'extra_costs';
     targetStatus = (forceStatus as BookingStatus) || COMPLETED_BOOKING_STATUS;
 
+    let rescheduleScheduleFields: Record<string, any> | null = null;
+    if (disputeType === 'reschedule' && typeof forcedStartDate === 'string' && forcedStartDate.trim()) {
+      const projectId = (booking.project as any)?.toString?.();
+      if (!projectId) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Cannot force a start date on a booking without a linked project' }
+        });
+      }
+      const window = await buildProjectScheduleWindow({
+        projectId,
+        subprojectIndex: typeof booking.selectedSubprojectIndex === 'number' ? booking.selectedSubprojectIndex : undefined,
+        startDate: forcedStartDate.trim(),
+        startTime: typeof forcedStartTime === 'string' ? forcedStartTime : undefined,
+        excludeBookingId: booking._id.toString(),
+      });
+      if (!window) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_DATE', message: 'The forced start date is not available for this project' }
+        });
+      }
+      rescheduleScheduleFields = {
+        scheduledStartDate: window.scheduledStartDate,
+        scheduledExecutionEndDate: window.scheduledExecutionEndDate,
+        scheduledBufferStartDate: window.scheduledBufferStartDate,
+        scheduledBufferEndDate: window.scheduledBufferEndDate,
+        scheduledBufferUnit: window.scheduledBufferUnit,
+        scheduledStartTime: window.scheduledStartTime,
+        scheduledEndTime: window.scheduledEndTime,
+        ...(window.assignedTeamMembers?.length ? { assignedTeamMembers: window.assignedTeamMembers } : {}),
+      };
+      if (forceStatus === undefined) {
+        targetStatus = 'booked' as BookingStatus;
+      }
+    }
+
+    const originalScheduleFields: Record<string, any> | null = rescheduleScheduleFields
+      ? {
+          scheduledStartDate: booking.scheduledStartDate,
+          scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
+          scheduledBufferStartDate: booking.scheduledBufferStartDate,
+          scheduledBufferEndDate: booking.scheduledBufferEndDate,
+          scheduledBufferUnit: booking.scheduledBufferUnit,
+          scheduledStartTime: booking.scheduledStartTime,
+          scheduledEndTime: booking.scheduledEndTime,
+          assignedTeamMembers: booking.assignedTeamMembers,
+        }
+      : null;
+
     const completionDate = new Date();
     const setFields: Record<string, any> = {
       status: targetStatus,
       'dispute.resolvedAt': completionDate,
       'dispute.resolution': resolution,
       'dispute.resolvedBy': adminUser._id,
+      ...(rescheduleScheduleFields || {}),
     };
     if (targetStatus === COMPLETED_BOOKING_STATUS) {
       setFields.actualEndDate = completionDate;
@@ -459,11 +552,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
         !isExtraCostsDispute && action === 'adjust' && Number.isFinite(adjustedAmount) && adjustedAmount > 0
           ? Number(adjustedAmount)
           : undefined;
+      const refundReason = `Dispute resolution (${disputeType}): ${resolution}`;
       try {
-        await executeRefund(resolvedBooking._id.toString(), {
+        const refundResult = await executeRefund(resolvedBooking._id.toString(), {
           amount: customRefundAmount,
-          reason: `Dispute resolution (${disputeType}): ${resolution}`,
+          reason: refundReason,
         });
+        await Booking.updateOne(
+          { _id: resolvedBooking._id },
+          {
+            $set: {
+              'cancellation.cancelledBy': adminUser._id,
+              'cancellation.cancelledAt': new Date(),
+              'cancellation.reason': refundReason,
+              'cancellation.refundAmount': refundResult.amount,
+            },
+          }
+        ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
       } catch (refundError: any) {
         const rollbackSet: Record<string, any> = { status: ACTIVE_DISPUTE_STATUS };
         const rollbackUnset: Record<string, any> = {
@@ -482,6 +587,12 @@ export const resolveDispute = async (req: Request, res: Response) => {
         if (sanitizedAttachments.length > 0) {
           if (originalResolutionAttachments !== undefined) rollbackSet['dispute.resolutionAttachments'] = originalResolutionAttachments;
           else rollbackUnset['dispute.resolutionAttachments'] = '';
+        }
+        if (originalScheduleFields) {
+          for (const [field, value] of Object.entries(originalScheduleFields)) {
+            if (value !== undefined && value !== null) rollbackSet[field] = value;
+            else rollbackUnset[field] = '';
+          }
         }
         await Booking.updateOne(
           { _id: resolvedBooking._id },
