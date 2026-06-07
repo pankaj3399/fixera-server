@@ -457,6 +457,19 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
     }
 
+    const originalScheduleFields: Record<string, any> | null = rescheduleScheduleFields
+      ? {
+          scheduledStartDate: booking.scheduledStartDate,
+          scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
+          scheduledBufferStartDate: booking.scheduledBufferStartDate,
+          scheduledBufferEndDate: booking.scheduledBufferEndDate,
+          scheduledBufferUnit: booking.scheduledBufferUnit,
+          scheduledStartTime: booking.scheduledStartTime,
+          scheduledEndTime: booking.scheduledEndTime,
+          assignedTeamMembers: booking.assignedTeamMembers,
+        }
+      : null;
+
     const completionDate = new Date();
     const setFields: Record<string, any> = {
       status: targetStatus,
@@ -574,6 +587,12 @@ export const resolveDispute = async (req: Request, res: Response) => {
         if (sanitizedAttachments.length > 0) {
           if (originalResolutionAttachments !== undefined) rollbackSet['dispute.resolutionAttachments'] = originalResolutionAttachments;
           else rollbackUnset['dispute.resolutionAttachments'] = '';
+        }
+        if (originalScheduleFields) {
+          for (const [field, value] of Object.entries(originalScheduleFields)) {
+            if (value !== undefined && value !== null) rollbackSet[field] = value;
+            else rollbackUnset[field] = '';
+          }
         }
         await Booking.updateOne(
           { _id: resolvedBooking._id },

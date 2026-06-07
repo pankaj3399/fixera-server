@@ -280,45 +280,60 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
     }
 
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
-    const cancellation = await CancellationRequest.findOneAndUpdate(
-      { _id: id, status: { $in: ADMIN_ACTIONABLE_STATUSES } },
-      {
-        $set: {
-          status: "denied",
-          denyReason: denyReason.trim(),
-          resolvedAt: new Date(),
-          resolvedBy: adminObjectId,
+
+    let cancellation: any = null;
+    let notActionable: { code: number; msg: string } | null = null;
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      cancellation = await CancellationRequest.findOneAndUpdate(
+        { _id: id, status: { $in: ADMIN_ACTIONABLE_STATUSES } },
+        {
+          $set: {
+            status: "denied",
+            denyReason: denyReason.trim(),
+            resolvedAt: new Date(),
+            resolvedBy: adminObjectId,
+          },
         },
-      },
-      { new: true }
-    ).populate("requestedBy", "email name businessInfo username");
-    if (!cancellation) {
-      const existing = await CancellationRequest.findById(id).lean();
-      if (!existing) {
-        return res.status(404).json({ success: false, msg: "Cancellation request not found" });
+        { new: true, session }
+      );
+      if (!cancellation) {
+        const existing = await CancellationRequest.findById(id).session(session).lean();
+        notActionable = existing
+          ? { code: 409, msg: `Request is already ${existing.status}` }
+          : { code: 404, msg: "Cancellation request not found" };
+        await session.abortTransaction();
+      } else {
+        const booking = await Booking.findById(cancellation.booking).session(session);
+        if (booking && booking.status === "dispute") {
+          const restored = (booking.statusBeforeDispute as any) ||
+            (booking.actualStartDate ? "in_progress" : "booked");
+          booking.status = restored;
+          booking.statusBeforeDispute = undefined;
+          booking.statusHistory = booking.statusHistory || [];
+          booking.statusHistory.push({
+            status: restored,
+            timestamp: new Date(),
+            updatedBy: adminObjectId,
+            note: "Refund request denied; booking restored from dispute",
+          } as any);
+          await booking.save({ session });
+        }
+        await session.commitTransaction();
       }
-      return res.status(409).json({ success: false, msg: `Request is already ${existing.status}` });
+    } catch (txError) {
+      await session.abortTransaction();
+      throw txError;
+    } finally {
+      session.endSession();
     }
 
-    try {
-      const booking = await Booking.findById(cancellation.booking);
-      if (booking && booking.status === "dispute") {
-        const restored = (booking.statusBeforeDispute as any) ||
-          (booking.actualStartDate ? "in_progress" : "booked");
-        booking.status = restored;
-        booking.statusBeforeDispute = undefined;
-        booking.statusHistory = booking.statusHistory || [];
-        booking.statusHistory.push({
-          status: restored,
-          timestamp: new Date(),
-          updatedBy: adminObjectId,
-          note: "Refund request denied; booking restored from dispute",
-        } as any);
-        await booking.save();
-      }
-    } catch (restoreError: any) {
-      console.error("Failed to restore booking status after refund deny:", restoreError?.message || restoreError);
+    if (notActionable) {
+      return res.status(notActionable.code).json({ success: false, msg: notActionable.msg });
     }
+
+    await cancellation.populate("requestedBy", "email name businessInfo username");
 
     try {
       const requester: any = cancellation.requestedBy;
