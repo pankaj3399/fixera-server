@@ -30,7 +30,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'totalSpent points pointsExpiry location')
-      .populate('project', 'repeatBuyerDiscount professionalId extraOptions');
+      .populate('project', 'repeatBuyerDiscount professionalId');
 
     if (!booking) {
       return res.status(404).json({

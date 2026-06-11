@@ -250,13 +250,7 @@ export const createPaymentIntent = async (
     const projectInfo = booking.project as any;
     const selectedExtraOptionsTotal = Array.isArray(booking.selectedExtraOptions)
       ? booking.selectedExtraOptions.reduce(
-          (sum: number, entry: any) => {
-            if (typeof entry?.bookedPrice === 'number') return sum + entry.bookedPrice;
-            if (typeof entry === 'number' && Array.isArray(projectInfo?.extraOptions) && entry >= 0 && entry < projectInfo.extraOptions.length) {
-              return sum + (projectInfo.extraOptions[entry]?.price || 0);
-            }
-            return sum;
-          },
+          (sum: number, entry: any) => (typeof entry?.bookedPrice === 'number' ? sum + entry.bookedPrice : sum),
           0
         )
       : 0;
