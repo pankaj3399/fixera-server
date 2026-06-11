@@ -82,15 +82,11 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
       commissionPercent = Number.isFinite(parsed) ? parsed : 0;
     }
-    const projectInfo = booking.project as any;
     const selectedExtraOptionsTotal = Array.isArray(booking.selectedExtraOptions)
-      ? booking.selectedExtraOptions.reduce((sum: number, entry: any) => {
-          if (typeof entry?.bookedPrice === 'number') return sum + entry.bookedPrice;
-          if (typeof entry === 'number' && Array.isArray(projectInfo?.extraOptions) && entry >= 0 && entry < projectInfo.extraOptions.length) {
-            return sum + (projectInfo.extraOptions[entry]?.price || 0);
-          }
-          return sum;
-        }, 0)
+      ? booking.selectedExtraOptions.reduce(
+          (sum: number, entry: any) => (typeof entry?.bookedPrice === 'number' ? sum + entry.bookedPrice : sum),
+          0
+        )
       : 0;
     const grossAmount = +((booking.quote.amount + selectedExtraOptionsTotal) * (1 + commissionPercent / 100)).toFixed(2);
 
@@ -102,7 +98,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       const validation = await validateDiscountCode(
         discountCodeInput,
         userId,
-        booking.quote.amount,
+        grossAmount,
         customerCountry,
         serviceType
       );

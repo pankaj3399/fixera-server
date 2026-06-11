@@ -1408,11 +1408,9 @@ export const adminApproveWarrantyClaim = async (req: Request, res: Response) => 
 
     const claim = await WarrantyClaim.findById(claimId);
     if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
-    if (claim.status === "closed") {
-      return res.status(400).json({ success: false, msg: "Claim is already closed" });
-    }
-    if (claim.status === "proposal_accepted") {
-      return res.status(400).json({ success: false, msg: "Claim is already approved" });
+    const allowedPreApprovalStatuses = ["open", "proposal_sent", "escalated"];
+    if (!allowedPreApprovalStatuses.includes(claim.status)) {
+      return res.status(400).json({ success: false, msg: `Claim cannot be approved from status "${claim.status}"` });
     }
 
     claim.status = "proposal_accepted";
@@ -1484,6 +1482,7 @@ export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => 
     });
     await claim.save();
 
+    const truncatedReason = reason.trim().length > 300 ? `${reason.trim().slice(0, 297)}...` : reason.trim();
     await ensureWarrantyChatContext({
       customerId: claim.customer,
       professionalId: claim.professional,
@@ -1491,7 +1490,7 @@ export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => 
       claimNumber: claim.claimNumber,
       bookingId: claim.booking,
       status: claim.status,
-      text: `Warranty claim ${claim.claimNumber} was declined and closed by admin: ${reason.trim()}`,
+      text: `Warranty claim ${claim.claimNumber} was declined and closed by admin: ${truncatedReason}`,
     });
 
     return res.status(200).json({
@@ -1525,13 +1524,23 @@ export const adminApproveWarrantyResolve = async (req: Request, res: Response) =
       return res.status(400).json({ success: false, msg: "Claim is already resolved" });
     }
 
-    const resolvedAt = new Date();
     const proposalSummary = claim.proposal?.message?.trim();
+    if (!proposalSummary) {
+      return res.status(400).json({ success: false, msg: "There is no proposed resolution to approve. Use adjust to set one." });
+    }
+
+    const resolvedAt = new Date();
+    const approveAutoCloseDays = claim.sla?.customerAutoCloseDays || CUSTOMER_AUTO_CLOSE_DAYS;
     claim.resolution = {
       ...(claim.resolution || {}),
-      summary: claim.resolution?.summary || proposalSummary || "Resolution approved by admin",
+      summary: proposalSummary,
       resolvedAt,
       resolvedBy: toObjectId(userId),
+    };
+    claim.sla = {
+      ...(claim.sla || { customerAutoCloseDays: approveAutoCloseDays }),
+      customerAutoCloseDays: approveAutoCloseDays,
+      customerConfirmationDueAt: new Date(resolvedAt.getTime() + approveAutoCloseDays * 24 * 60 * 60 * 1000),
     };
     claim.status = "resolved";
     claim.statusHistory.push({
@@ -1612,6 +1621,7 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
     }
 
     const resolvedAt = new Date();
+    const adjustAutoCloseDays = claim.sla?.customerAutoCloseDays || CUSTOMER_AUTO_CLOSE_DAYS;
     claim.resolution = {
       ...(claim.resolution || {}),
       summary:
@@ -1621,6 +1631,11 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
         "Resolution adjusted by admin",
       resolvedAt,
       resolvedBy: toObjectId(userId),
+    };
+    claim.sla = {
+      ...(claim.sla || { customerAutoCloseDays: adjustAutoCloseDays }),
+      customerAutoCloseDays: adjustAutoCloseDays,
+      customerConfirmationDueAt: new Date(resolvedAt.getTime() + adjustAutoCloseDays * 24 * 60 * 60 * 1000),
     };
     claim.status = "resolved";
     claim.statusHistory.push({
@@ -1666,6 +1681,9 @@ export const adminSetWarrantyStatus = async (req: Request, res: Response) => {
     const parsedStatus = parseClaimStatus(status);
     if (!parsedStatus) {
       return res.status(400).json({ success: false, msg: "Invalid status value" });
+    }
+    if (parsedStatus === "closed") {
+      return res.status(400).json({ success: false, msg: "Use the decline action to close a claim so closure details are recorded" });
     }
 
     const claim = await WarrantyClaim.findById(claimId);

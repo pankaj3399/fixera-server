@@ -355,7 +355,7 @@ export const createPaymentIntent = async (
       const validation = await validateDiscountCode(
         discountCode,
         customer._id.toString(),
-        booking.quote.amount,
+        fullBookingAmount,
         customer.location?.country,
         (booking as any).serviceType
       );

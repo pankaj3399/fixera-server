@@ -123,6 +123,9 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
 
     const candidateResources = await resolveCandidateResources(booking);
     const candidateIds = new Set(candidateResources.map((c) => c._id));
+    if (candidateIds.size === 0) {
+      return res.status(400).json({ success: false, error: { code: 'NO_PROJECT_RESOURCES', message: 'This project has no resources available to plan' } });
+    }
 
     const bookingStart = booking.scheduledStartDate ? startOfDayUTC(booking.scheduledStartDate) : null;
     if (!bookingStart) {
@@ -147,7 +150,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       if (!mongoose.isValidObjectId(resourceId)) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_RESOURCE', message: 'Invalid resource in plan' } });
       }
-      if (candidateIds.size > 0 && !candidateIds.has(resourceId)) {
+      if (!candidateIds.has(resourceId)) {
         return res.status(400).json({ success: false, error: { code: 'UNKNOWN_RESOURCE', message: 'Resource is not part of this project' } });
       }
       if (seenResource.has(resourceId)) {
@@ -172,7 +175,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
 
       if (isInProgress) {
         const existing = existingById.get(resourceId);
-        const isUsed = existing && startOfDayUTC(existing.startDate) < today;
+        const isUsed = existing && startOfDayUTC(existing.startDate) <= today;
         if (isUsed && endDate < today) {
           return res.status(400).json({ success: false, error: { code: 'PAST_LOCKED', message: 'A resource already in use cannot end before today' } });
         }
@@ -191,7 +194,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
     if (isInProgress) {
       for (const [rid, existing] of existingById.entries()) {
         const stillPresent = seenResource.has(rid);
-        const isUsed = startOfDayUTC(existing.startDate) < today;
+        const isUsed = startOfDayUTC(existing.startDate) <= today;
         if (!stillPresent && isUsed) {
           return res.status(400).json({ success: false, error: { code: 'DELETE_USED', message: 'A resource already in use cannot be removed, only shortened' } });
         }

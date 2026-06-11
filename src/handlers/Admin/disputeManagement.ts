@@ -424,7 +424,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
     disputeType = String((booking.dispute as any)?.type || 'extra_costs');
     isExtraCostsDispute = disputeType === 'extra_costs';
-    targetStatus = (forceStatus as BookingStatus) || COMPLETED_BOOKING_STATUS;
+    targetStatus = (forceStatus as BookingStatus) || (originalDisputeStatus !== ACTIVE_DISPUTE_STATUS ? originalDisputeStatus : COMPLETED_BOOKING_STATUS);
 
     let rescheduleScheduleFields: Record<string, any> | null = null;
     if (disputeType === 'reschedule' && typeof forcedStartDate === 'string' && forcedStartDate.trim()) {

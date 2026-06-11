@@ -49,6 +49,8 @@ export const getPopularProjects = async (req: Request, res: Response) => {
                       {
                         $and: [
                           { $eq: ["$status", "completed"] },
+                          { $ne: [{ $ifNull: ["$customerReview.communicationLevel", null] }, null] },
+                          { $ne: [{ $ifNull: ["$customerReview.valueOfDelivery", null] }, null] },
                           { $ne: [{ $ifNull: ["$customerReview.qualityOfService", null] }, null] },
                           { $ne: ["$customerReview.isHidden", true] },
                         ],
@@ -64,6 +66,8 @@ export const getPopularProjects = async (req: Request, res: Response) => {
                       {
                         $and: [
                           { $eq: ["$status", "completed"] },
+                          { $ne: [{ $ifNull: ["$customerReview.communicationLevel", null] }, null] },
+                          { $ne: [{ $ifNull: ["$customerReview.valueOfDelivery", null] }, null] },
                           { $ne: [{ $ifNull: ["$customerReview.qualityOfService", null] }, null] },
                           { $ne: ["$customerReview.isHidden", true] },
                         ],

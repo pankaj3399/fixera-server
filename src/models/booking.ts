@@ -916,15 +916,24 @@ const BookingSchema = new Schema({
   }],
 
   // Per-resource execution plan (professional-managed planning board)
-  resourcePlan: [{
-    resourceId: {
-      type: Schema.Types.ObjectId,
-      ref: 'User',
-      required: true
+  resourcePlan: {
+    type: [{
+      resourceId: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+      },
+      startDate: { type: Date, required: true },
+      endDate: { type: Date, required: true }
+    }],
+    validate: {
+      validator: function (plan: Array<{ startDate?: Date; endDate?: Date }>) {
+        if (!Array.isArray(plan)) return true;
+        return plan.every((item) => !item?.startDate || !item?.endDate || item.endDate >= item.startDate);
+      },
+      message: 'endDate must be on or after startDate',
     },
-    startDate: { type: Date, required: true },
-    endDate: { type: Date, required: true }
-  }],
+  },
 
   // Messages
   messages: [{

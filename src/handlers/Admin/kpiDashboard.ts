@@ -136,8 +136,9 @@ const bookingMetricsProjection = (currencyField: string) => ({
   disputeAt: '$dispute.raisedAt',
   reviewedAt: '$customerReview.reviewedAt',
   reviewAvg: reviewAvgExpr,
-  quoted: quotedExpr,
-  firstQuoteAt: firstQuoteAtExpr,
+  isRfq: { $eq: ['$bookingType', 'professional'] },
+  quoted: { $cond: [{ $eq: ['$bookingType', 'professional'] }, quotedExpr, false] },
+  firstQuoteAt: { $cond: [{ $eq: ['$bookingType', 'professional'] }, firstQuoteAtExpr, null] },
   scheduledStartDate: 1,
   actualStartDate: 1,
   scheduledExecutionEndDate: 1,
@@ -146,7 +147,7 @@ const bookingMetricsProjection = (currencyField: string) => ({
 
 const bookingMetricsAccumulators = {
   totalBookings: { $sum: 1 },
-  totalRfqs: { $sum: 1 },
+  totalRfqs: { $sum: { $cond: ['$isRfq', 1, 0] } },
   completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
   quotedCount: { $sum: { $cond: ['$quoted', 1, 0] } },
   bookingsCount: { $sum: { $cond: [{ $in: ['$status', PAID_STATUSES] }, 1, 0] } },
@@ -161,11 +162,11 @@ const bookingMetricsAccumulators = {
   platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
   avgTtfqHours: { $avg: { $cond: ['$quoted', { $divide: [{ $subtract: ['$firstQuoteAt', '$createdAt'] }, 1000 * 60 * 60] }, null] } },
   startOverdueEligible: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$scheduledStartDate', false] }] }, 1, 0] } },
-  startOverdueCount: { $sum: { $cond: [{ $and: [{ $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, 1, 0] } },
-  startOverdueDaysSum: { $sum: { $cond: [{ $and: [{ $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, { $divide: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 1000 * 60 * 60 * 24] }, 0] } },
+  startOverdueCount: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, 1, 0] } },
+  startOverdueDaysSum: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, { $divide: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 1000 * 60 * 60 * 24] }, 0] } },
   completionOverdueEligible: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$scheduledExecutionEndDate', false] }] }, 1, 0] } },
-  completionOverdueCount: { $sum: { $cond: [{ $and: [{ $ifNull: ['$actualEndDate', false] }, { $ifNull: ['$scheduledExecutionEndDate', false] }, { $gt: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 0] }] }, 1, 0] } },
-  completionOverdueDaysSum: { $sum: { $cond: [{ $and: [{ $ifNull: ['$actualEndDate', false] }, { $ifNull: ['$scheduledExecutionEndDate', false] }, { $gt: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 0] }] }, { $divide: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 1000 * 60 * 60 * 24] }, 0] } },
+  completionOverdueCount: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualEndDate', false] }, { $ifNull: ['$scheduledExecutionEndDate', false] }, { $gt: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 0] }] }, 1, 0] } },
+  completionOverdueDaysSum: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualEndDate', false] }, { $ifNull: ['$scheduledExecutionEndDate', false] }, { $gt: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 0] }] }, { $divide: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 1000 * 60 * 60 * 24] }, 0] } },
 };
 
 type GroupAgg = Record<string, number | null | undefined>;
