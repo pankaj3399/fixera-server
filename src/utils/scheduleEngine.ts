@@ -3056,3 +3056,115 @@ export const buildProjectScheduleWindow = async ({
     throughputDays,
   };
 };
+
+export const getUnbookableStartDates = async ({
+  projectId,
+  from,
+  to,
+  subprojectIndex,
+  excludeBookingId,
+}: {
+  projectId: string;
+  from: Date;
+  to: Date;
+  subprojectIndex?: number;
+  excludeBookingId?: string;
+}): Promise<string[]> => {
+  const { project, professional } = await loadProjectAndProfessional(projectId);
+  if (!project || !professional) {
+    return [];
+  }
+
+  const durations = getProjectDurations(project, subprojectIndex);
+  if (!durations || !durations.execution?.value) {
+    return [];
+  }
+
+  if (durations.execution.unit !== "days") {
+    return [];
+  }
+
+  const resourcePolicy = getResourcePolicy(project);
+  const useMultiResource = isMultiResourceMode(project);
+  const orderedResourceIds = getOrderedResourceIds(project.resources);
+
+  if (!useMultiResource || orderedResourceIds.length === 0) {
+    return [];
+  }
+
+  const availability = resolveAvailability(professional.companyAvailability);
+  const timeZone = professional.businessInfo?.timezone || "UTC";
+  const { isHoliday } = buildHolidayChecker(professional, timeZone);
+
+  const perMemberBlocked = await buildPerMemberBlockedData(
+    project,
+    professional,
+    timeZone,
+    undefined,
+    excludeBookingId
+  );
+
+  const prepEnd = calculatePrepEnd(
+    durations.preparation,
+    availability,
+    timeZone,
+    isHoliday
+  );
+  const prepStartDay = startOfDayZoned(prepEnd);
+
+  const executionDays = Math.max(1, Math.ceil(durations.execution.value));
+
+  const fromZoned = startOfDayZoned(toZonedTime(from, timeZone));
+  const toZoned = startOfDayZoned(toZonedTime(to, timeZone));
+
+  const unbookable: string[] = [];
+  let cursor = fromZoned;
+  const maxIterations = 366 * 2;
+  let iterations = 0;
+
+  while (cursor <= toZoned && iterations < maxIterations) {
+    iterations++;
+
+    if (!isWorkingDay(availability, cursor)) {
+      cursor = addDaysZoned(cursor, 1);
+      continue;
+    }
+
+    let bookable = true;
+
+    if (cursor < prepStartDay) {
+      bookable = false;
+    } else {
+      const availableOnStartDay = countAvailableResourcesForDay(
+        perMemberBlocked,
+        availability,
+        cursor,
+        timeZone
+      );
+      if (availableOnStartDay < resourcePolicy.minResources) {
+        bookable = false;
+      } else {
+        const selectedSubset = findFirstEligibleSubsetForDays(
+          perMemberBlocked,
+          availability,
+          cursor,
+          executionDays,
+          resourcePolicy,
+          orderedResourceIds,
+          timeZone
+        );
+        if (!selectedSubset) {
+          bookable = false;
+        }
+      }
+    }
+
+    if (!bookable) {
+      unbookable.push(formatDateKey(cursor));
+    }
+
+    cursor = addDaysZoned(cursor, 1);
+  }
+
+  return unbookable;
+};

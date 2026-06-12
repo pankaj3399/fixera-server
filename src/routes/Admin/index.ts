@@ -118,8 +118,10 @@ import {
   adminReplySupportChat,
   adminCloseSupportChat,
   adminGetBookingConversation,
+  adminGetSupportUnreadCount,
 } from "../../handlers/Admin/chatModeration";
 import { getAdminBookingDetail, forceBookingStatus } from "../../handlers/Admin/bookingDetail";
+import { listAdminBookings } from "../../handlers/Admin/adminBookingsList";
 import {
   getKpiSummary,
   getKpiByRegion,
@@ -254,6 +256,7 @@ adminRouter.route('/cancellation-requests/:id/approve').post(approveCancellation
 adminRouter.route('/cancellation-requests/:id/deny').post(denyCancellationRequest);
 
 // Booking detail (consolidated)
+adminRouter.route('/bookings').get(listAdminBookings);
 adminRouter.route('/bookings/:id/full').get(getAdminBookingDetail);
 adminRouter.route('/bookings/:id/force-status').post(forceBookingStatus);
 
@@ -261,6 +264,7 @@ adminRouter.route('/bookings/:id/force-status').post(forceBookingStatus);
 adminRouter.route('/chat-reports').get(listChatReports);
 adminRouter.route('/chat-reports/:id').get(getChatReport);
 adminRouter.route('/chat-reports/:id/resolve').post(resolveChatReport);
+adminRouter.route('/conversations/unread-count').get(adminGetSupportUnreadCount);
 adminRouter.route('/conversations/:id').get(adminGetConversation);
 adminRouter.route('/conversations/:id/messages').get(adminGetConversationMessages);
 adminRouter.route('/conversations/:id/reply').post(adminReplySupportChat);

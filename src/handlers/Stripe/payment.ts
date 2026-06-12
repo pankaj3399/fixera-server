@@ -20,6 +20,7 @@ import {
   buildPaymentMetadata,
   buildTransferMetadata,
   determineBookingCurrency,
+  computeGrossBookingAmount,
 } from '../../utils/payment';
 import { calculateVAT } from '../../utils/vat';
 import PlatformSettings from '../../models/platformSettings';
@@ -249,13 +250,7 @@ export const createPaymentIntent = async (
     const projectInfo = booking.project as any;
     const selectedExtraOptionsTotal = Array.isArray(booking.selectedExtraOptions)
       ? booking.selectedExtraOptions.reduce(
-          (sum: number, entry: any) => {
-            if (typeof entry?.bookedPrice === 'number') return sum + entry.bookedPrice;
-            if (typeof entry === 'number' && Array.isArray(projectInfo?.extraOptions) && entry >= 0 && entry < projectInfo.extraOptions.length) {
-              return sum + (projectInfo.extraOptions[entry]?.price || 0);
-            }
-            return sum;
-          },
+          (sum: number, entry: any) => (typeof entry?.bookedPrice === 'number' ? sum + entry.bookedPrice : sum),
           0
         )
       : 0;
@@ -345,9 +340,7 @@ export const createPaymentIntent = async (
       }
     }
 
-    const fullBookingAmount = +(
-      booking.quote.amount * (1 + commissionPercent / 100) + milestoneExtraOptionsCharge
-    ).toFixed(2);
+    const fullBookingAmount = computeGrossBookingAmount(booking, commissionPercent);
 
     let codeInfo: any = null;
     if (discountCode) {
@@ -355,9 +348,9 @@ export const createPaymentIntent = async (
       const validation = await validateDiscountCode(
         discountCode,
         customer._id.toString(),
-        booking.quote.amount,
+        fullBookingAmount,
         customer.location?.country,
-        (booking as any).serviceType
+        (booking as any).rfqData?.serviceType
       );
       if (!validation.ok) {
         return { success: false, error: { code: 'INVALID_DISCOUNT_CODE', message: validation.error || 'Invalid discount code' } };

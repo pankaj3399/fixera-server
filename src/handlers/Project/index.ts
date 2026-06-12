@@ -13,6 +13,7 @@ import {
   fromZonedTime,
   getProjectAvailableSlotsForDate,
   getResourcePolicy,
+  getUnbookableStartDates,
   getWorkingRangeUtc,
   normalizeRangeEndInclusive,
   PARTIAL_BLOCK_THRESHOLD_HOURS,
@@ -628,6 +629,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const startDate = req.query.startDate as string | undefined;
     const endDate = req.query.endDate as string | undefined;
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
+    const excludeBookingId = req.query.excludeBookingId as string | undefined;
     const debugEnabled =
       process.env.ENABLE_DEBUG_PAYLOAD === "true" ||
       (typeof req.query.debug === "string" &&
@@ -1030,6 +1032,10 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       ],
     };
 
+    if (excludeBookingId && mongoose.isValidObjectId(excludeBookingId)) {
+      bookingFilter._id = { $ne: new mongoose.Types.ObjectId(excludeBookingId) };
+    }
+
     // Add team member filters if we have valid IDs
     if (validatedTeamMemberIds.length > 0) {
       bookingFilter.$or.push(
@@ -1319,6 +1325,27 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       });
     }
 
+
+    if (useWindowBasedCheck) {
+      const unbookableYmds = await getUnbookableStartDates({
+        projectId: String(project._id),
+        from: rangeStart,
+        to: rangeEnd,
+        subprojectIndex:
+          typeof subprojectIndex === "number" ? subprojectIndex : undefined,
+        excludeBookingId,
+      });
+
+      unbookableYmds.forEach((ymd) => {
+        const parts = ymd.split("-").map(Number);
+        if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return;
+        const [year, month, day] = parts;
+        const zonedMidnight = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+        const key = fromZonedTime(zonedMidnight, timeZone).toISOString();
+        allBlockedDates.add(key);
+        finalBlockedDateSet.add(key);
+      });
+    }
 
     const blockedDatesArray = Array.from(allBlockedDates);
 

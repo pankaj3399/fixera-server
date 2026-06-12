@@ -49,11 +49,36 @@ export const getPopularProjects = async (req: Request, res: Response) => {
                       {
                         $and: [
                           { $eq: ["$status", "completed"] },
+                          { $ne: [{ $ifNull: ["$customerReview.communicationLevel", null] }, null] },
+                          { $ne: [{ $ifNull: ["$customerReview.valueOfDelivery", null] }, null] },
                           { $ne: [{ $ifNull: ["$customerReview.qualityOfService", null] }, null] },
                           { $ne: ["$customerReview.isHidden", true] },
                         ],
                       },
                       1,
+                      0,
+                    ],
+                  },
+                },
+                ratingSum: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $eq: ["$status", "completed"] },
+                          { $ne: [{ $ifNull: ["$customerReview.communicationLevel", null] }, null] },
+                          { $ne: [{ $ifNull: ["$customerReview.valueOfDelivery", null] }, null] },
+                          { $ne: [{ $ifNull: ["$customerReview.qualityOfService", null] }, null] },
+                          { $ne: ["$customerReview.isHidden", true] },
+                        ],
+                      },
+                      {
+                        $avg: [
+                          { $ifNull: ["$customerReview.communicationLevel", 0] },
+                          { $ifNull: ["$customerReview.valueOfDelivery", 0] },
+                          { $ifNull: ["$customerReview.qualityOfService", 0] },
+                        ],
+                      },
                       0,
                     ],
                   },
@@ -89,22 +114,33 @@ export const getPopularProjects = async (req: Request, res: Response) => {
           completedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.completed", 0] }, 0] },
           engagedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.total", 0] }, 0] },
           reviewedBookings: { $ifNull: [{ $arrayElemAt: ["$bookingStats.reviewed", 0] }, 0] },
+          ratingSum: { $ifNull: [{ $arrayElemAt: ["$bookingStats.ratingSum", 0] }, 0] },
           favoriteCount: { $ifNull: [{ $arrayElemAt: ["$favoriteStats.count", 0] }, 0] },
         },
       },
       {
         $addFields: {
-          popularityScore: {
+          avgRating: {
+            $cond: [{ $gt: ["$reviewedBookings", 0] }, { $divide: ["$ratingSum", "$reviewedBookings"] }, 0],
+          },
+          engagementScore: {
             $add: [
               { $multiply: ["$completedBookings", 5] },
-              { $multiply: ["$reviewedBookings", 3] },
               { $multiply: ["$engagedBookings", 2] },
               "$favoriteCount",
             ],
           },
         },
       },
-      { $sort: { popularityScore: -1, completedBookings: -1, reviewedBookings: -1, createdAt: -1 } },
+      {
+        $sort: {
+          reviewedBookings: -1,
+          avgRating: -1,
+          engagementScore: -1,
+          completedBookings: -1,
+          createdAt: -1,
+        },
+      },
       { $limit: limitNum },
       {
         $project: {

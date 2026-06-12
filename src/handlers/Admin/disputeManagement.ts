@@ -173,14 +173,14 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
 
   const [warrantyClaims, refundRequests] = await Promise.all([
     WarrantyClaim.find({ status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } })
-      .populate({ path: 'booking', select: 'bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
+      .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
       .populate('customer', 'name email')
       .populate('professional', 'name email username')
       .sort({ openedAt: -1 })
       .limit(50)
       .lean(),
     CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
-      .populate({ path: 'booking', select: 'bookingNumber status payment project actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
+      .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
       .populate('requestedBy', 'name email')
       .sort({ escalatedAt: -1 })
       .limit(50)
@@ -195,6 +195,8 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       source: 'warranty',
       readOnly: true,
       resolveHref: '/admin/warranty-claims',
+      bookingId: booking._id ? String(booking._id) : undefined,
+      claimStatus: claim.status,
       bookingNumber: booking.bookingNumber || claim.claimNumber || '(warranty claim)',
       status: booking.status || 'completed',
       customer: claim.customer,
@@ -224,10 +226,11 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       source: 'refund',
       readOnly: true,
       resolveHref: '/admin/cancellation-requests',
+      bookingId: booking._id ? String(booking._id) : undefined,
       bookingNumber: booking.bookingNumber || '(refund request)',
       status: booking.status || '',
       customer: request.requestedBy,
-      professional: undefined,
+      professional: booking.professional ? { _id: String(booking.professional) } : undefined,
       project: booking.project,
       payment: booking.payment,
       actualStartDate: booking.actualStartDate,
@@ -359,6 +362,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
   let disputeType: string = 'extra_costs';
   let isExtraCostsDispute = true;
   let sanitizedAttachments: string[] = [];
+  let originalDisputeStatus: BookingStatus = ACTIVE_DISPUTE_STATUS;
 
   try {
     if (!action || !['accept_professional', 'reject_extra_costs', 'adjust'].includes(action)) {
@@ -409,16 +413,21 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    if (booking.status !== ACTIVE_DISPUTE_STATUS) {
+    const hasOpenDispute = Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
+    if (booking.status !== ACTIVE_DISPUTE_STATUS && !hasOpenDispute) {
       return res.status(400).json({
         success: false,
-        error: { code: 'INVALID_STATUS', message: `Booking is not in dispute status (current: ${booking.status})` }
+        error: { code: 'INVALID_STATUS', message: `Booking has no open dispute to resolve (current: ${booking.status})` }
       });
     }
+    originalDisputeStatus = booking.status as BookingStatus;
 
     disputeType = String((booking.dispute as any)?.type || 'extra_costs');
     isExtraCostsDispute = disputeType === 'extra_costs';
-    targetStatus = (forceStatus as BookingStatus) || COMPLETED_BOOKING_STATUS;
+    const resolvedDefault: BookingStatus =
+      (booking.statusBeforeDispute as BookingStatus | undefined) ||
+      (originalDisputeStatus !== ACTIVE_DISPUTE_STATUS ? originalDisputeStatus : COMPLETED_BOOKING_STATUS);
+    targetStatus = (forceStatus as BookingStatus) || resolvedDefault;
 
     let rescheduleScheduleFields: Record<string, any> | null = null;
     if (disputeType === 'reschedule' && typeof forcedStartDate === 'string' && forcedStartDate.trim()) {
@@ -508,7 +517,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     }
 
     resolvedBooking = await Booking.findOneAndUpdate(
-      { _id: booking._id, status: ACTIVE_DISPUTE_STATUS },
+      { _id: booking._id, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null },
       {
         $set: setFields,
         $push: {
@@ -529,7 +538,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         success: false,
         error: {
           code: 'BOOKING_STATUS_CONFLICT',
-          message: `Booking status changed to "${currentBooking?.status || booking.status}" before the dispute could be resolved`
+          message: `This dispute was already resolved or modified before the action completed (current status: "${currentBooking?.status || booking.status}")`
         }
       });
     }
@@ -570,7 +579,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
           }
         ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
       } catch (refundError: any) {
-        const rollbackSet: Record<string, any> = { status: ACTIVE_DISPUTE_STATUS };
+        const rollbackSet: Record<string, any> = { status: originalDisputeStatus };
         const rollbackUnset: Record<string, any> = {
           'dispute.resolvedAt': '',
           'dispute.resolution': '',
@@ -601,7 +610,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
             $unset: rollbackUnset,
             $push: {
               statusHistory: {
-                status: ACTIVE_DISPUTE_STATUS,
+                status: originalDisputeStatus,
                 timestamp: new Date(),
                 updatedBy: adminUser._id,
                 note: 'Refund failed during dispute resolution; dispute reopened',
@@ -649,7 +658,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         forceStatus: forceStatus || null,
         disputeType,
         resolutionAttachmentsCount: sanitizedAttachments.length,
-        before: { status: ACTIVE_DISPUTE_STATUS },
+        before: { status: originalDisputeStatus },
         after: { status: targetStatus },
       },
       status: 'success',

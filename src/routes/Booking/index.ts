@@ -21,6 +21,7 @@ import {
   extendBookingExecution,
 } from '../../handlers/Booking/payment-integration';
 import { getDiscountPreview } from '../../handlers/Booking/discountPreview';
+import { updateBookingPlanning } from '../../handlers/Booking/planning';
 import {
   listProfessionalRefundRequests,
   getBookingCancellationRequest,
@@ -80,6 +81,7 @@ router.post('/:bookingId/schedule', setBookingSchedule);
 router.post('/:bookingId/reschedule-request', requestBookingReschedule);
 router.post('/:bookingId/respond-reschedule', respondToBookingReschedule);
 router.post('/:bookingId/extend-execution', extendBookingExecution);
+router.put('/:bookingId/planning', updateBookingPlanning);
 
 // Update booking status (with automatic payment transfer on completion)
 router.put('/:bookingId/status', updateBookingStatusWithPayment);

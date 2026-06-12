@@ -27,6 +27,21 @@ export function convertToStripeAmount(amount: number, currency: string = "EUR"):
   return Math.round(amount * 100);
 }
 
+export function computeGrossBookingAmount(
+  booking: { quote?: { amount?: number }; selectedExtraOptions?: Array<{ bookedPrice?: number } | number> },
+  commissionPercent: number
+): number {
+  const optionsTotal = Array.isArray(booking?.selectedExtraOptions)
+    ? booking.selectedExtraOptions.reduce((sum: number, entry) => {
+        const bookedPrice = (entry as { bookedPrice?: number })?.bookedPrice;
+        return typeof bookedPrice === 'number' ? sum + bookedPrice : sum;
+      }, 0)
+    : 0;
+  const commissionedOptions = +(optionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+  const quoteAmount = booking?.quote?.amount || 0;
+  return +(quoteAmount * (1 + commissionPercent / 100) + commissionedOptions).toFixed(2);
+}
+
 /**
  * Convert amount from Stripe format (cents) to major units
  * @param amount - Amount in cents (e.g., 10050)

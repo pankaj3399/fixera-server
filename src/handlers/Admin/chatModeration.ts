@@ -473,3 +473,25 @@ export const adminGetBookingConversation = async (req: Request, res: Response) =
     return res.status(500).json({ success: false, msg: "Failed to load booking conversation" });
   }
 };
+
+export const adminGetSupportUnreadCount = async (req: Request, res: Response) => {
+  try {
+    const adminIdRaw = (req as any).admin?._id ?? (req as any).user?._id;
+    const adminId = adminIdRaw?.toString();
+    if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
+      return res.status(401).json({ success: false, msg: "Unauthorized" });
+    }
+    const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    const count = await Conversation.countDocuments({
+      type: "support",
+      status: "active",
+      supportAdminId: adminObjectId,
+      lastMessageSenderId: { $ne: null },
+      $expr: { $eq: ["$lastMessageSenderId", "$supportTargetUserId"] },
+    });
+    return res.json({ success: true, data: { count } });
+  } catch (error: any) {
+    console.error("Admin get support unread count error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load support unread count" });
+  }
+};

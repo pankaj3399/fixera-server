@@ -2,7 +2,12 @@ import express from "express";
 import { protect } from "../../middlewares/auth";
 import { upload } from "../../utils/s3Upload";
 import {
+  adminApproveWarrantyClaim,
+  adminApproveWarrantyResolve,
+  adminAdjustWarrantyResolve,
   adminCloseWarrantyClaim,
+  adminDeclineWarrantyClaim,
+  adminSetWarrantyStatus,
   attachClaimEvidence,
   confirmWarrantyResolution,
   declineWarrantyClaim,
@@ -32,6 +37,11 @@ router.get("/my", listMyWarrantyClaims);
 router.get("/admin/list", listAdminWarrantyClaims);
 router.get("/admin/analytics", getAdminWarrantyAnalytics);
 router.post("/admin/:claimId/close", adminCloseWarrantyClaim);
+router.post("/admin/:claimId/approve", adminApproveWarrantyClaim);
+router.post("/admin/:claimId/decline", adminDeclineWarrantyClaim);
+router.post("/admin/:claimId/approve-resolve", adminApproveWarrantyResolve);
+router.post("/admin/:claimId/adjust-resolve", adminAdjustWarrantyResolve);
+router.post("/admin/:claimId/status", adminSetWarrantyStatus);
 
 router.get("/booking/:bookingId", getWarrantyClaimByBooking);
 router.get("/:claimId", getWarrantyClaimById);

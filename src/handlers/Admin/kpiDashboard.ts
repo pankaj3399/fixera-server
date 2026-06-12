@@ -104,6 +104,144 @@ const formatCity = (key: string): string => (key === '__unknown__' ? 'Unknown' :
 
 const safeRate = (numer: number, denom: number): number => (denom > 0 ? (numer / denom) * 100 : 0);
 const round1 = (n: number | null | undefined) => (n == null || !Number.isFinite(n) ? null : Math.round(n * 10) / 10);
+const money2 = (n: number | null | undefined) => Math.round(((n as number) || 0) * 100) / 100;
+
+const PAID_STATUSES = ['booked', 'in_progress', 'professional_completed', 'completed'];
+
+const quotedExpr = { $or: [{ $ifNull: ['$quote.submittedAt', false] }, { $gt: [{ $size: { $ifNull: ['$quoteVersions', []] } }, 0] }] };
+const firstQuoteAtExpr = { $ifNull: [{ $arrayElemAt: ['$quoteVersions.createdAt', 0] }, '$quote.submittedAt'] };
+const reviewAvgExpr = {
+  $avg: [
+    { $ifNull: ['$customerReview.communicationLevel', null] },
+    { $ifNull: ['$customerReview.valueOfDelivery', null] },
+    { $ifNull: ['$customerReview.qualityOfService', null] },
+  ],
+};
+
+const bookingMetricsProjection = (currencyField: string) => ({
+  status: 1,
+  createdAt: 1,
+  paymentAmount: '$payment.amount',
+  platformCommission: '$payment.platformCommission',
+  paymentCurrency: currencyField,
+  paymentStatus: '$payment.status',
+  refundAmount: {
+    $ifNull: [
+      '$payment.refundAmount',
+      { $ifNull: ['$cancellation.refundAmount', { $ifNull: ['$payment.totalWithVat', { $ifNull: ['$payment.amount', 0] }] }] },
+    ],
+  },
+  rescheduleRequestAt: '$rescheduleRequest.requestedAt',
+  noShowAt: '$noShow.markedAt',
+  disputeAt: '$dispute.raisedAt',
+  reviewedAt: '$customerReview.reviewedAt',
+  reviewAvg: reviewAvgExpr,
+  isRfq: { $eq: ['$bookingType', 'professional'] },
+  quoted: { $cond: [{ $eq: ['$bookingType', 'professional'] }, quotedExpr, false] },
+  firstQuoteAt: { $cond: [{ $eq: ['$bookingType', 'professional'] }, firstQuoteAtExpr, null] },
+  scheduledStartDate: 1,
+  actualStartDate: 1,
+  scheduledExecutionEndDate: 1,
+  actualEndDate: 1,
+});
+
+const bookingMetricsAccumulators = {
+  totalBookings: { $sum: 1 },
+  totalRfqs: { $sum: { $cond: ['$isRfq', 1, 0] } },
+  completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+  quotedCount: { $sum: { $cond: ['$quoted', 1, 0] } },
+  bookingsCount: { $sum: { $cond: [{ $in: ['$status', PAID_STATUSES] }, 1, 0] } },
+  disputeCount: { $sum: { $cond: [{ $ifNull: ['$disputeAt', false] }, 1, 0] } },
+  noShowCount: { $sum: { $cond: [{ $ifNull: ['$noShowAt', false] }, 1, 0] } },
+  refundCount: { $sum: { $cond: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, 1, 0] } },
+  refundAmount: { $sum: { $cond: [{ $and: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, '$refundAmount', 0] } },
+  reschedulingCount: { $sum: { $cond: [{ $ifNull: ['$rescheduleRequestAt', false] }, 1, 0] } },
+  reviewCount: { $sum: { $cond: [{ $ifNull: ['$reviewedAt', false] }, 1, 0] } },
+  avgReviewScore: { $avg: { $cond: [{ $ifNull: ['$reviewedAt', false] }, '$reviewAvg', null] } },
+  grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$paymentAmount', 0] }, 0] } },
+  platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
+  avgTtfqHours: { $avg: { $cond: ['$quoted', { $divide: [{ $subtract: ['$firstQuoteAt', '$createdAt'] }, 1000 * 60 * 60] }, null] } },
+  startOverdueEligible: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$scheduledStartDate', false] }] }, 1, 0] } },
+  startOverdueCount: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, 1, 0] } },
+  startOverdueDaysSum: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, { $divide: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 1000 * 60 * 60 * 24] }, 0] } },
+  completionOverdueEligible: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$scheduledExecutionEndDate', false] }] }, 1, 0] } },
+  completionOverdueCount: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualEndDate', false] }, { $ifNull: ['$scheduledExecutionEndDate', false] }, { $gt: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 0] }] }, 1, 0] } },
+  completionOverdueDaysSum: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualEndDate', false] }, { $ifNull: ['$scheduledExecutionEndDate', false] }, { $gt: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 0] }] }, { $divide: [{ $subtract: ['$actualEndDate', '$scheduledExecutionEndDate'] }, 1000 * 60 * 60 * 24] }, 0] } },
+};
+
+type GroupAgg = Record<string, number | null | undefined>;
+
+interface DerivedBookingMetrics {
+  totalBookings: number;
+  completedBookings: number;
+  totalRfqs: number;
+  quotedCount: number;
+  bookingsCount: number;
+  disputeCount: number;
+  noShowCount: number;
+  refundCount: number;
+  reschedulingCount: number;
+  reviewCount: number;
+  grossRevenue: number;
+  platformRevenue: number;
+  refundAmount: number;
+  avgTtfqHours: number | null;
+  avgReviewScore: number | null;
+  quoteResponseRate: number | null;
+  quotationConversionRate: number | null;
+  disputeRate: number | null;
+  noShowRate: number | null;
+  refundRate: number | null;
+  reschedulingRate: number | null;
+  startOverdueRate: number | null;
+  avgStartOverdueDays: number | null;
+  completionOverdueRate: number | null;
+  avgCompletionOverdueDays: number | null;
+  views?: number;
+  bookingRate?: number | null;
+}
+
+const deriveBookingRates = (g: GroupAgg, views?: number): DerivedBookingMetrics => {
+  const totalRfqs = (g.totalRfqs as number) || 0;
+  const quotedCount = (g.quotedCount as number) || 0;
+  const bookingsCount = (g.bookingsCount as number) || 0;
+  const startEligible = (g.startOverdueEligible as number) || 0;
+  const startCount = (g.startOverdueCount as number) || 0;
+  const completionEligible = (g.completionOverdueEligible as number) || 0;
+  const completionCount = (g.completionOverdueCount as number) || 0;
+  const out: DerivedBookingMetrics = {
+    totalBookings: (g.totalBookings as number) || 0,
+    completedBookings: (g.completedBookings as number) || 0,
+    totalRfqs,
+    quotedCount,
+    bookingsCount,
+    disputeCount: (g.disputeCount as number) || 0,
+    noShowCount: (g.noShowCount as number) || 0,
+    refundCount: (g.refundCount as number) || 0,
+    reschedulingCount: (g.reschedulingCount as number) || 0,
+    reviewCount: (g.reviewCount as number) || 0,
+    grossRevenue: money2(g.grossRevenue as number),
+    platformRevenue: money2(g.platformRevenue as number),
+    refundAmount: money2(g.refundAmount as number),
+    avgTtfqHours: round1(g.avgTtfqHours),
+    avgReviewScore: round1(g.avgReviewScore),
+    quoteResponseRate: round1(safeRate(quotedCount, totalRfqs)),
+    quotationConversionRate: round1(safeRate(bookingsCount, quotedCount)),
+    disputeRate: round1(safeRate((g.disputeCount as number) || 0, totalRfqs)),
+    noShowRate: round1(safeRate((g.noShowCount as number) || 0, totalRfqs)),
+    refundRate: round1(safeRate((g.refundCount as number) || 0, totalRfqs)),
+    reschedulingRate: round1(safeRate((g.reschedulingCount as number) || 0, totalRfqs)),
+    startOverdueRate: round1(safeRate(startCount, startEligible)),
+    avgStartOverdueDays: round1(startCount > 0 ? ((g.startOverdueDaysSum as number) || 0) / startCount : null),
+    completionOverdueRate: round1(safeRate(completionCount, completionEligible)),
+    avgCompletionOverdueDays: round1(completionCount > 0 ? ((g.completionOverdueDaysSum as number) || 0) / completionCount : null),
+  };
+  if (typeof views === 'number') {
+    out.views = views;
+    out.bookingRate = round1(safeRate(bookingsCount, views));
+  }
+  return out;
+};
 
 // ---------- countries list ----------
 
@@ -405,19 +543,8 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
 
     const bookingRows = await Booking.aggregate([
       { $match: { createdAt: { $gte: from, $lte: to }, ...bookingCountryMatch } },
-      {
-        $group: {
-          _id: normalizeCityExpr,
-          totalBookings: { $sum: 1 },
-          completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          bookedValue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', null] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', null] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
-          quotedCount: { $sum: { $cond: [{ $or: [{ $ifNull: ['$quote.submittedAt', false] }, { $gt: [{ $size: { $ifNull: ['$quoteVersions', []] } }, 0] }] }, 1, 0] } },
-          acceptedCount: { $sum: { $cond: [{ $in: ['$status', ['quote_accepted', 'payment_pending', 'booked', 'in_progress', 'professional_completed', 'completed']] }, 1, 0] } },
-          disputeCount: { $sum: { $cond: [{ $ifNull: ['$dispute.raisedAt', false] }, 1, 0] } },
-          refundCount: { $sum: { $cond: [{ $in: ['$payment.status', ['refunded', 'partially_refunded']] }, 1, 0] } },
-        },
-      },
+      { $project: { city: normalizeCityExpr, ...bookingMetricsProjection('$payment.currency') } },
+      { $group: { _id: '$city', ...bookingMetricsAccumulators } },
     ]);
 
     const warrantyRows = await WarrantyClaim.aggregate([
@@ -426,26 +553,47 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
       { $unwind: { path: '$b', preserveNullAndEmptyArrays: true } },
       ...(country ? [{ $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> }] : []),
       {
-        $group: {
-          _id: {
+        $project: {
+          city: {
             $let: {
               vars: { raw: { $ifNull: ['$b.location.city', null] } },
               in: { $cond: [{ $or: [{ $eq: ['$$raw', null] }, { $eq: ['$$raw', ''] }] }, '__unknown__', { $toLower: { $trim: { input: '$$raw' } } }] },
             },
           },
-          warrantyCount: { $sum: 1 },
+          responseHours: { $cond: [{ $ifNull: ['$proposal.proposedAt', false] }, { $divide: [{ $subtract: ['$proposal.proposedAt', '$openedAt'] }, 1000 * 60 * 60] }, null] },
         },
       },
+      {
+        $group: {
+          _id: '$city',
+          warrantyCount: { $sum: 1 },
+          avgWarrantyResponseHours: { $avg: '$responseHours' },
+        },
+      },
+    ]);
+
+    const favoriteRows = await Favorite.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $lookup: { from: 'users', localField: 'user', foreignField: '_id', as: 'u' } },
+      { $unwind: { path: '$u', preserveNullAndEmptyArrays: false } },
+      ...(country
+        ? [{
+            $match: {
+              $or: [
+                { 'u.location.country': buildExactCountryRegex(country) },
+                { 'u.companyAddress.country': buildExactCountryRegex(country) },
+                { 'u.businessInfo.country': buildExactCountryRegex(country) },
+              ],
+            } as Record<string, unknown>,
+          }]
+        : []),
+      { $group: { _id: normalizeUserCityExpr, favoritesCount: { $sum: 1 } } },
     ]);
 
     const byCity = new Map<string, Record<string, unknown>>();
     const ensure = (key: string) => {
       if (!byCity.has(key)) {
-        byCity.set(key, {
-          city: formatCity(key), signUps: 0, views: 0, totalBookings: 0, completedBookings: 0,
-          bookedValue: 0, platformRevenue: 0, quotedCount: 0, acceptedCount: 0,
-          disputeCount: 0, warrantyCount: 0, refundCount: 0,
-        });
+        byCity.set(key, { city: formatCity(key), signUps: 0, views: 0, warrantyCount: 0, avgWarrantyResponseHours: null, favoritesCount: 0 });
       }
       return byCity.get(key)!;
     };
@@ -454,25 +602,24 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
     for (const r of viewRows) ensure(r._id).views = r.views;
     for (const r of bookingRows) {
       const row = ensure(r._id);
-      row.totalBookings = r.totalBookings;
-      row.completedBookings = r.completedBookings;
-      row.bookedValue = Math.round((r.bookedValue || 0) * 100) / 100;
-      row.platformRevenue = Math.round((r.platformRevenue || 0) * 100) / 100;
-      row.quotedCount = r.quotedCount;
-      row.acceptedCount = r.acceptedCount;
-      row.disputeCount = r.disputeCount;
-      row.refundCount = r.refundCount;
+      Object.assign(row, deriveBookingRates(r as GroupAgg, (row.views as number) || 0));
+      row.bookedValue = (row as Record<string, number>).grossRevenue;
     }
-    for (const r of warrantyRows) ensure(r._id).warrantyCount = r.warrantyCount;
+    for (const r of warrantyRows) {
+      const row = ensure(r._id);
+      row.warrantyCount = r.warrantyCount;
+      row.avgWarrantyResponseHours = round1(r.avgWarrantyResponseHours);
+    }
+    for (const r of favoriteRows) ensure(r._id).favoritesCount = r.favoritesCount;
 
     const rows: Array<Record<string, number | string | null>> = Array.from(byCity.values()).map((r) => {
-      const obj = r as Record<string, number | string>;
+      const obj = r as Record<string, number | string | null>;
+      const totalRfqs = (obj.totalRfqs as number) || 0;
       return {
         ...obj,
-        disputeRate: round1(safeRate(obj.disputeCount as number, obj.totalBookings as number)),
-        warrantyClaimRate: round1(safeRate(obj.warrantyCount as number, obj.totalBookings as number)),
-        refundRate: round1(safeRate(obj.refundCount as number, obj.totalBookings as number)),
-        quotationConversionRate: round1(safeRate(obj.acceptedCount as number, obj.quotedCount as number)),
+        views: (obj.views as number) || 0,
+        bookingRate: round1(safeRate((obj.bookingsCount as number) || 0, (obj.views as number) || 0)),
+        warrantyClaimRate: round1(safeRate((obj.warrantyCount as number) || 0, totalRfqs)),
       };
     });
 
@@ -504,59 +651,95 @@ export const getKpiByService = async (req: Request, res: Response) => {
       { $unwind: { path: '$proj', preserveNullAndEmptyArrays: true } },
       {
         $project: {
-          serviceRaw: {
-            $trim: { input: { $ifNull: ['$proj.service', { $ifNull: ['$rfqData.serviceType', ''] }] } },
-          },
-          status: 1,
-          createdAt: 1,
-          paymentAmount: '$payment.amount',
-          platformCommission: '$payment.platformCommission',
-          paymentCurrency: '$payment.currency',
-          paymentStatus: '$payment.status',
-          rescheduleRequestAt: '$rescheduleRequest.requestedAt',
-          quoted: { $or: [{ $ifNull: ['$quote.submittedAt', false] }, { $gt: [{ $size: { $ifNull: ['$quoteVersions', []] } }, 0] }] },
-          firstQuoteAt: { $ifNull: [{ $arrayElemAt: ['$quoteVersions.createdAt', 0] }, '$quote.submittedAt'] },
+          serviceRaw: { $trim: { input: { $ifNull: ['$proj.service', { $ifNull: ['$rfqData.serviceType', ''] }] } } },
+          ...bookingMetricsProjection('$payment.currency'),
         },
       },
       {
         $group: {
           _id: { $cond: [{ $eq: ['$serviceRaw', ''] }, '__unknown__', { $toLower: '$serviceRaw' }] },
           serviceLabel: { $first: '$serviceRaw' },
-          totalRfqs: { $sum: 1 },
-          quotedCount: { $sum: { $cond: ['$quoted', 1, 0] } },
-          bookingsCount: { $sum: { $cond: [{ $in: ['$status', ['booked', 'in_progress', 'professional_completed', 'completed']] }, 1, 0] } },
-          completedCount: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          disputeCount: { $sum: { $cond: [{ $eq: ['$status', 'dispute'] }, 1, 0] } },
-          refundCount: { $sum: { $cond: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, 1, 0] } },
-          reschedulingCount: { $sum: { $cond: [{ $ifNull: ['$rescheduleRequestAt', false] }, 1, 0] } },
-          grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$paymentAmount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
-          avgTtfqHours: { $avg: { $cond: ['$quoted', { $divide: [{ $subtract: ['$firstQuoteAt', '$createdAt'] }, 1000 * 60 * 60] }, null] } },
+          ...bookingMetricsAccumulators,
         },
       },
     ]);
+
+    const warrantyRows = await WarrantyClaim.aggregate([
+      { $match: { openedAt: { $gte: from, $lte: to } } },
+      { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
+      { $unwind: { path: '$b', preserveNullAndEmptyArrays: false } },
+      ...(country ? [{ $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> }] : []),
+      { $lookup: { from: 'projects', localField: 'b.project', foreignField: '_id', as: 'proj' } },
+      { $unwind: { path: '$proj', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          serviceKey: {
+            $let: {
+              vars: { raw: { $trim: { input: { $ifNull: ['$proj.service', { $ifNull: ['$b.rfqData.serviceType', ''] }] } } } },
+              in: { $cond: [{ $eq: ['$$raw', ''] }, '__unknown__', { $toLower: '$$raw' }] },
+            },
+          },
+          responseHours: { $cond: [{ $ifNull: ['$proposal.proposedAt', false] }, { $divide: [{ $subtract: ['$proposal.proposedAt', '$openedAt'] }, 1000 * 60 * 60] }, null] },
+        },
+      },
+      { $group: { _id: '$serviceKey', warrantyCount: { $sum: 1 }, avgWarrantyResponseHours: { $avg: '$responseHours' } } },
+    ]);
+
+    const warrantyByService = new Map<string, { warrantyCount: number; avgWarrantyResponseHours: number | null }>();
+    for (const r of warrantyRows) warrantyByService.set(String(r._id), { warrantyCount: r.warrantyCount, avgWarrantyResponseHours: round1(r.avgWarrantyResponseHours) });
+
+    const favoriteRows = await Favorite.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to }, targetType: 'project' } },
+      { $lookup: { from: 'projects', localField: 'targetId', foreignField: '_id', as: 'proj' } },
+      { $unwind: { path: '$proj', preserveNullAndEmptyArrays: false } },
+      ...(country
+        ? [
+            { $lookup: { from: 'users', localField: 'proj.professionalId', foreignField: '_id', as: 'pro' } },
+            { $unwind: { path: '$pro', preserveNullAndEmptyArrays: false } },
+            {
+              $match: {
+                $or: [
+                  { 'pro.location.country': buildExactCountryRegex(country) },
+                  { 'pro.companyAddress.country': buildExactCountryRegex(country) },
+                  { 'pro.businessInfo.country': buildExactCountryRegex(country) },
+                ],
+              } as Record<string, unknown>,
+            },
+          ]
+        : []),
+      {
+        $project: {
+          serviceKey: {
+            $let: {
+              vars: { raw: { $trim: { input: { $ifNull: ['$proj.service', ''] } } } },
+              in: { $cond: [{ $eq: ['$$raw', ''] }, '__unknown__', { $toLower: '$$raw' }] },
+            },
+          },
+        },
+      },
+      { $group: { _id: '$serviceKey', favoritesCount: { $sum: 1 } } },
+    ]);
+    const favByService = new Map<string, number>();
+    for (const r of favoriteRows) favByService.set(String(r._id), r.favoritesCount);
 
     const serviceViews = viewRows
       .map((r) => ({ serviceId: String(r._id || ''), views: r.views }))
       .sort((a, b) => b.views - a.views);
 
     const serviceBookings = bookingRows
-      .map((r) => ({
-        serviceType: r._id === '__unknown__' ? 'Unknown' : String(r.serviceLabel || r._id || ''),
-        totalRfqs: r.totalRfqs,
-        quotedCount: r.quotedCount,
-        bookingsCount: r.bookingsCount,
-        completedCount: r.completedCount,
-        disputeCount: r.disputeCount,
-        refundCount: r.refundCount,
-        reschedulingCount: r.reschedulingCount,
-        grossRevenue: Math.round((r.grossRevenue || 0) * 100) / 100,
-        platformRevenue: Math.round((r.platformRevenue || 0) * 100) / 100,
-        avgTtfqHours: round1(r.avgTtfqHours),
-        quotationConversionRate: round1(safeRate(r.bookingsCount, r.quotedCount)),
-        disputeRate: round1(safeRate(r.disputeCount, r.totalRfqs)),
-        refundRate: round1(safeRate(r.refundCount, r.totalRfqs)),
-      }))
+      .map((r) => {
+        const w = warrantyByService.get(String(r._id)) || { warrantyCount: 0, avgWarrantyResponseHours: null };
+        const base = deriveBookingRates(r as GroupAgg);
+        return {
+          serviceType: r._id === '__unknown__' ? 'Unknown' : String(r.serviceLabel || r._id || ''),
+          ...base,
+          completedCount: base.completedBookings,
+          warrantyCount: w.warrantyCount,
+          avgWarrantyResponseHours: w.avgWarrantyResponseHours,
+          warrantyClaimRate: round1(safeRate(w.warrantyCount, base.totalRfqs || 0)),
+          favoritesCount: favByService.get(String(r._id)) || 0,
+        };
+      })
       .sort((a, b) => (b.platformRevenue || 0) - (a.platformRevenue || 0) || b.bookingsCount - a.bookingsCount);
 
     return res.json({ success: true, data: { range: { from, to }, serviceViews, serviceBookings } });
@@ -574,12 +757,13 @@ export const getKpiBySubproject = async (req: Request, res: Response) => {
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
-    const rows = await Booking.aggregate([
+    const grouped = await Booking.aggregate([
       { $match: { createdAt: { $gte: from, $lte: to }, selectedSubprojectIndex: { $exists: true, $ne: null }, ...bookingCountryMatch } },
       { $lookup: { from: 'projects', localField: 'project', foreignField: '_id', as: 'proj' } },
       { $unwind: { path: '$proj', preserveNullAndEmptyArrays: true } },
       {
         $project: {
+          projectId: '$project',
           subIdx: '$selectedSubprojectIndex',
           subprojectName: {
             $let: {
@@ -588,77 +772,63 @@ export const getKpiBySubproject = async (req: Request, res: Response) => {
             },
           },
           projectTitle: '$proj.title',
-          status: 1,
-          paymentAmount: '$payment.amount',
-          platformCommission: '$payment.platformCommission',
-          paymentCurrency: '$payment.currency',
-          paymentStatus: '$payment.status',
-          rescheduleRequestAt: '$rescheduleRequest.requestedAt',
-          customerReview: '$customerReview',
-          executionDuration: {
-            $let: {
-              vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } },
-              in: '$$sp.executionDuration',
-            },
-          },
-          preparationDuration: {
-            $let: {
-              vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } },
-              in: '$$sp.preparationDuration',
-            },
-          },
-          bufferDuration: {
-            $let: {
-              vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } },
-              in: '$$sp.bufferDuration',
-            },
-          },
-          price: {
-            $let: {
-              vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } },
-              in: '$$sp.pricing.amount',
-            },
-          },
+          executionDuration: { $let: { vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } }, in: '$$sp.executionDuration' } },
+          preparationDuration: { $let: { vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } }, in: '$$sp.preparationDuration' } },
+          bufferDuration: { $let: { vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } }, in: '$$sp.bufferDuration' } },
+          price: { $let: { vars: { sp: { $arrayElemAt: ['$proj.subprojects', '$selectedSubprojectIndex'] } }, in: '$$sp.pricing.amount' } },
+          ...bookingMetricsProjection('$payment.currency'),
         },
       },
       {
         $group: {
-          _id: { project: '$projectTitle', sub: '$subprojectName' },
-          totalRfqs: { $sum: 1 },
-          bookingsCount: { $sum: { $cond: [{ $in: ['$status', ['booked', 'in_progress', 'professional_completed', 'completed']] }, 1, 0] } },
-          completedCount: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          disputeCount: { $sum: { $cond: [{ $eq: ['$status', 'dispute'] }, 1, 0] } },
-          refundCount: { $sum: { $cond: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, 1, 0] } },
-          reschedulingCount: { $sum: { $cond: [{ $ifNull: ['$rescheduleRequestAt', false] }, 1, 0] } },
-          grossRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$paymentAmount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
+          _id: { project: '$projectTitle', sub: '$subprojectName', projectId: '$projectId', subIdx: '$subIdx' },
+          ...bookingMetricsAccumulators,
           execution: { $first: '$executionDuration' },
           preparation: { $first: '$preparationDuration' },
           buffer: { $first: '$bufferDuration' },
           price: { $first: '$price' },
         },
       },
+    ]);
+
+    const warrantyRows = await WarrantyClaim.aggregate([
+      { $match: { openedAt: { $gte: from, $lte: to } } },
+      { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
+      { $unwind: { path: '$b', preserveNullAndEmptyArrays: false } },
+      { $match: { 'b.selectedSubprojectIndex': { $exists: true, $ne: null } } },
+      ...(country ? [{ $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> }] : []),
       {
         $project: {
-          _id: 0,
-          projectTitle: '$_id.project',
-          subprojectName: '$_id.sub',
-          totalRfqs: 1,
-          bookingsCount: 1,
-          completedCount: 1,
-          disputeCount: 1,
-          refundCount: 1,
-          reschedulingCount: 1,
-          grossRevenue: { $round: ['$grossRevenue', 2] },
-          platformRevenue: { $round: [{ $ifNull: ['$platformRevenue', 0] }, 2] },
-          executionDuration: '$execution',
-          preparationDuration: '$preparation',
-          bufferDuration: '$buffer',
-          price: '$price',
+          projectId: '$b.project',
+          subIdx: '$b.selectedSubprojectIndex',
+          responseHours: { $cond: [{ $ifNull: ['$proposal.proposedAt', false] }, { $divide: [{ $subtract: ['$proposal.proposedAt', '$openedAt'] }, 1000 * 60 * 60] }, null] },
         },
       },
-      { $sort: { bookingsCount: -1, totalRfqs: -1 } },
+      { $group: { _id: { projectId: '$projectId', subIdx: '$subIdx' }, warrantyCount: { $sum: 1 }, avgWarrantyResponseHours: { $avg: '$responseHours' } } },
     ]);
+
+    const warrantyBySub = new Map<string, { warrantyCount: number; avgWarrantyResponseHours: number | null }>();
+    for (const r of warrantyRows) warrantyBySub.set(`${String(r._id.projectId)}|${String(r._id.subIdx)}`, { warrantyCount: r.warrantyCount, avgWarrantyResponseHours: round1(r.avgWarrantyResponseHours) });
+
+    const rows = grouped
+      .map((r) => {
+        const w = warrantyBySub.get(`${String(r._id.projectId)}|${String(r._id.subIdx)}`) || { warrantyCount: 0, avgWarrantyResponseHours: null };
+        const base = deriveBookingRates(r as GroupAgg);
+        return {
+          projectTitle: r._id.project,
+          subprojectName: r._id.sub,
+          ...base,
+          completedCount: base.completedBookings,
+          warrantyCount: w.warrantyCount,
+          avgWarrantyResponseHours: w.avgWarrantyResponseHours,
+          warrantyClaimRate: round1(safeRate(w.warrantyCount, base.totalRfqs || 0)),
+          executionDuration: r.execution,
+          preparationDuration: r.preparation,
+          bufferDuration: r.buffer,
+          price: r.price,
+        };
+      })
+      .sort((a, b) => (b.bookingsCount || 0) - (a.bookingsCount || 0) || (b.totalRfqs || 0) - (a.totalRfqs || 0));
 
     return res.json({ success: true, data: { range: { from, to }, rows } });
   } catch (error) {
@@ -675,62 +845,14 @@ export const getKpiByProfessional = async (req: Request, res: Response) => {
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
-    const rows = await Booking.aggregate([
+    const grouped = await Booking.aggregate([
       { $match: { createdAt: { $gte: from, $lte: to }, professional: { $ne: null }, ...bookingCountryMatch } },
-      {
-        $project: {
-          professional: 1,
-          status: 1,
-          paymentAmount: '$payment.amount',
-          platformCommission: '$payment.platformCommission',
-          paymentCurrency: '$payment.currency',
-          paymentStatus: '$payment.status',
-          firstQuoteAt: { $ifNull: [{ $arrayElemAt: ['$quoteVersions.createdAt', 0] }, '$quote.submittedAt'] },
-          createdAt: 1,
-          rescheduleRequestAt: '$rescheduleRequest.requestedAt',
-          reviewAvg: {
-            $avg: [
-              { $ifNull: ['$customerReview.communicationLevel', null] },
-              { $ifNull: ['$customerReview.valueOfDelivery', null] },
-              { $ifNull: ['$customerReview.qualityOfService', null] },
-            ],
-          },
-        },
-      },
-      {
-        $project: {
-          professional: 1,
-          status: 1,
-          paymentAmount: 1,
-          platformCommission: 1,
-          paymentCurrency: 1,
-          paymentStatus: 1,
-          ttfqHours: { $cond: [{ $ifNull: ['$firstQuoteAt', false] }, { $divide: [{ $subtract: ['$firstQuoteAt', '$createdAt'] }, 1000 * 60 * 60] }, null] },
-          rescheduleRequestAt: 1,
-          reviewAvg: 1,
-        },
-      },
-      {
-        $group: {
-          _id: '$professional',
-          rfqsReceived: { $sum: 1 },
-          quotedCount: { $sum: { $cond: [{ $ne: ['$ttfqHours', null] }, 1, 0] } },
-          bookingsCount: { $sum: { $cond: [{ $in: ['$status', ['booked', 'in_progress', 'professional_completed', 'completed']] }, 1, 0] } },
-          completedCount: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          disputeCount: { $sum: { $cond: [{ $eq: ['$status', 'dispute'] }, 1, 0] } },
-          refundCount: { $sum: { $cond: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, 1, 0] } },
-          reschedulingCount: { $sum: { $cond: [{ $ifNull: ['$rescheduleRequestAt', false] }, 1, 0] } },
-          avgTtfqHours: { $avg: '$ttfqHours' },
-          grossRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$paymentAmount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
-          avgReviewScore: { $avg: '$reviewAvg' },
-        },
-      },
+      { $project: { professional: 1, ...bookingMetricsProjection('$payment.currency') } },
+      { $group: { _id: '$professional', ...bookingMetricsAccumulators } },
       { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'pro' } },
       { $unwind: { path: '$pro', preserveNullAndEmptyArrays: true } },
       {
         $project: {
-          _id: 0,
           professionalId: '$_id',
           name: { $ifNull: ['$pro.businessInfo.companyName', { $ifNull: ['$pro.name', { $ifNull: ['$pro.username', '$pro.email'] }] }] },
           email: '$pro.email',
@@ -739,21 +861,62 @@ export const getKpiByProfessional = async (req: Request, res: Response) => {
           professionalLevel: '$pro.professionalLevel',
           createdProjects: { $size: { $ifNull: ['$pro.projects', []] } },
           suspendedAccount: { $cond: [{ $eq: ['$pro.suspended', true] }, 1, 0] },
-          rfqsReceived: 1,
-          quotedCount: 1,
-          bookingsCount: 1,
-          completedCount: 1,
-          disputeCount: 1,
-          refundCount: 1,
-          reschedulingCount: 1,
-          avgTtfqHours: { $round: [{ $ifNull: ['$avgTtfqHours', 0] }, 1] },
-          grossRevenue: { $round: [{ $ifNull: ['$grossRevenue', 0] }, 2] },
-          platformRevenue: { $round: [{ $ifNull: ['$platformRevenue', 0] }, 2] },
-          avgReviewScore: { $round: [{ $ifNull: ['$avgReviewScore', 0] }, 1] },
+          metrics: '$$ROOT',
         },
       },
-      { $sort: { platformRevenue: -1, grossRevenue: -1, bookingsCount: -1 } },
     ]);
+
+    const warrantyRows = await WarrantyClaim.aggregate([
+      { $match: { openedAt: { $gte: from, $lte: to }, professional: { $ne: null } } },
+      ...(country
+        ? [
+            { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
+            { $unwind: { path: '$b', preserveNullAndEmptyArrays: true } },
+            { $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> },
+          ]
+        : []),
+      {
+        $project: {
+          professional: 1,
+          responseHours: { $cond: [{ $ifNull: ['$proposal.proposedAt', false] }, { $divide: [{ $subtract: ['$proposal.proposedAt', '$openedAt'] }, 1000 * 60 * 60] }, null] },
+        },
+      },
+      { $group: { _id: '$professional', warrantyCount: { $sum: 1 }, avgWarrantyResponseHours: { $avg: '$responseHours' } } },
+    ]);
+    const warrantyByPro = new Map<string, { warrantyCount: number; avgWarrantyResponseHours: number | null }>();
+    for (const r of warrantyRows) warrantyByPro.set(String(r._id), { warrantyCount: r.warrantyCount, avgWarrantyResponseHours: round1(r.avgWarrantyResponseHours) });
+
+    const favoriteRows = await Favorite.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to }, targetType: 'professional' } },
+      { $group: { _id: '$targetId', favoritesCount: { $sum: 1 } } },
+    ]);
+    const favByPro = new Map<string, number>();
+    for (const r of favoriteRows) favByPro.set(String(r._id), r.favoritesCount);
+
+    const rows = grouped
+      .map((r) => {
+        const m = r.metrics as GroupAgg;
+        const base = deriveBookingRates(m);
+        const w = warrantyByPro.get(String(r.professionalId)) || { warrantyCount: 0, avgWarrantyResponseHours: null };
+        return {
+          professionalId: r.professionalId,
+          name: r.name,
+          email: r.email,
+          city: r.city,
+          country: r.country,
+          professionalLevel: r.professionalLevel,
+          createdProjects: r.createdProjects,
+          suspendedAccount: r.suspendedAccount,
+          rfqsReceived: base.totalRfqs,
+          ...base,
+          completedCount: base.completedBookings,
+          warrantyCount: w.warrantyCount,
+          avgWarrantyResponseHours: w.avgWarrantyResponseHours,
+          warrantyClaimRate: round1(safeRate(w.warrantyCount, base.totalRfqs || 0)),
+          favoritesCount: favByPro.get(String(r.professionalId)) || 0,
+        };
+      })
+      .sort((a, b) => (b.platformRevenue || 0) - (a.platformRevenue || 0) || (b.grossRevenue || 0) - (a.grossRevenue || 0) || (b.bookingsCount || 0) - (a.bookingsCount || 0));
 
     return res.json({ success: true, data: { range: { from, to }, rows } });
   } catch (error) {
@@ -770,52 +933,79 @@ export const getKpiByCustomer = async (req: Request, res: Response) => {
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
-    const rows = await Booking.aggregate([
+    const grouped = await Booking.aggregate([
       { $match: { createdAt: { $gte: from, $lte: to }, customer: { $ne: null }, ...bookingCountryMatch } },
+      { $project: { customer: 1, capturedAt: '$payment.capturedAt', ...bookingMetricsProjection('$payment.currency') } },
       {
         $group: {
           _id: '$customer',
-          rfqsCreated: { $sum: 1 },
-          bookingsCount: { $sum: { $cond: [{ $in: ['$status', ['booked', 'in_progress', 'professional_completed', 'completed']] }, 1, 0] } },
-          completedCount: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          disputeCount: { $sum: { $cond: [{ $eq: ['$status', 'dispute'] }, 1, 0] } },
-          refundCount: { $sum: { $cond: [{ $in: ['$payment.status', ['refunded', 'partially_refunded']] }, 1, 0] } },
-          reschedulingCount: { $sum: { $cond: [{ $ifNull: ['$rescheduleRequest.requestedAt', false] }, 1, 0] } },
-          grossSpend: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
-          paymentsTotal: { $sum: 1 },
-          paymentDurationsMs: { $push: { $cond: [{ $and: [{ $ifNull: ['$payment.capturedAt', false] }, { $ifNull: ['$createdAt', false] }] }, { $subtract: ['$payment.capturedAt', '$createdAt'] }, null] } },
+          ...bookingMetricsAccumulators,
+          paymentDurationsMs: { $push: { $cond: [{ $and: [{ $ifNull: ['$capturedAt', false] }, { $ifNull: ['$createdAt', false] }] }, { $subtract: ['$capturedAt', '$createdAt'] }, null] } },
         },
       },
       { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'cust' } },
       { $unwind: { path: '$cust', preserveNullAndEmptyArrays: true } },
       {
         $project: {
-          _id: 0,
           customerId: '$_id',
           name: { $ifNull: ['$cust.name', { $ifNull: ['$cust.username', '$cust.email'] }] },
           email: '$cust.email',
           city: { $ifNull: ['$cust.location.city', '$cust.companyAddress.city'] },
           country: { $ifNull: ['$cust.location.country', '$cust.companyAddress.country'] },
           loyaltyLevel: { $ifNull: ['$cust.loyaltyTier', null] },
-          rfqsCreated: 1,
-          bookingsCount: 1,
-          completedCount: 1,
-          disputeCount: 1,
-          refundCount: 1,
-          reschedulingCount: 1,
-          grossSpend: { $round: ['$grossSpend', 2] },
-          platformRevenue: { $round: [{ $ifNull: ['$platformRevenue', 0] }, 2] },
           avgPaymentTimeHours: {
             $let: {
               vars: { ds: { $filter: { input: '$paymentDurationsMs', as: 'd', cond: { $ne: ['$$d', null] } } } },
-              in: { $cond: [{ $gt: [{ $size: '$$ds' }, 0] }, { $round: [{ $divide: [{ $divide: [{ $avg: '$$ds' }, 1000 * 60 * 60] }, 1] }, 1] }, null] },
+              in: { $cond: [{ $gt: [{ $size: '$$ds' }, 0] }, { $round: [{ $divide: [{ $avg: '$$ds' }, 1000 * 60 * 60] }, 1] }, null] },
             },
           },
+          metrics: '$$ROOT',
         },
       },
-      { $sort: { platformRevenue: -1, grossSpend: -1, bookingsCount: -1 } },
     ]);
+
+    const warrantyRows = await WarrantyClaim.aggregate([
+      { $match: { openedAt: { $gte: from, $lte: to }, customer: { $ne: null } } },
+      ...(country
+        ? [
+            { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
+            { $unwind: { path: '$b', preserveNullAndEmptyArrays: true } },
+            { $match: { 'b.location.country': buildExactCountryRegex(country) } as Record<string, unknown> },
+          ]
+        : []),
+      {
+        $project: {
+          customer: 1,
+          responseHours: { $cond: [{ $ifNull: ['$proposal.proposedAt', false] }, { $divide: [{ $subtract: ['$proposal.proposedAt', '$openedAt'] }, 1000 * 60 * 60] }, null] },
+        },
+      },
+      { $group: { _id: '$customer', warrantyCount: { $sum: 1 }, avgWarrantyResponseHours: { $avg: '$responseHours' } } },
+    ]);
+    const warrantyByCust = new Map<string, { warrantyCount: number; avgWarrantyResponseHours: number | null }>();
+    for (const r of warrantyRows) warrantyByCust.set(String(r._id), { warrantyCount: r.warrantyCount, avgWarrantyResponseHours: round1(r.avgWarrantyResponseHours) });
+
+    const rows = grouped
+      .map((r) => {
+        const base = deriveBookingRates(r.metrics as GroupAgg);
+        const w = warrantyByCust.get(String(r.customerId)) || { warrantyCount: 0, avgWarrantyResponseHours: null };
+        return {
+          customerId: r.customerId,
+          name: r.name,
+          email: r.email,
+          city: r.city,
+          country: r.country,
+          loyaltyLevel: r.loyaltyLevel,
+          avgPaymentTimeHours: r.avgPaymentTimeHours,
+          rfqsCreated: base.totalRfqs,
+          ...base,
+          completedCount: base.completedBookings,
+          grossSpend: base.grossRevenue,
+          warrantyCount: w.warrantyCount,
+          avgWarrantyResponseHours: w.avgWarrantyResponseHours,
+          warrantyClaimRate: round1(safeRate(w.warrantyCount, base.totalRfqs || 0)),
+        };
+      })
+      .sort((a, b) => (b.platformRevenue || 0) - (a.platformRevenue || 0) || (b.grossSpend || 0) - (a.grossSpend || 0) || (b.bookingsCount || 0) - (a.bookingsCount || 0));
 
     return res.json({ success: true, data: { range: { from, to }, rows } });
   } catch (error) {

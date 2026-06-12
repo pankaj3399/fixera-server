@@ -101,6 +101,16 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
 
+    const { amount: rawAmount } = req.body || {};
+    let customAmount: number | undefined;
+    if (rawAmount !== undefined && rawAmount !== null && rawAmount !== "") {
+      const parsedAmount = typeof rawAmount === "string" ? Number.parseFloat(rawAmount) : Number(rawAmount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({ success: false, msg: "amount must be a number greater than 0" });
+      }
+      customAmount = parsedAmount;
+    }
+
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
     const priorDoc = await CancellationRequest.findById(id).select("status").lean();
     if (!priorDoc) {
@@ -138,10 +148,22 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     const hasPayment = !!booking.payment?.stripePaymentIntentId;
     const refundableStatuses = ["authorized", "completed", "partially_refunded"];
 
+    if (customAmount !== undefined && totalWithVat > 0 && customAmount > totalWithVat) {
+      await CancellationRequest.updateOne(
+        { _id: cancellation._id, status: "processing" },
+        { $set: { status: priorStatus }, $unset: { resolvedBy: "", resolvedAt: "" } }
+      );
+      return res.status(400).json({
+        success: false,
+        msg: `amount cannot exceed the payment total of ${totalWithVat}`,
+      });
+    }
+
     if (hasPayment && booking.payment && refundableStatuses.includes(booking.payment.status)) {
       try {
         const result = await executeRefund(String(booking._id), {
           reason: cancellation.reason,
+          ...(customAmount !== undefined ? { amount: customAmount } : {}),
         });
         refundAmount = result.amount;
         refundedAt = new Date();
