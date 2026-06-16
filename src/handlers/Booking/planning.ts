@@ -27,7 +27,10 @@ const parseDayKey = (value: unknown): Date | null => {
   if (typeof value !== 'string') return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const d = new Date(`${value}T00:00:00.000Z`);
-  return Number.isNaN(d.getTime()) ? null : d;
+  if (Number.isNaN(d.getTime())) return null;
+  const [y, m, day] = value.split('-').map(Number);
+  if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== m || d.getUTCDate() !== day) return null;
+  return d;
 };
 
 const addDays = (value: Date, days: number): Date => {
@@ -156,7 +159,8 @@ const buildPlanningPayload = async (booking: any, professional: any, project: an
       windowFrom,
       windowTo,
       timeZone,
-      booking._id.toString()
+      booking._id.toString(),
+      booking.customerBlocks
     );
   }
 
@@ -266,7 +270,8 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       windowFrom,
       windowTo,
       timeZone,
-      booking._id.toString()
+      booking._id.toString(),
+      booking.customerBlocks
     );
 
     const existingPlanned = getPlannedDayKeys(booking);

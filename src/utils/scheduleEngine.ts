@@ -925,7 +925,8 @@ export const buildPerResourceBlockedDays = async (
   windowFrom: Date,
   windowTo: Date,
   timeZone: string,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  customerBlocks?: CustomerBlocks
 ): Promise<PerResourceBlockedDays> => {
   const result: PerResourceBlockedDays = new Map();
 
@@ -950,7 +951,8 @@ export const buildPerResourceBlockedDays = async (
 
   const { companyBlockedDates, companyBlockedRanges } = collectCompanyBlocks(
     professional,
-    timeZone
+    timeZone,
+    customerBlocks
   );
 
   const memberBlocksMap = await collectTeamMemberBlocks(
@@ -972,12 +974,12 @@ export const buildPerResourceBlockedDays = async (
   const resourceObjectIds = toValidObjectIds(orderedIds);
   const bookingFilter: any = {
     status: { $nin: ['completed', 'cancelled', 'refunded'] },
-    scheduledStartDate: { $exists: true, $ne: null },
+    scheduledStartDate: { $exists: true, $ne: null, $lte: windowTo },
     $and: [
       {
         $or: [
-          { scheduledBufferEndDate: { $exists: true, $ne: null } },
-          { scheduledExecutionEndDate: { $exists: true, $ne: null } },
+          { scheduledBufferEndDate: { $gte: windowFrom } },
+          { scheduledExecutionEndDate: { $gte: windowFrom } },
         ],
       },
     ],

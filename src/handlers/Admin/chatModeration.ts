@@ -482,16 +482,24 @@ export const adminListSupportConversations = async (req: Request, res: Response)
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    const { page, limit, skip } = parsePagination(req.query);
 
-    const conversations = await Conversation.find({
+    const filter = {
       type: "support",
       status: "active",
       supportAdminId: adminObjectId,
-    })
-      .sort({ lastMessageAt: -1 })
-      .populate("supportTargetUserId", "name email")
-      .select("_id supportTargetUserId lastMessagePreview lastMessageAt lastMessageSenderId")
-      .lean();
+    };
+
+    const [conversations, total] = await Promise.all([
+      Conversation.find(filter)
+        .sort({ lastMessageAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("supportTargetUserId", "name email")
+        .select("_id supportTargetUserId lastMessagePreview lastMessageAt lastMessageSenderId")
+        .lean(),
+      Conversation.countDocuments(filter),
+    ]);
 
     const items = conversations.map((c: any) => {
       const targetId = c.supportTargetUserId?._id?.toString();
@@ -505,7 +513,7 @@ export const adminListSupportConversations = async (req: Request, res: Response)
       };
     });
 
-    return res.json({ success: true, data: { items } });
+    return res.json({ success: true, data: { items, total, page, limit } });
   } catch (error: any) {
     console.error("Admin list support conversations error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load support conversations" });
