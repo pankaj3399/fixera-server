@@ -365,3 +365,13 @@ export const presignS3Url = async (url: string, expiresIn = 7 * 24 * 60 * 60): P
     return null;
   }
 };
+
+export const sanitizeAttachments = (urls: unknown, maxCount = 10): string[] => {
+  if (!Array.isArray(urls)) return [];
+  return urls
+    .filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+    .map((u) => u.trim())
+    .filter((u) => isAllowedS3Url(u))
+    .slice(0, maxCount);
+};
+

@@ -219,9 +219,16 @@ export const adminGetConversation = async (req: Request, res: Response) => {
     if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
+    const tempConvo = await Conversation.findById(id).populate("supportTargetUserId", "role").lean();
+    if (!tempConvo) {
+      return res.status(404).json({ success: false, msg: "Conversation not found" });
+    }
+    const targetUser = tempConvo.supportTargetUserId as any;
+    const unreadField = targetUser?.role === "professional" ? "professionalUnreadCount" : "customerUnreadCount";
+
     const conversation = await Conversation.findByIdAndUpdate(
       id,
-      { $set: { professionalUnreadCount: 0 } },
+      { $set: { [unreadField]: 0 } },
       { new: true }
     )
       .populate("customerId", "name email")
@@ -294,22 +301,13 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
     const targetObjectId = new mongoose.Types.ObjectId(targetUserId);
 
-    console.log("[DEBUG] adminStartSupportChat:", {
-      adminId,
-      targetUserId,
-      adminObjectId,
-      targetObjectId,
-    });
-
     let conversation = await Conversation.findOne({
       type: "support",
       supportAdminId: adminObjectId,
       supportTargetUserId: targetObjectId,
     });
-    console.log("[DEBUG] findOne result:", conversation);
 
     if (!conversation) {
-      console.log("[DEBUG] Conversation not found, creating new support conversation...");
       try {
         conversation = await Conversation.create({
           type: "support",
@@ -318,23 +316,20 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
           initiatedBy: adminObjectId,
           status: "active",
         } as any);
-        console.log("[DEBUG] Created conversation:", conversation);
       } catch (err: any) {
-        console.error("[DEBUG] Conversation.create caught error:", err.message, "code:", err?.code);
         if (err?.code === 11000) {
-          console.log("[DEBUG] E11000 error. Querying findOne again...");
           conversation = await Conversation.findOne({
             type: "support",
             supportAdminId: adminObjectId,
             supportTargetUserId: targetObjectId,
           });
-          console.log("[DEBUG] Second findOne result:", conversation);
         } else {
+          console.error("Failed to create support conversation:", err.message);
           throw err;
         }
       }
       if (!conversation) {
-        console.error("[DEBUG] Conversation is still null/falsy after creation attempt!");
+        console.error("Support conversation is still null after creation attempt");
         return res.status(500).json({ success: false, msg: "Failed to create or load support conversation" });
       }
     }
@@ -526,6 +521,7 @@ export const adminListConversations = async (req: Request, res: Response) => {
 
     const baseQuery: Record<string, any> = {
       type: "support",
+      status: "active",
     };
 
     const [conversations, total] = await Promise.all([

@@ -1169,6 +1169,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       }
     }
 
+    booking.statusBeforeReschedule = booking.status;
     booking.status = 'rescheduling_requested';
     booking.rescheduleRequest = {
       status: 'pending',
@@ -1366,7 +1367,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
         type: 'reschedule',
         attachments: [],
       } as any;
-      booking.statusBeforeDispute = booking.status;
+      booking.statusBeforeDispute = booking.statusBeforeReschedule || 'booked';
       booking.status = 'dispute';
       booking.statusHistory.push(
         createStatusHistoryEntry('dispute', (req as any).user._id, `Customer disputed rescheduling: ${disputeReason}`)

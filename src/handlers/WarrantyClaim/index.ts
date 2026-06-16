@@ -24,6 +24,7 @@ import {
   validateVideoFile,
   isAllowedS3Url,
   presignS3Url,
+  sanitizeAttachments,
 } from "../../utils/s3Upload";
 import { SYSTEM_USER_ID } from "../../constants/system";
 import {
@@ -1461,6 +1462,7 @@ export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => 
     }
     const { claimId } = req.params;
     const { reason, attachments } = req.body as { reason?: string; attachments?: string[] };
+    const sanitizedAttachments = sanitizeAttachments(attachments);
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
@@ -1483,7 +1485,7 @@ export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => 
       summary: `Declined by admin: ${reason.trim()}`,
       resolvedAt: claim.resolution?.resolvedAt || new Date(),
       resolvedBy: claim.resolution?.resolvedBy || toObjectId(userId),
-      ...(Array.isArray(attachments) ? { attachments } : {}),
+      ...(sanitizedAttachments.length > 0 ? { attachments: sanitizedAttachments } : {}),
     };
     claim.statusHistory.push({
       status: "closed",
@@ -1523,6 +1525,7 @@ export const adminApproveWarrantyResolve = async (req: Request, res: Response) =
     }
     const { claimId } = req.params;
     const { attachments } = req.body as { attachments?: string[] };
+    const sanitizedAttachments = sanitizeAttachments(attachments);
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
@@ -1545,7 +1548,7 @@ export const adminApproveWarrantyResolve = async (req: Request, res: Response) =
       summary: proposalSummary,
       resolvedAt,
       resolvedBy: toObjectId(userId),
-      ...(Array.isArray(attachments) ? { attachments } : {}),
+      ...(sanitizedAttachments.length > 0 ? { attachments: sanitizedAttachments } : {}),
     };
     claim.sla = {
       ...(claim.sla || { customerAutoCloseDays: approveAutoCloseDays }),
@@ -1594,6 +1597,7 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
       resolveByDate?: string;
       attachments?: string[];
     };
+    const sanitizedAttachments = sanitizeAttachments(attachments);
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
@@ -1643,7 +1647,7 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
       summary: adjustSummary,
       resolvedAt,
       resolvedBy: toObjectId(userId),
-      ...(Array.isArray(attachments) ? { attachments } : {}),
+      ...(sanitizedAttachments.length > 0 ? { attachments: sanitizedAttachments } : {}),
     };
     claim.sla = {
       ...(claim.sla || { customerAutoCloseDays: adjustAutoCloseDays }),

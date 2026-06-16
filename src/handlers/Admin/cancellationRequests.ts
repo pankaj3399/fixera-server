@@ -13,6 +13,7 @@ import {
 } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { auditLog } from "../../utils/auditLogger";
+import { sanitizeAttachments } from "../../utils/s3Upload";
 
 const VALID_STATUSES = ["pending", "processing", "negotiating", "escalated", "approved", "denied"] as const;
 const ADMIN_ACTIONABLE_STATUSES = ["pending", "escalated"];
@@ -102,6 +103,19 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     }
 
     const { amount: rawAmount, note, attachments } = req.body || {};
+    
+    let normalizedNote: string | undefined;
+    if (note !== undefined && note !== null && note !== "") {
+      if (typeof note !== "string") {
+        return res.status(400).json({ success: false, msg: "note must be a string" });
+      }
+      normalizedNote = note.trim();
+      if (normalizedNote.length > 1000) {
+        return res.status(400).json({ success: false, msg: "note must not exceed 1000 characters" });
+      }
+    }
+
+    const sanitizedAttachments = sanitizeAttachments(attachments);
     let customAmount: number | undefined;
     if (rawAmount !== undefined && rawAmount !== null && rawAmount !== "") {
       const parsedAmount = typeof rawAmount === "string" ? Number.parseFloat(rawAmount) : Number(rawAmount);
@@ -219,11 +233,11 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     cancellation.resolvedBy = new mongoose.Types.ObjectId(adminId);
     cancellation.refundAmount = refundAmount || undefined;
     cancellation.refundedAt = refundedAt;
-    if (typeof note === "string" && note.trim()) {
-      cancellation.resolutionNotes = note.trim();
+    if (normalizedNote) {
+      cancellation.resolutionNotes = normalizedNote;
     }
-    if (Array.isArray(attachments)) {
-      cancellation.resolutionAttachments = attachments;
+    if (sanitizedAttachments.length > 0) {
+      cancellation.resolutionAttachments = sanitizedAttachments;
     }
     await cancellation.save();
 
@@ -267,8 +281,8 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
         reason: cancellation.reason,
         refundAmount,
         totalWithVat,
-        resolutionNotes: note?.trim(),
-        resolutionAttachments: attachments,
+        resolutionNotes: normalizedNote,
+        resolutionAttachments: sanitizedAttachments,
       },
       status: 'success',
       statusCode: 200,
@@ -299,6 +313,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
     const adminIdRaw = (req as any).admin?._id ?? (req as any).user?._id;
     const adminId = adminIdRaw?.toString();
     const { denyReason, attachments } = req.body || {};
+    const sanitizedAttachments = sanitizeAttachments(attachments);
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
@@ -324,7 +339,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
             denyReason: denyReason.trim(),
             resolvedAt: new Date(),
             resolvedBy: adminObjectId,
-            ...(Array.isArray(attachments) ? { resolutionAttachments: attachments } : {}),
+            ...(sanitizedAttachments.length > 0 ? { resolutionAttachments: sanitizedAttachments } : {}),
           },
         },
         { new: true, session }
