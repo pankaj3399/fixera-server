@@ -369,7 +369,7 @@ export const getCategories = async (req: Request, res: Response) => {
 
 export const getCategoryServices = async (req: Request, res: Response) => {
   try {
-    const { categorySlug } = req.params;
+    const { categorySlug } = req.params as any;
     const country = (req.query.country as string) || "BE";
 
     let category = await ServiceCategory.findOne({
@@ -1349,6 +1349,13 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     const blockedDatesArray = Array.from(allBlockedDates);
 
+    const proposals = await buildProjectScheduleProposals(
+      id as string,
+      subprojectIndex,
+      undefined,
+      excludeBookingId
+    );
+
     // Build response
     const response: any = {
       success: true,
@@ -1357,6 +1364,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       blockedRanges: allBlockedRanges,
       blockedCategories,
       resourcePolicy,
+      earliestBookableDate: proposals?.earliestBookableDate,
     };
 
     // Only include _debug payload when explicitly enabled
@@ -1472,6 +1480,7 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
     console.log('[SCHEDULE PROPOSALS API] Request for project:', req.params.id);
     const { id } = req.params;
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
+    const excludeBookingId = req.query.excludeBookingId as string | undefined;
 
     const project = await Project.findById(id).select("subprojects");
     if (!project) {
@@ -1523,7 +1532,7 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       ? { execution: executionParsed.value, preparation: preparationParsed.value, buffer: bufferParsed.value }
       : undefined;
 
-    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, durationOverride);
+    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, durationOverride, excludeBookingId);
 
     if (!proposals) {
       return res.status(404).json({
@@ -1556,7 +1565,7 @@ export const getProjectAvailableSlots = async (req: Request, res: Response) => {
     const date = req.query.date as string | undefined;
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
 
-    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+    if (!id || typeof id !== "string" || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(404).json({ success: false, error: "Project not found" });
     }
 

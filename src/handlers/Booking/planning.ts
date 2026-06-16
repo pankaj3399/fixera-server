@@ -45,11 +45,77 @@ const resolveCandidateResources = async (booking: any) => {
   }
   if (validIds.length === 0) return [];
   const users = await User.find({ _id: { $in: validIds } }).select('name email username');
+
+  // Fetch other active bookings for these resources
+  const otherBookings = await Booking.find({
+    _id: { $ne: booking._id },
+    status: { $nin: ['completed', 'cancelled', 'refunded'] },
+    $or: [
+      { assignedTeamMembers: { $in: validIds } },
+      { professional: { $in: validIds } }
+    ],
+    scheduledStartDate: { $exists: true, $ne: null }
+  }).populate('project', 'title');
+
+  const bookedSlotsMap = new Map<string, any[]>();
+  for (const other of otherBookings) {
+    const otherProjTitle = (other.project as any)?.title || 'Direct Booking';
+    const planEntries = Array.isArray(other.resourcePlan) ? other.resourcePlan : [];
+    const assignedIds = Array.isArray(other.assignedTeamMembers)
+      ? other.assignedTeamMembers.map((id: any) => id.toString())
+      : [];
+    const profId = other.professional?.toString();
+    
+    const relevantResourceIds: string[] = [];
+    const addUnique = (id: string) => {
+      if (id && !relevantResourceIds.includes(id)) {
+        relevantResourceIds.push(id);
+      }
+    };
+    assignedIds.forEach(id => addUnique(id));
+    if (profId) addUnique(profId);
+    
+    planEntries.forEach((entry: any) => {
+      const rid = (entry.resourceId?._id || entry.resourceId)?.toString();
+      if (rid) addUnique(rid);
+    });
+    
+    for (const rid of relevantResourceIds) {
+      if (!validIds.includes(rid)) continue;
+      
+      const planEntry = planEntries.find((entry: any) => {
+        const entryRid = (entry.resourceId?._id || entry.resourceId)?.toString();
+        return entryRid === rid;
+      });
+      
+      let start = other.scheduledStartDate;
+      let end = other.scheduledExecutionEndDate || other.scheduledBufferEndDate || other.scheduledStartDate;
+      
+      if (planEntry) {
+        start = planEntry.startDate;
+        end = planEntry.endDate;
+      }
+      
+      if (!start || !end) continue;
+      
+      const list = bookedSlotsMap.get(rid) || [];
+      list.push({
+        bookingId: other._id.toString(),
+        bookingNumber: other.bookingNumber || 'BK-' + other._id.toString().slice(-6),
+        projectTitle: otherProjTitle,
+        startDate: start,
+        endDate: end
+      });
+      bookedSlotsMap.set(rid, list);
+    }
+  }
+
   return users.map((u: any) => ({
     _id: u._id.toString(),
     name: u.name,
     email: u.email,
     username: u.username,
+    bookedSlots: bookedSlotsMap.get(u._id.toString()) || []
   }));
 };
 
@@ -136,10 +202,10 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
     const isInProgress = booking.status === 'in_progress' || booking.status === 'professional_completed';
 
     const existingPlan: any[] = Array.isArray(booking.resourcePlan) ? booking.resourcePlan : [];
-    const existingById = new Map<string, any>();
+    const existingById: Record<string, any> = {};
     for (const entry of existingPlan) {
       const rid = (entry?.resourceId?._id || entry?.resourceId)?.toString?.();
-      if (rid) existingById.set(rid, entry);
+      if (rid) existingById[rid] = entry;
     }
 
     const normalizedPlan: { resourceId: mongoose.Types.ObjectId; startDate: Date; endDate: Date }[] = [];
@@ -174,7 +240,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       }
 
       if (isInProgress) {
-        const existing = existingById.get(resourceId);
+        const existing = existingById[resourceId];
         const isUsed = existing && startOfDayUTC(existing.startDate) <= today;
         if (isUsed && existing && startOfDayUTC(existing.startDate).getTime() !== startDate.getTime()) {
           return res.status(400).json({ success: false, error: { code: 'START_LOCKED', message: 'A resource already in use cannot have its start date changed' } });
@@ -195,7 +261,8 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
     }
 
     if (isInProgress) {
-      for (const [rid, existing] of existingById.entries()) {
+      for (const rid of Object.keys(existingById)) {
+        const existing = existingById[rid];
         const stillPresent = seenResource.has(rid);
         const isUsed = startOfDayUTC(existing.startDate) <= today;
         if (!stillPresent && isUsed) {
