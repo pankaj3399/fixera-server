@@ -746,7 +746,7 @@ type DisputeType = typeof ALLOWED_DISPUTE_TYPES[number];
 const DISPUTE_ALLOWED_STATUSES_BY_TYPE: Record<DisputeType, BookingStatus[]> = {
   extra_costs: ['professional_completed'],
   reschedule: ['rescheduling_requested'],
-  completion_request: ['professional_completed'],
+  completion_request: ['professional_completed', 'completed'],
   warranty_claim: ['completed'],
   warranty_resolve: ['completed'],
   refund_request: ['booked', 'in_progress', 'professional_completed', 'completed'],
@@ -814,6 +814,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       {
         $set: {
           status: 'dispute' as BookingStatus,
+          statusBeforeDispute: booking.status,
           ...(booking.extraCosts && booking.extraCosts.length > 0 && requestedType === 'extra_costs' ? { extraCostStatus: 'disputed' } : {}),
           dispute: {
             raisedBy: authUser._id,

@@ -1460,7 +1460,7 @@ export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => 
       return res.status(403).json({ success: false, msg: "Admin access required" });
     }
     const { claimId } = req.params;
-    const { reason } = req.body as { reason?: string };
+    const { reason, attachments } = req.body as { reason?: string; attachments?: string[] };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
@@ -1483,6 +1483,7 @@ export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => 
       summary: `Declined by admin: ${reason.trim()}`,
       resolvedAt: claim.resolution?.resolvedAt || new Date(),
       resolvedBy: claim.resolution?.resolvedBy || toObjectId(userId),
+      ...(Array.isArray(attachments) ? { attachments } : {}),
     };
     claim.statusHistory.push({
       status: "closed",
@@ -1521,6 +1522,7 @@ export const adminApproveWarrantyResolve = async (req: Request, res: Response) =
       return res.status(403).json({ success: false, msg: "Admin access required" });
     }
     const { claimId } = req.params;
+    const { attachments } = req.body as { attachments?: string[] };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
@@ -1543,6 +1545,7 @@ export const adminApproveWarrantyResolve = async (req: Request, res: Response) =
       summary: proposalSummary,
       resolvedAt,
       resolvedBy: toObjectId(userId),
+      ...(Array.isArray(attachments) ? { attachments } : {}),
     };
     claim.sla = {
       ...(claim.sla || { customerAutoCloseDays: approveAutoCloseDays }),
@@ -1586,9 +1589,10 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
       return res.status(403).json({ success: false, msg: "Admin access required" });
     }
     const { claimId } = req.params;
-    const { resolveDescription, resolveByDate } = req.body as {
+    const { resolveDescription, resolveByDate, attachments } = req.body as {
       resolveDescription?: string;
       resolveByDate?: string;
+      attachments?: string[];
     };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
@@ -1639,6 +1643,7 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
       summary: adjustSummary,
       resolvedAt,
       resolvedBy: toObjectId(userId),
+      ...(Array.isArray(attachments) ? { attachments } : {}),
     };
     claim.sla = {
       ...(claim.sla || { customerAutoCloseDays: adjustAutoCloseDays }),

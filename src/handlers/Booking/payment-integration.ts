@@ -1366,6 +1366,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
         type: 'reschedule',
         attachments: [],
       } as any;
+      booking.statusBeforeDispute = booking.status;
       booking.status = 'dispute';
       booking.statusHistory.push(
         createStatusHistoryEntry('dispute', (req as any).user._id, `Customer disputed rescheduling: ${disputeReason}`)

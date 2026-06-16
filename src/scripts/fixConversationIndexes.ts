@@ -38,6 +38,7 @@ import Conversation from "../models/conversation";
 dotenv.config();
 
 const LEGACY_INDEX_NAME = "customerId_1_professionalId_1";
+const OBSOLETE_INDEX_NAME = "customerId_1_professionalId_1_bookingId_1";
 
 async function fixConversationIndexes() {
   const mongoUri = process.env.MONGO_URI || process.env.MONGODB_URI;
@@ -60,6 +61,7 @@ async function fixConversationIndexes() {
     console.log(`  ${idx.name}: keys=${JSON.stringify(idx.key)} partial=${JSON.stringify((idx as any).partialFilterExpression || null)}`);
   });
 
+  // 1. Drop stale unique customerId_1_professionalId_1 index if it's not partial
   const stale = indexes.find(
     (idx) =>
       JSON.stringify(idx.key) === JSON.stringify({ customerId: 1, professionalId: 1 }) &&
@@ -71,12 +73,17 @@ async function fixConversationIndexes() {
     await collection.dropIndex(stale.name);
     console.log("Dropped.");
   } else {
-    const named = indexes.find((idx) => idx.name === LEGACY_INDEX_NAME);
-    if (named && (named as any).partialFilterExpression) {
-      console.log(`Index "${LEGACY_INDEX_NAME}" already has a partialFilterExpression — nothing to fix.`);
-    } else {
-      console.log("No stale non-partial customerId/professionalId index found — nothing to drop.");
-    }
+    console.log("No stale non-partial customerId/professionalId index found.");
+  }
+
+  // 2. Drop obsolete unique customerId_1_professionalId_1_bookingId_1 index (not in current schema)
+  const obsolete = indexes.find((idx) => idx.name === OBSOLETE_INDEX_NAME);
+  if (obsolete) {
+    console.log(`Dropping obsolete unique index "${OBSOLETE_INDEX_NAME}" (causes support chat collisions)...`);
+    await collection.dropIndex(OBSOLETE_INDEX_NAME);
+    console.log("Dropped.");
+  } else {
+    console.log("No obsolete bookingId index found.");
   }
 
   // Re-create any missing schema indexes (the correct partial one) WITHOUT

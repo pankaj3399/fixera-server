@@ -91,7 +91,7 @@ const escalateRequest = async (
 
   try {
     const booking = await Booking.findById(request.booking);
-    if (booking && (booking.status === 'booked' || booking.status === 'in_progress')) {
+    if (booking && ['booked', 'in_progress', 'professional_completed', 'completed'].includes(booking.status)) {
       booking.statusBeforeDispute = booking.status;
       booking.status = 'dispute';
       booking.statusHistory = booking.statusHistory || [];

@@ -53,7 +53,7 @@ export const listChatReports = async (req: Request, res: Response) => {
 export const getChatReport = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
     const report = await ChatReport.findById(id)
@@ -112,7 +112,7 @@ export const resolveChatReport = async (req: Request, res: Response) => {
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
     if (!["warn", "ban", "dismiss"].includes(action)) {
@@ -216,10 +216,14 @@ export const resolveChatReport = async (req: Request, res: Response) => {
 export const adminGetConversation = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
-    const conversation = await Conversation.findById(id)
+    const conversation = await Conversation.findByIdAndUpdate(
+      id,
+      { $set: { professionalUnreadCount: 0 } },
+      { new: true }
+    )
       .populate("customerId", "name email")
       .populate("professionalId", "name email")
       .populate("supportAdminId", "name email")
@@ -239,7 +243,7 @@ export const adminGetConversationMessages = async (req: Request, res: Response) 
   try {
     const { id } = req.params;
     const { page, limit, skip } = parsePagination(req.query);
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
     const [messages, total] = await Promise.all([
@@ -290,12 +294,22 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
     const targetObjectId = new mongoose.Types.ObjectId(targetUserId);
 
+    console.log("[DEBUG] adminStartSupportChat:", {
+      adminId,
+      targetUserId,
+      adminObjectId,
+      targetObjectId,
+    });
+
     let conversation = await Conversation.findOne({
       type: "support",
       supportAdminId: adminObjectId,
       supportTargetUserId: targetObjectId,
     });
+    console.log("[DEBUG] findOne result:", conversation);
+
     if (!conversation) {
+      console.log("[DEBUG] Conversation not found, creating new support conversation...");
       try {
         conversation = await Conversation.create({
           type: "support",
@@ -304,21 +318,27 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
           initiatedBy: adminObjectId,
           status: "active",
         } as any);
+        console.log("[DEBUG] Created conversation:", conversation);
       } catch (err: any) {
+        console.error("[DEBUG] Conversation.create caught error:", err.message, "code:", err?.code);
         if (err?.code === 11000) {
+          console.log("[DEBUG] E11000 error. Querying findOne again...");
           conversation = await Conversation.findOne({
             type: "support",
             supportAdminId: adminObjectId,
             supportTargetUserId: targetObjectId,
           });
+          console.log("[DEBUG] Second findOne result:", conversation);
         } else {
           throw err;
         }
       }
       if (!conversation) {
+        console.error("[DEBUG] Conversation is still null/falsy after creation attempt!");
         return res.status(500).json({ success: false, msg: "Failed to create or load support conversation" });
       }
     }
+
 
     if (conversation.status !== "active") {
       conversation.status = "active";
@@ -364,7 +384,7 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid conversation id" });
     }
     if (typeof text !== "string" || !text.trim() || text.length > 2000) {
@@ -425,7 +445,7 @@ export const adminCloseSupportChat = async (req: Request, res: Response) => {
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, msg: "Invalid conversation id" });
     }
     const conversation = await Conversation.findById(id);
@@ -447,7 +467,7 @@ export const adminCloseSupportChat = async (req: Request, res: Response) => {
 export const adminGetBookingConversation = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+    if (!mongoose.Types.ObjectId.isValid(bookingId as string)) {
       return res.status(400).json({ success: false, msg: "Invalid booking id" });
     }
     const booking = await Booking.findById(bookingId).select("customer professional").lean();
@@ -495,3 +515,45 @@ export const adminGetSupportUnreadCount = async (req: Request, res: Response) =>
     return res.status(500).json({ success: false, msg: "Failed to load support unread count" });
   }
 };
+
+export const adminListConversations = async (req: Request, res: Response) => {
+  try {
+    const pageRaw = Number.parseInt(String(req.query.page ?? "1"), 10);
+    const limitRaw = Number.parseInt(String(req.query.limit ?? "50"), 10);
+    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 50;
+    const skip = (page - 1) * limit;
+
+    const baseQuery: Record<string, any> = {
+      type: "support",
+    };
+
+    const [conversations, total] = await Promise.all([
+      Conversation.find(baseQuery)
+        .populate("supportAdminId", "name email username profileImage")
+        .populate("supportTargetUserId", "name email username businessInfo profileImage role")
+        .sort({ lastMessageAt: -1, updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Conversation.countDocuments(baseQuery),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        conversations,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit),
+        },
+      },
+    });
+  } catch (error: any) {
+    console.error("Admin list conversations error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load conversations" });
+  }
+};
+

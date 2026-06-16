@@ -180,7 +180,14 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       .limit(50)
       .lean(),
     CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
-      .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
+      .populate({
+        path: 'booking',
+        select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation',
+        populate: [
+          { path: 'project', select: 'title category service' },
+          { path: 'professional', select: 'name email username' }
+        ]
+      })
       .populate('requestedBy', 'name email')
       .sort({ escalatedAt: -1 })
       .limit(50)
@@ -198,6 +205,7 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       bookingId: booking._id ? String(booking._id) : undefined,
       claimStatus: claim.status,
       bookingNumber: booking.bookingNumber || claim.claimNumber || '(warranty claim)',
+      claimNumber: claim.claimNumber,
       status: booking.status || 'completed',
       customer: claim.customer,
       professional: claim.professional,
@@ -230,7 +238,12 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       bookingNumber: booking.bookingNumber || '(refund request)',
       status: booking.status || '',
       customer: request.requestedBy,
-      professional: booking.professional ? { _id: String(booking.professional) } : undefined,
+      professional: booking.professional ? {
+        _id: String(booking.professional._id || booking.professional),
+        name: booking.professional.name,
+        email: booking.professional.email,
+        username: booking.professional.username,
+      } : undefined,
       project: booking.project,
       payment: booking.payment,
       actualStartDate: booking.actualStartDate,
@@ -556,71 +569,97 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
     }
 
-    if (targetStatus === 'refunded') {
-      const customRefundAmount =
-        !isExtraCostsDispute && action === 'adjust' && Number.isFinite(adjustedAmount) && adjustedAmount > 0
-          ? Number(adjustedAmount)
-          : undefined;
-      const refundReason = `Dispute resolution (${disputeType}): ${resolution}`;
-      try {
-        const refundResult = await executeRefund(resolvedBooking._id.toString(), {
-          amount: customRefundAmount,
-          reason: refundReason,
-        });
-        await Booking.updateOne(
-          { _id: resolvedBooking._id },
-          {
-            $set: {
-              'cancellation.cancelledBy': adminUser._id,
-              'cancellation.cancelledAt': new Date(),
-              'cancellation.reason': refundReason,
-              'cancellation.refundAmount': refundResult.amount,
-            },
-          }
-        ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
-      } catch (refundError: any) {
-        const rollbackSet: Record<string, any> = { status: originalDisputeStatus };
-        const rollbackUnset: Record<string, any> = {
-          'dispute.resolvedAt': '',
-          'dispute.resolution': '',
-          'dispute.resolvedBy': '',
-        };
-        if (isExtraCostsDispute) {
-          if (originalExtraCostStatus !== undefined) rollbackSet.extraCostStatus = originalExtraCostStatus;
-          else rollbackUnset.extraCostStatus = '';
-          if (originalExtraCostTotal !== undefined) rollbackSet.extraCostTotal = originalExtraCostTotal;
-          else rollbackUnset.extraCostTotal = '';
-          if (originalAdminAdjustedAmount !== undefined) rollbackSet['dispute.adminAdjustedAmount'] = originalAdminAdjustedAmount;
-          else rollbackUnset['dispute.adminAdjustedAmount'] = '';
+    const customRefundAmount =
+      !isExtraCostsDispute && action === 'adjust' && Number.isFinite(adjustedAmount) && adjustedAmount > 0
+        ? Number(adjustedAmount)
+        : undefined;
+
+    const isRefundAction =
+      targetStatus === 'refunded' ||
+      targetStatus === 'cancelled' ||
+      (!isExtraCostsDispute && action === 'adjust' && customRefundAmount !== undefined) ||
+      (disputeType === 'refund_request' && action === 'accept_professional') ||
+      (disputeType === 'reschedule' && action === 'reject_extra_costs');
+
+    if (isRefundAction) {
+      const hasRefundablePayment =
+        booking.payment?.stripePaymentIntentId &&
+        ['authorized', 'completed', 'partially_refunded'].includes(booking.payment.status);
+
+      if (!hasRefundablePayment) {
+        if (
+          targetStatus === 'refunded' ||
+          customRefundAmount !== undefined ||
+          (disputeType === 'refund_request' && action === 'accept_professional') ||
+          (disputeType === 'reschedule' && action === 'reject_extra_costs')
+        ) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_STATUS', message: 'No refundable payment exists for this booking.' }
+          });
         }
-        if (sanitizedAttachments.length > 0) {
-          if (originalResolutionAttachments !== undefined) rollbackSet['dispute.resolutionAttachments'] = originalResolutionAttachments;
-          else rollbackUnset['dispute.resolutionAttachments'] = '';
-        }
-        if (originalScheduleFields) {
-          for (const [field, value] of Object.entries(originalScheduleFields)) {
-            if (value !== undefined && value !== null) rollbackSet[field] = value;
-            else rollbackUnset[field] = '';
-          }
-        }
-        await Booking.updateOne(
-          { _id: resolvedBooking._id },
-          {
-            $set: rollbackSet,
-            $unset: rollbackUnset,
-            $push: {
-              statusHistory: {
-                status: originalDisputeStatus,
-                timestamp: new Date(),
-                updatedBy: adminUser._id,
-                note: 'Refund failed during dispute resolution; dispute reopened',
+      } else {
+        const refundReason = `Dispute resolution (${disputeType}): ${resolution}`;
+        try {
+          const refundResult = await executeRefund(resolvedBooking._id.toString(), {
+            amount: customRefundAmount,
+            reason: refundReason,
+          });
+          await Booking.updateOne(
+            { _id: resolvedBooking._id },
+            {
+              $set: {
+                'cancellation.cancelledBy': adminUser._id,
+                'cancellation.cancelledAt': new Date(),
+                'cancellation.reason': refundReason,
+                'cancellation.refundAmount': refundResult.amount,
               },
-            },
+            }
+          ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
+        } catch (refundError: any) {
+          const rollbackSet: Record<string, any> = { status: originalDisputeStatus };
+          const rollbackUnset: Record<string, any> = {
+            'dispute.resolvedAt': '',
+            'dispute.resolution': '',
+            'dispute.resolvedBy': '',
+          };
+          if (isExtraCostsDispute) {
+            if (originalExtraCostStatus !== undefined) rollbackSet.extraCostStatus = originalExtraCostStatus;
+            else rollbackUnset.extraCostStatus = '';
+            if (originalExtraCostTotal !== undefined) rollbackSet.extraCostTotal = originalExtraCostTotal;
+            else rollbackUnset.extraCostTotal = '';
+            if (originalAdminAdjustedAmount !== undefined) rollbackSet['dispute.adminAdjustedAmount'] = originalAdminAdjustedAmount;
+            else rollbackUnset['dispute.adminAdjustedAmount'] = '';
           }
-        ).catch((revertError) => console.error('Failed to revert dispute after refund failure:', revertError));
-        const httpStatus = refundError instanceof RefundError ? refundError.httpStatus : 500;
-        const message = refundError instanceof RefundError ? refundError.message : 'Refund failed during dispute resolution';
-        return res.status(httpStatus).json({ success: false, error: { code: 'REFUND_FAILED', message } });
+          if (sanitizedAttachments.length > 0) {
+            if (originalResolutionAttachments !== undefined) rollbackSet['dispute.resolutionAttachments'] = originalResolutionAttachments;
+            else rollbackUnset['dispute.resolutionAttachments'] = '';
+          }
+          if (originalScheduleFields) {
+            for (const [field, value] of Object.entries(originalScheduleFields)) {
+              if (value !== undefined && value !== null) rollbackSet[field] = value;
+              else rollbackUnset[field] = '';
+            }
+          }
+          await Booking.updateOne(
+            { _id: resolvedBooking._id },
+            {
+              $set: rollbackSet,
+              $unset: rollbackUnset,
+              $push: {
+                statusHistory: {
+                  status: originalDisputeStatus,
+                  timestamp: new Date(),
+                  updatedBy: adminUser._id,
+                  note: 'Refund failed during dispute resolution; dispute reopened',
+                },
+              },
+            }
+          ).catch((revertError) => console.error('Failed to revert dispute after refund failure:', revertError));
+          const httpStatus = refundError instanceof RefundError ? refundError.httpStatus : 500;
+          const message = refundError instanceof RefundError ? refundError.message : 'Refund failed during dispute resolution';
+          return res.status(httpStatus).json({ success: false, error: { code: 'REFUND_FAILED', message } });
+        }
       }
     }
   } catch (error: any) {
@@ -630,7 +669,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         req,
         action: 'admin.disputes.resolve',
         targetType: 'Booking',
-        targetId: req.params.bookingId,
+        targetId: bookingId as string,
         status: 'failure',
         statusCode: 500,
         errorMessage: error?.message || 'unknown',

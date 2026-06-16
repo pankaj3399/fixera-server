@@ -101,7 +101,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
 
-    const { amount: rawAmount } = req.body || {};
+    const { amount: rawAmount, note, attachments } = req.body || {};
     let customAmount: number | undefined;
     if (rawAmount !== undefined && rawAmount !== null && rawAmount !== "") {
       const parsedAmount = typeof rawAmount === "string" ? Number.parseFloat(rawAmount) : Number(rawAmount);
@@ -219,6 +219,12 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     cancellation.resolvedBy = new mongoose.Types.ObjectId(adminId);
     cancellation.refundAmount = refundAmount || undefined;
     cancellation.refundedAt = refundedAt;
+    if (typeof note === "string" && note.trim()) {
+      cancellation.resolutionNotes = note.trim();
+    }
+    if (Array.isArray(attachments)) {
+      cancellation.resolutionAttachments = attachments;
+    }
     await cancellation.save();
 
     try {
@@ -261,6 +267,8 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
         reason: cancellation.reason,
         refundAmount,
         totalWithVat,
+        resolutionNotes: note?.trim(),
+        resolutionAttachments: attachments,
       },
       status: 'success',
       statusCode: 200,
@@ -290,7 +298,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
     const { id } = req.params;
     const adminIdRaw = (req as any).admin?._id ?? (req as any).user?._id;
     const adminId = adminIdRaw?.toString();
-    const { denyReason } = req.body || {};
+    const { denyReason, attachments } = req.body || {};
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
@@ -316,6 +324,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
             denyReason: denyReason.trim(),
             resolvedAt: new Date(),
             resolvedBy: adminObjectId,
+            ...(Array.isArray(attachments) ? { resolutionAttachments: attachments } : {}),
           },
         },
         { new: true, session }

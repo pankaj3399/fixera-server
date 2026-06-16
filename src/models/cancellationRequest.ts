@@ -66,6 +66,8 @@ export interface ICancellationRequest extends Document {
   denyReason?: string;
   refundAmount?: number;
   refundedAt?: Date;
+  resolutionNotes?: string;
+  resolutionAttachments?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -126,6 +128,8 @@ const CancellationRequestSchema = new Schema<ICancellationRequest>(
     denyReason: { type: String, trim: true, maxlength: 500 },
     refundAmount: { type: Number, min: 0 },
     refundedAt: { type: Date },
+    resolutionNotes: { type: String, trim: true, maxlength: 1000 },
+    resolutionAttachments: { type: [String], default: [] },
   },
   { timestamps: true }
 );
