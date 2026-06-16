@@ -5,7 +5,7 @@ import Project from '../../models/project';
 import User from '../../models/user';
 import { buildBookingBlockedRanges } from '../../utils/bookingBlocks';
 
-const PLANNING_ACTIVE_STATUSES: BookingStatus[] = ['booked', 'rescheduling_requested', 'in_progress', 'professional_completed'];
+const PLANNING_ACTIVE_STATUSES: BookingStatus[] = ['booked', 'in_progress'];
 
 const startOfDayUTC = (value: Date): Date => {
   const d = new Date(value);
@@ -247,14 +247,6 @@ const resolveCandidateResources = async (booking: any) => {
   const professionalId = await resolveProfessionalId(booking);
   if (!professionalId) return [];
 
-  const projectId = booking.project?._id || booking.project;
-  if (!projectId) return [];
-  const project = await Project.findById(projectId).select('resources');
-  if (!project || !Array.isArray(project.resources) || project.resources.length === 0) {
-    return [];
-  }
-  const projectResourceIds = new Set(project.resources.map(id => id.toString()));
-
   const [professionalUser, employees] = await Promise.all([
     User.findById(professionalId).select('name email username'),
     User.find({
@@ -265,7 +257,7 @@ const resolveCandidateResources = async (booking: any) => {
   ]);
 
   const candidates: any[] = [];
-  if (professionalUser && projectResourceIds.has(professionalUser._id.toString())) {
+  if (professionalUser) {
     candidates.push({
       _id: professionalUser._id.toString(),
       name: professionalUser.name,
@@ -274,14 +266,12 @@ const resolveCandidateResources = async (booking: any) => {
     });
   }
   for (const emp of employees) {
-    if (projectResourceIds.has(emp._id.toString())) {
-      candidates.push({
-        _id: emp._id.toString(),
-        name: emp.name,
-        email: emp.email,
-        username: emp.username,
-      });
-    }
+    candidates.push({
+      _id: emp._id.toString(),
+      name: emp.name,
+      email: emp.email,
+      username: emp.username,
+    });
   }
   return candidates;
 };
@@ -384,7 +374,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
     }
 
     const today = startOfDayUTC(new Date());
-    const isInProgress = booking.status === 'in_progress' || booking.status === 'professional_completed';
+    const isInProgress = booking.status === 'in_progress';
 
     const existingPlan: any[] = Array.isArray(booking.resourcePlan) ? booking.resourcePlan : [];
     const existingById: Record<string, any> = {};
