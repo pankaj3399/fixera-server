@@ -2013,7 +2013,8 @@ export const buildProjectScheduleProposalsWithData = async (
   project: any,
   professional: any,
   subprojectIndex?: number,
-  durationOverride?: DurationOverride
+  durationOverride?: DurationOverride,
+  excludeBookingId?: string
 ): Promise<ScheduleProposals | null> => {
   if (!project || !professional) {
     return null;
@@ -2043,7 +2044,9 @@ export const buildProjectScheduleProposalsWithData = async (
   const { blockedDates, blockedRanges } = await buildBlockedData(
     project,
     professional,
-    timeZone
+    timeZone,
+    undefined,
+    excludeBookingId
   );
 
   // Collect company-only blocked dates and ranges for multi-resource start date validation
@@ -2059,7 +2062,9 @@ export const buildProjectScheduleProposalsWithData = async (
     perMemberBlocked = await buildPerMemberBlockedData(
       project,
       professional,
-      timeZone
+      timeZone,
+      undefined,
+      excludeBookingId
     );
   }
 
@@ -2354,14 +2359,15 @@ export const buildProjectScheduleProposalsWithData = async (
 export const buildProjectScheduleProposals = async (
   projectId: string,
   subprojectIndex?: number,
-  durationOverride?: DurationOverride
+  durationOverride?: DurationOverride,
+  excludeBookingId?: string
 ): Promise<ScheduleProposals | null> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project || !professional) {
     return null;
   }
 
-  return buildProjectScheduleProposalsWithData(project, professional, subprojectIndex, durationOverride);
+  return buildProjectScheduleProposalsWithData(project, professional, subprojectIndex, durationOverride, excludeBookingId);
 };
 
 type ScheduleContext = {

@@ -866,7 +866,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       .populate('professional', professionalFields)
       .populate(
         'project',
-        `title description pricing category service team timeMode rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage${isAdmin ? ' resources' : ''}`
+        `title description pricing category service team timeMode rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
       )
       .populate('assignedTeamMembers', 'name email');
 
