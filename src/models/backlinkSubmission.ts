@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export type BacklinkStatus =
   | 'pending_verification'
+  | 'verifying'
   | 'verified'
   | 'rejected'
   | 'revoked';
@@ -21,6 +22,7 @@ export interface ICrawlResult {
 }
 
 export interface IBacklinkSubmission extends Document {
+  _id: mongoose.Types.ObjectId;
   userId: mongoose.Types.ObjectId;
   /** Raw URL as submitted by the user */
   submittedUrl: string;
@@ -36,6 +38,8 @@ export interface IBacklinkSubmission extends Document {
   rewardIssuedAt?: Date;
   pointTransactionId?: mongoose.Types.ObjectId;
   rejectionReason?: string;
+  /** Set when automated verification needs admin follow-up (distinct from rejectionReason). */
+  adminReviewReason?: string;
   /**
    * Timestamp set when a submission is rejected.
    * Used to enforce the per-URL resubmit cooldown.
@@ -100,7 +104,7 @@ const backlinkSubmissionSchema = new Schema<IBacklinkSubmission>(
     },
     status: {
       type: String,
-      enum: ['pending_verification', 'verified', 'rejected', 'revoked'],
+      enum: ['pending_verification', 'verifying', 'verified', 'rejected', 'revoked'],
       default: 'pending_verification',
       index: true,
     },
@@ -130,6 +134,11 @@ const backlinkSubmissionSchema = new Schema<IBacklinkSubmission>(
       required: false,
     },
     rejectionReason: {
+      type: String,
+      required: false,
+      maxlength: 500,
+    },
+    adminReviewReason: {
       type: String,
       required: false,
       maxlength: 500,
@@ -182,7 +191,7 @@ backlinkSubmissionSchema.index(
   {
     unique: true,
     partialFilterExpression: {
-      status: { $in: ['pending_verification', 'verified'] },
+      status: { $in: ['pending_verification', 'verifying', 'verified'] },
     },
   },
 );

@@ -10,7 +10,7 @@ export interface IBacklinkConfig extends Document {
   crawlTimeoutMs: number;
   /** If true, links with rel="nofollow" are rejected */
   requireFollowLink: boolean;
-  /** Cooldown in hours before a rejected URL can be resubmitted by the same user */
+  /** Cooldown in hours before the same user can resubmit a rejected URL (per-user, not global) */
   resubmitCooldownHours: number;
   lastModifiedBy?: mongoose.Types.ObjectId;
   lastModified: Date;
