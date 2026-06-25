@@ -42,6 +42,7 @@ import { getReferralStats, generateUserReferralCode, addLateReferralCode } from 
 import { getProfessionalFavoriteStats, dismissFavoriteNotifications } from "../../handlers/Favorites";
 import { exportMyData } from "../../handlers/User/dataExport";
 import { deleteMyAccount } from "../../handlers/User/accountManagement";
+import { registerFcmToken, unregisterFcmToken, getNotificationPreferences, updateNotificationPreferences } from "../../handlers/User/fcmHandler";
 
 const userRouter = Router();
 
@@ -143,6 +144,10 @@ userRouter.route("/professional/favorites-notifications/seen").post(dismissFavor
 // GDPR — data export and account deletion (right-to-be-forgotten)
 userRouter.route("/me/export").get(exportMyData)
 userRouter.route("/me/account").delete(deleteMyAccount)
+
+// FCM push notifications
+userRouter.route("/fcm/token").post(registerFcmToken).delete(unregisterFcmToken)
+userRouter.route("/notification-preferences").get(getNotificationPreferences).patch(updateNotificationPreferences)
 
 // Platform commission (read-only for professionals)
 userRouter.route("/commission-rate").get(async (req, res) => {
