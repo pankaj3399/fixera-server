@@ -6,6 +6,7 @@
 
 import { VATCalculation, VATCalculationParams } from '../Types/stripe';
 import { EU_COUNTRIES } from './viesApi';
+import { getStandardVatRate } from './vatManagement';
 
 // VAT rates by country (standard rates)
 const VAT_RATES: Record<string, number> = {
@@ -34,7 +35,7 @@ export function isEUCountry(countryCode: string): boolean {
  * @returns VAT rate as percentage (e.g., 21 for 21%)
  */
 export function getVATRate(countryCode: string): number {
-  return VAT_RATES[countryCode.toUpperCase()] || 21; // Default to Belgian rate
+  return VAT_RATES[countryCode.toUpperCase()] || getStandardVatRate(countryCode);
 }
 
 /**
@@ -112,10 +113,11 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
   const professionalCountryUpper = professionalCountry.toUpperCase();
   const platformCountry = professionalCountryUpper;
   const roundAmount = (value: number): number => Math.round(value * 100) / 100;
+  const localRate = getVATRate(customerCountryUpper);
 
   // ==================== Belgium B2C ====================
   if (customerCountryUpper === platformCountry && customerType === 'individual') {
-    const vatRate = 21;
+    const vatRate = localRate;
     const vatAmountRaw = (amount * vatRate) / 100;
     const vatAmount = roundAmount(vatAmountRaw);
     const total = roundAmount(amount + vatAmount);
@@ -132,7 +134,7 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
     customerCountryUpper === platformCountry &&
     customerType === 'business'
   ) {
-    const vatRate = 21;
+    const vatRate = localRate;
     const vatAmountRaw = (amount * vatRate) / 100;
     const vatAmount = roundAmount(vatAmountRaw);
     const total = roundAmount(amount + vatAmount);
@@ -151,8 +153,7 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
     customerCountryUpper !== platformCountry &&
     customerType === 'individual'
   ) {
-    // Apply Belgian VAT rate
-    const vatRate = 21;
+    const vatRate = localRate;
     const vatAmountRaw = (amount * vatRate) / 100;
     const vatAmount = roundAmount(vatAmountRaw);
     const total = roundAmount(amount + vatAmount);
@@ -189,7 +190,7 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
     !validateVATNumberFormat(customerVATNumber)
   ) {
     // Treat as B2C if VAT number is invalid
-    const vatRate = 21;
+    const vatRate = localRate;
     const vatAmountRaw = (amount * vatRate) / 100;
     const vatAmount = roundAmount(vatAmountRaw);
     const total = roundAmount(amount + vatAmount);

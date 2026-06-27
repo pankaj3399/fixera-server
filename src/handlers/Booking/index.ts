@@ -17,6 +17,7 @@ import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/busi
 import { sendPushToUser } from "../../utils/fcmService";
 import { getFrontendUrl } from "../../utils/frontendUrl";
 import { IUser } from "../../models/user";
+import { resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
@@ -124,6 +125,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       estimatedUsage,
       selectedExtraOptions,
       paymentAtCheckout,
+      serviceConfigurationId,
+      vatAnswers,
     } = req.body;
     const paymentAtCheckoutRequested =
       paymentAtCheckout === true ||
@@ -215,6 +218,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     };
 
+    const normalizedVatAnswers = Array.isArray(vatAnswers)
+      ? vatAnswers.reduce((acc: Record<string, unknown>, answer: any) => {
+          if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+          return acc;
+        }, {})
+      : normalizeRfqAnswers(rfqData.answers).reduce((acc: Record<string, unknown>, answer: any) => {
+          if (answer.questionId) acc[answer.questionId] = answer.answer;
+          return acc;
+        }, {});
+
     if (customerBlocks) {
       bookingData.customerBlocks = customerBlocks;
     }
@@ -276,6 +289,24 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
 
       bookingData.project = projectId;
       bookingData.professional = project.professionalId;
+
+      const projectService = Array.isArray(project.services) && project.services.length > 0
+        ? project.services[0]
+        : null;
+      const selectedServiceConfigId = serviceConfigurationId || project.serviceConfigurationId;
+      const vatDecision = await resolveVatDecisionFromConfig({
+        serviceConfigurationId: selectedServiceConfigId,
+        category: projectService?.category || project.category,
+        service: projectService?.service || project.service,
+        areaOfWork: projectService?.areaOfWork || project.areaOfWork,
+        country: customer.location?.country || project.distance?.countryCode,
+        answers: normalizedVatAnswers,
+        customerType: customer.customerType || "individual",
+      });
+      bookingData.vatDecision = {
+        ...vatDecision,
+        answers: Object.entries(normalizedVatAnswers).map(([fieldName, value]) => ({ fieldName, value })),
+      };
 
       let fallbackTeamMembers: mongoose.Types.ObjectId[] | null = null;
       let normalizedProjectResourceIds: string[] = [];
@@ -1540,4 +1571,3 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
     next(error);
   }
 };
-

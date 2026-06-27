@@ -5,6 +5,7 @@
 
 import PDFDocument from "pdfkit";
 import InvoiceSequence from "../models/invoiceSequence";
+import PlatformSettings from "../models/platformSettings";
 import { getVATExplanation, isEUCountry } from "../utils/vat";
 import { formatCurrency } from "../utils/payment";
 
@@ -17,6 +18,7 @@ interface InvoiceData {
   customer: {
     name: string;
     email: string;
+    businessName?: string;
     address?: string;
     city?: string;
     country?: string;
@@ -44,6 +46,19 @@ interface InvoiceData {
 
   // Service description
   serviceDescription: string;
+  lineItems?: { description: string; amount: number; vatRate?: number }[];
+  discounts?: { label: string; amount: number }[];
+  actualStartDate?: Date;
+  actualEndDate?: Date;
+  selfBilling?: boolean;
+  issuer?: {
+    name?: string;
+    vatNumber?: string;
+    street?: string;
+    city?: string;
+    postalCode?: string;
+    country?: string;
+  };
 
   // VAT explanation
   vatExplanation?: string;
@@ -53,10 +68,31 @@ interface InvoiceBooking {
   _id: { toString(): string } | string;
   bookingNumber?: string;
   quote?: { description?: string };
-  rfqDetails?: { description?: string };
+  rfqData?: { description?: string; serviceType?: string };
+  quoteVersions?: Array<{
+    version?: number;
+    scope?: string;
+    description?: string;
+    pricingLines?: { description: string; price: number; vatRate?: number }[];
+    totalAmount?: number;
+  }>;
+  currentQuoteVersion?: number;
+  project?: {
+    title?: string;
+    category?: string;
+    service?: string;
+  };
   customer: {
     name: string;
     email: string;
+    customerType?: string;
+    businessName?: string;
+    companyAddress?: {
+      address?: string;
+      city?: string;
+      country?: string;
+      postalCode?: string;
+    };
     vatNumber?: string;
     location?: {
       address?: string;
@@ -81,7 +117,21 @@ interface InvoiceBooking {
     totalWithVat?: number;
     currency?: string;
     reverseCharge?: boolean;
+    discount?: {
+      loyaltyAmount?: number;
+      repeatBuyerAmount?: number;
+      pointsDiscountAmount?: number;
+      codeDiscountAmount?: number;
+      codeLabel?: string;
+      totalDiscount?: number;
+    };
   };
+  actualStartDate?: Date;
+  actualEndDate?: Date;
+  scheduledStartDate?: Date;
+  scheduledExecutionEndDate?: Date;
+  extraCosts?: { name: string; amount: number; justification?: string }[];
+  extraCostTotal?: number;
 }
 
 /**
@@ -131,12 +181,16 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       });
 
       // Header
+      const issuer = data.issuer || {};
       doc
         .fontSize(20)
-        .text("FIXERA", 50, 50)
+        .text(issuer.name || "FIXERA", 50, 50)
         .fontSize(10)
         .text("Property Services Marketplace", 50, 75)
-        .text("Belgium", 50, 90);
+        .text([issuer.street, issuer.postalCode, issuer.city, issuer.country].filter(Boolean).join(", ") || "Belgium", 50, 90);
+      if (issuer.vatNumber) {
+        doc.text(`VAT: ${issuer.vatNumber}`, 50, 105);
+      }
 
       // Invoice title
       doc.fontSize(20).text("INVOICE", 400, 50, { align: "right" });
@@ -154,7 +208,7 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       // Bill To section
       doc.fontSize(12).text("BILL TO:", 50, 150);
 
-      doc.fontSize(10).text(data.customer.name, 50, 170).text(data.customer.email, 50, 185);
+      doc.fontSize(10).text(data.customer.businessName || data.customer.name, 50, 170).text(data.customer.email, 50, 185);
 
       if (data.customer.address) {
         doc.text(data.customer.address, 50, 200);
@@ -180,6 +234,9 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       if (data.professional.vatNumber) {
         doc.text(`VAT: ${data.professional.vatNumber}`, 320, 215);
       }
+      if (data.selfBilling) {
+        doc.text("Prepared and sent on behalf of the supplier.", 320, 230, { width: 230 });
+      }
 
       // Service description
       doc.fontSize(12).text("SERVICE DESCRIPTION:", 50, 280);
@@ -191,8 +248,16 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       });
       doc.text(data.serviceDescription, 50, descriptionStartY, { width: descriptionWidth });
 
+      const dateLines = [
+        data.actualStartDate ? `Actual start date: ${new Date(data.actualStartDate).toLocaleDateString("en-GB")}` : undefined,
+        data.actualEndDate ? `Actual end date: ${new Date(data.actualEndDate).toLocaleDateString("en-GB")}` : undefined,
+      ].filter(Boolean);
+      if (dateLines.length > 0) {
+        doc.text(dateLines.join("\n"), 50, descriptionStartY + descriptionHeight + 8, { width: descriptionWidth });
+      }
+
       // Invoice table (always rendered below the variable-height description)
-      const tableTop = Math.max(360, descriptionStartY + descriptionHeight + 20);
+      const tableTop = Math.max(360, descriptionStartY + descriptionHeight + (dateLines.length > 0 ? 45 : 20));
 
       doc
         .font("Helvetica-Bold")
@@ -204,45 +269,57 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       // Line
       doc.moveTo(50, tableTop + 20).lineTo(550, tableTop + 20).stroke();
 
-      // Net amount
-      doc
-        .text("Service Amount", 50, tableTop + 30)
-        .text(formatCurrency(data.payment.netAmount, data.payment.currency), 450, tableTop + 30, {
-          align: "right",
-        });
+      let rowY = tableTop + 30;
+      const lineItems = data.lineItems?.length
+        ? data.lineItems
+        : [{ description: "Service Amount", amount: data.payment.netAmount, vatRate: data.payment.vatRate }];
+      for (const item of lineItems) {
+        doc
+          .text(item.vatRate != null ? `${item.description} (${item.vatRate}% VAT)` : item.description, 50, rowY, { width: 360 })
+          .text(formatCurrency(item.amount, data.payment.currency), 450, rowY, { align: "right" });
+        rowY += 20;
+      }
+
+      for (const discount of data.discounts || []) {
+        doc
+          .text(discount.label, 50, rowY)
+          .text(`-${formatCurrency(discount.amount, data.payment.currency)}`, 450, rowY, { align: "right" });
+        rowY += 20;
+      }
 
       // VAT
       if (data.payment.vatAmount > 0) {
         doc
-          .text(`VAT (${data.payment.vatRate}%)`, 50, tableTop + 50)
-          .text(formatCurrency(data.payment.vatAmount, data.payment.currency), 450, tableTop + 50, {
+          .text(`VAT (${data.payment.vatRate}%)`, 50, rowY)
+          .text(formatCurrency(data.payment.vatAmount, data.payment.currency), 450, rowY, {
             align: "right",
           });
+        rowY += 20;
       }
 
       // Total line
-      doc.moveTo(50, tableTop + 70).lineTo(550, tableTop + 70).stroke();
+      doc.moveTo(50, rowY).lineTo(550, rowY).stroke();
 
       // Total
       doc
         .font("Helvetica-Bold")
         .fontSize(12)
-        .text("TOTAL", 50, tableTop + 80)
-        .text(formatCurrency(data.payment.totalWithVat, data.payment.currency), 450, tableTop + 80, {
+        .text("TOTAL", 50, rowY + 10)
+        .text(formatCurrency(data.payment.totalWithVat, data.payment.currency), 450, rowY + 10, {
           align: "right",
         });
       doc.font("Helvetica");
 
       // VAT explanation
       if (data.vatExplanation) {
-        doc.fontSize(9).text(data.vatExplanation, 50, tableTop + 120, {
+        doc.fontSize(9).text(data.vatExplanation, 50, rowY + 50, {
           width: 500,
           align: "left",
         });
       }
 
       // Footer
-      const tableContentBottom = data.vatExplanation ? tableTop + 170 : tableTop + 100;
+      const tableContentBottom = data.vatExplanation ? rowY + 100 : rowY + 40;
       const contentBottom = Math.max(doc.y, tableContentBottom);
       const footerHeight = 30;
       const footerPadding = 20;
@@ -286,6 +363,26 @@ export async function generateBookingInvoice(
   const customer = booking.customer;
   const professional = booking.professional;
   const customerCountry = customer.location?.country || "BE";
+  const settings = await PlatformSettings.getCurrentConfig();
+  const currentQuote = booking.quoteVersions?.find((quote) => quote.version === booking.currentQuoteVersion)
+    || booking.quoteVersions?.[booking.quoteVersions.length - 1];
+  const quoteLines = currentQuote?.pricingLines?.map((line) => ({
+    description: line.description,
+    amount: line.price,
+    vatRate: line.vatRate,
+  })) || [];
+  const extraCostLines = (booking.extraCosts || []).map((cost) => ({
+    description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
+    amount: cost.amount,
+    vatRate: booking.payment.vatRate ?? 0,
+  }));
+  const discount = booking.payment.discount;
+  const discounts = [
+    discount?.loyaltyAmount ? { label: "Loyalty discount", amount: discount.loyaltyAmount } : undefined,
+    discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount } : undefined,
+    discount?.pointsDiscountAmount ? { label: "Points discount", amount: discount.pointsDiscountAmount } : undefined,
+    discount?.codeDiscountAmount ? { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: discount.codeDiscountAmount } : undefined,
+  ].filter(Boolean) as { label: string; amount: number }[];
 
   const fallbackReverseChargeHeuristic =
     (booking.payment.vatRate ?? 0) === 0 &&
@@ -304,9 +401,10 @@ export async function generateBookingInvoice(
     customer: {
       name: customer.name,
       email: customer.email,
-      address: customer.location?.address,
-      city: customer.location?.city,
-      country: customer.location?.country,
+      businessName: customer.customerType === "business" ? customer.businessName : undefined,
+      address: customer.companyAddress?.address || customer.location?.address,
+      city: customer.companyAddress?.city || customer.location?.city,
+      country: customer.companyAddress?.country || customer.location?.country,
       vatNumber: customer.vatNumber,
     },
 
@@ -328,7 +426,26 @@ export async function generateBookingInvoice(
     },
 
     serviceDescription:
-      booking.quote?.description || booking.rfqDetails?.description || "Property service",
+      [
+        booking.project?.title ? `Project: ${booking.project.title}` : undefined,
+        booking.rfqData?.serviceType ? `Service: ${booking.rfqData.serviceType}` : undefined,
+        currentQuote?.scope ? `Scope: ${currentQuote.scope}` : undefined,
+        currentQuote?.description || booking.quote?.description || booking.rfqData?.description || "Property service",
+      ].filter(Boolean).join("\n"),
+
+    lineItems: [...quoteLines, ...extraCostLines],
+    discounts,
+    actualStartDate: booking.actualStartDate || booking.scheduledStartDate,
+    actualEndDate: booking.actualEndDate || booking.scheduledExecutionEndDate,
+    selfBilling: true,
+    issuer: {
+      name: settings.companyAddress?.name || "Fixera",
+      vatNumber: settings.companyVatNumber,
+      street: settings.companyAddress?.street,
+      city: settings.companyAddress?.city,
+      postalCode: settings.companyAddress?.postalCode,
+      country: settings.companyAddress?.country,
+    },
 
     vatExplanation: getVATExplanation(
       {

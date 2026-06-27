@@ -5,6 +5,14 @@ const SINGLETON_ID = 'platform-settings';
 export interface IPlatformSettings extends Omit<Document, '_id'> {
   _id: string;
   commissionPercent: number;
+  companyVatNumber?: string;
+  companyAddress?: {
+    name?: string;
+    street?: string;
+    city?: string;
+    postalCode?: string;
+    country?: string;
+  };
   lastModifiedBy: mongoose.Types.ObjectId;
   lastModified: Date;
   version: number;
@@ -25,6 +33,17 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
     min: 0,
     max: 100,
     default: 0,
+  },
+  companyVatNumber: {
+    type: String,
+    trim: true,
+  },
+  companyAddress: {
+    name: { type: String, trim: true, default: 'Fixera' },
+    street: { type: String, trim: true },
+    city: { type: String, trim: true },
+    postalCode: { type: String, trim: true },
+    country: { type: String, trim: true, default: 'Belgium' },
   },
   lastModifiedBy: {
     type: mongoose.Schema.Types.ObjectId,

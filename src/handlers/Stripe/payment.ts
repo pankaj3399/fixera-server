@@ -43,6 +43,7 @@ const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
   'vatAmount',
   'vatRate',
   'totalWithVat',
+  'reverseCharge',
   'platformCommission',
   'professionalPayout',
   'stripePaymentIntentId',
@@ -95,6 +96,38 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     platformCommission: paymentSummary.platformCommission,
     professionalPayout: paymentSummary.professionalPayout,
     ...filterPaymentOverrides(overrides),
+  };
+};
+
+const getQuotePricingVatCalculation = (booking: any, amount: number) => {
+  const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
+  const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
+    || quoteVersions[quoteVersions.length - 1];
+  const pricingLines = Array.isArray(currentVersion?.pricingLines)
+    ? currentVersion.pricingLines
+    : [];
+  const validLines = pricingLines.filter((line: any) =>
+    Number.isFinite(Number(line?.price)) &&
+    Number(line.price) > 0 &&
+    Number.isFinite(Number(line?.vatRate))
+  );
+
+  if (validLines.length === 0) return null;
+
+  const lineSubtotal = validLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
+  if (!(lineSubtotal > 0)) return null;
+
+  const weightedVatRate = validLines.reduce((sum: number, line: any) => {
+    return sum + (Number(line.price) / lineSubtotal) * Number(line.vatRate);
+  }, 0);
+  const vatRate = Math.round(weightedVatRate * 1000) / 1000;
+  const vatAmount = Math.round(((amount * vatRate) / 100) * 100) / 100;
+
+  return {
+    vatRate,
+    vatAmount,
+    total: Math.round((amount + vatAmount) * 100) / 100,
+    reverseCharge: vatRate === 0,
   };
 };
 
@@ -401,8 +434,24 @@ export const createPaymentIntent = async (
     // Use discounted amount for VAT and payment calculations
     const discountedQuoteAmount = discountBreakdown.finalAmount;
 
-    // Calculate VAT on the discounted amount
-    const vatCalculation = calculateVAT({
+    // Calculate VAT on the discounted amount. Prefer the booking's service-level VAT
+    // decision when the booking wizard already evaluated a configured rule.
+    const configuredVatDecision = (booking as any).vatDecision;
+    const quotePricingVatCalculation = getQuotePricingVatCalculation(booking, discountedQuoteAmount);
+    const vatCalculation = quotePricingVatCalculation
+      || configuredVatDecision?.action && configuredVatDecision.action !== "rfq"
+      ? (() => {
+          if (quotePricingVatCalculation) return quotePricingVatCalculation;
+          const vatRate = Number(configuredVatDecision.appliedRate) || 0;
+          const vatAmount = Math.round(((discountedQuoteAmount * vatRate) / 100) * 100) / 100;
+          return {
+            vatRate,
+            vatAmount,
+            total: Math.round((discountedQuoteAmount + vatAmount) * 100) / 100,
+            reverseCharge: Boolean(configuredVatDecision.reverseCharge),
+          };
+        })()
+      : calculateVAT({
       amount: discountedQuoteAmount,
       customerCountry: customer.location?.country || 'BE',
       customerVATNumber: customer.vatNumber || null,
@@ -468,6 +517,7 @@ export const createPaymentIntent = async (
       vatAmount,
       vatRate: vatCalculation.vatRate,
       totalWithVat: totalAmount,
+      reverseCharge: vatCalculation.reverseCharge,
       ...(milestoneIndex !== null && { milestoneIndex }),
       ...(discountBreakdown.totalDiscount > 0 && {
         discount: {
@@ -510,6 +560,7 @@ export const createPaymentIntent = async (
           vatAmount,
           vatRate: vatCalculation.vatRate,
           totalWithVat: totalAmount,
+          reverseCharge: vatCalculation.reverseCharge,
           platformCommission,
           professionalPayout,
           stripePaymentIntentId: paymentIntent.id,

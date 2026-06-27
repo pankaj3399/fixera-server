@@ -36,6 +36,53 @@ const getSafeCommissionPercent = async (): Promise<number> => {
   }
 };
 
+const normalizePricingLines = (
+  pricingLines: unknown,
+  fallbackAmount: unknown,
+  fallbackDescription: unknown,
+  fallbackCountry?: string,
+) => {
+  if (Array.isArray(pricingLines) && pricingLines.length > 0) {
+    const lines = pricingLines.map((line: any) => ({
+      description: String(line?.description || '').trim(),
+      price: Number(line?.price),
+      vatRate: Number(line?.vatRate),
+      vatCountry: line?.vatCountry ? String(line.vatCountry).trim().toUpperCase() : fallbackCountry,
+      vatLabel: line?.vatLabel ? String(line.vatLabel).trim() : undefined,
+    }));
+
+    const invalidLine = lines.find(line =>
+      !line.description ||
+      !Number.isFinite(line.price) ||
+      line.price < 0 ||
+      !Number.isFinite(line.vatRate) ||
+      line.vatRate < 0 ||
+      line.vatRate > 100
+    );
+
+    if (invalidLine) {
+      return { error: 'Each pricing line needs a description, non-negative price, and VAT rate between 0 and 100.' };
+    }
+
+    const totalAmount = Math.round(lines.reduce((sum, line) => sum + line.price, 0) * 100) / 100;
+    return { lines, totalAmount };
+  }
+
+  const amount = Number(fallbackAmount);
+  return {
+    lines: Number.isFinite(amount) && amount > 0
+      ? [{
+          description: String(fallbackDescription || 'Service').slice(0, 500),
+          price: amount,
+          vatRate: 0,
+          vatCountry: fallbackCountry,
+          vatLabel: 'VAT selected at checkout',
+        }]
+      : [],
+    totalAmount: amount,
+  };
+};
+
 const formatQuotationValidDate = (validUntil: string): string => {
   const raw = String(validUntil || '').trim();
   const directDateMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
@@ -271,6 +318,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       materials,
       description,
       totalAmount,
+      pricingLines,
       currency,
       milestones,
       preparationDuration,
@@ -287,7 +335,13 @@ export const submitQuotation = async (req: Request, res: Response) => {
     if (!description) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Description is required' } });
     }
-    if (!totalAmount || totalAmount <= 0) {
+    const normalizedPricing = normalizePricingLines(pricingLines, totalAmount, description);
+    if (normalizedPricing.error) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: normalizedPricing.error } });
+    }
+    const normalizedTotalAmount = normalizedPricing.totalAmount || 0;
+
+    if (!normalizedTotalAmount || normalizedTotalAmount <= 0) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Total amount must be greater than 0' } });
     }
     if (!warrantyDuration?.value || !warrantyDuration?.unit) {
@@ -309,7 +363,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
     // Validate milestones sum if provided
     if (milestones && milestones.length > 0) {
       const milestoneSum = milestones.reduce((sum: number, m: any) => sum + (m.amount || 0), 0);
-      if (Math.abs(milestoneSum - totalAmount) > 0.01) {
+      if (Math.abs(milestoneSum - normalizedTotalAmount) > 0.01) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Sum of milestone amounts must equal total amount' } });
       }
     }
@@ -340,7 +394,8 @@ export const submitQuotation = async (req: Request, res: Response) => {
       materialsIncluded,
       materials: materialsIncluded ? materials : [],
       description,
-      totalAmount,
+      pricingLines: normalizedPricing.lines,
+      totalAmount: normalizedTotalAmount,
       currency: currency || 'EUR',
       milestones: milestones ? milestones.map((m: any, i: number): IQuotationMilestone => ({
         title: m.title,
@@ -381,7 +436,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
 
     try {
       const commissionPercent = await getSafeCommissionPercent();
-      const customerAmount = +(totalAmount * (1 + commissionPercent / 100)).toFixed(2);
+      const customerAmount = +(normalizedTotalAmount * (1 + commissionPercent / 100)).toFixed(2);
       const profDisplayName = getProfessionalDisplayName(professional);
       const isDirect = booking.rfqResponse === undefined || booking.rfqResponse === null;
       if (isDirect) {
@@ -393,7 +448,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       console.error('Failed to send quotation email:', e);
     }
 
-    await sendQuotationChatMessage(booking, versionNumber, scope, totalAmount, currency || 'EUR', validUntil, false);
+    await sendQuotationChatMessage(booking, versionNumber, scope, normalizedTotalAmount, currency || 'EUR', validUntil, false);
 
     return res.json({
       success: true,
@@ -429,6 +484,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       materials,
       description,
       totalAmount,
+      pricingLines,
       currency,
       milestones,
       preparationDuration,
@@ -445,7 +501,13 @@ export const editQuotation = async (req: Request, res: Response) => {
     if (!description) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Description is required' } });
     }
-    if (!totalAmount || totalAmount <= 0) {
+    const normalizedPricing = normalizePricingLines(pricingLines, totalAmount, description);
+    if (normalizedPricing.error) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: normalizedPricing.error } });
+    }
+    const normalizedTotalAmount = normalizedPricing.totalAmount || 0;
+
+    if (!normalizedTotalAmount || normalizedTotalAmount <= 0) {
       return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Total amount must be greater than 0' } });
     }
     if (!changeNote) {
@@ -457,7 +519,7 @@ export const editQuotation = async (req: Request, res: Response) => {
 
     if (milestones && milestones.length > 0) {
       const milestoneSum = milestones.reduce((sum: number, m: any) => sum + (m.amount || 0), 0);
-      if (Math.abs(milestoneSum - totalAmount) > 0.01) {
+      if (Math.abs(milestoneSum - normalizedTotalAmount) > 0.01) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Sum of milestone amounts must equal total amount' } });
       }
     }
@@ -489,7 +551,8 @@ export const editQuotation = async (req: Request, res: Response) => {
       materialsIncluded,
       materials: materialsIncluded ? materials : [],
       description,
-      totalAmount,
+      pricingLines: normalizedPricing.lines,
+      totalAmount: normalizedTotalAmount,
       currency: currency || 'EUR',
       milestones: milestones ? milestones.map((m: any, i: number): IQuotationMilestone => ({
         title: m.title,
@@ -530,7 +593,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       console.error('Failed to send quotation updated email:', e);
     }
 
-    await sendQuotationChatMessage(booking, newVersionNumber, scope, totalAmount, currency || 'EUR', validUntil, true);
+    await sendQuotationChatMessage(booking, newVersionNumber, scope, normalizedTotalAmount, currency || 'EUR', validUntil, true);
 
     return res.json({
       success: true,
