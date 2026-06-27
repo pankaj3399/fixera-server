@@ -520,17 +520,25 @@ export const sendMessage = async (req: Request, res: Response) => {
   await message.populate("senderId", "name email username businessInfo profileImage role");
 
   // --- Fire push notification to the recipient (non-blocking) ---
-  const recipientId = isCustomerSender ? professionalId : customerId;
-  const senderName = req.user?.name ?? 'Someone';
-  const previewText = text ? (text.length > 80 ? text.slice(0, 80) + '…' : text) : '📎 Attachment';
+  let recipientId: string;
+  if (conversation.type === 'support') {
+    recipientId = userId === supportAdminId ? targetUserId : supportAdminId;
+  } else {
+    recipientId = isCustomerSender ? professionalId : customerId;
+  }
 
-  sendPushToUser(recipientId, {
-    title: `New message from ${senderName}`,
-    body: previewText,
-    type: 'messages',
-    clickUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/chat`,
-    data: { conversationId },
-  }).catch(() => { /* never block the response */ });
+  if (recipientId) {
+    const senderName = req.user?.name ?? 'Someone';
+    const previewText = text ? (text.length > 80 ? text.slice(0, 80) + '…' : text) : '📎 Attachment';
+
+    sendPushToUser(recipientId, {
+      title: `New message from ${senderName}`,
+      body: previewText,
+      type: 'messages',
+      clickUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/chat`,
+      data: { conversationId },
+    }).catch(() => { /* never block the response */ });
+  }
 
   return res.status(201).json({
     success: true,

@@ -606,7 +606,8 @@ const UserSchema = new Schema({
     // FCM push notification fields
     fcmTokens: {
         type: [String],
-        default: []
+        default: [],
+        select: false,
     },
     notificationPreferences: {
         booking_updates: {

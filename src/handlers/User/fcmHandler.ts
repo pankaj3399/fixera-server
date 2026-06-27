@@ -29,22 +29,25 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
 
     const cleanToken = token.trim();
 
-    // Add token if not already present; keep only the last MAX_TOKENS_PER_USER
-    const user = await User.findById(userId).select('fcmTokens');
-    if (!user) {
+    const userExists = await User.findById(userId).select('_id');
+    if (!userExists) {
       res.status(404).json({ success: false, msg: 'User not found' });
       return;
     }
 
-    const tokens: string[] = user.fcmTokens ?? [];
-    if (!tokens.includes(cleanToken)) {
-      tokens.push(cleanToken);
-    }
+    // Each device token belongs to one user at a time.
+    await User.updateMany(
+      { _id: { $ne: userId }, fcmTokens: cleanToken },
+      { $pull: { fcmTokens: cleanToken } },
+    );
 
-    // Keep only the most recent N tokens
-    const trimmed = tokens.slice(-MAX_TOKENS_PER_USER);
-
-    await User.findByIdAndUpdate(userId, { $set: { fcmTokens: trimmed } });
+    // Atomic dedupe + append + recency cap without read-modify-write.
+    await User.findByIdAndUpdate(userId, {
+      $pull: { fcmTokens: cleanToken },
+    });
+    await User.findByIdAndUpdate(userId, {
+      $push: { fcmTokens: { $each: [cleanToken], $slice: -MAX_TOKENS_PER_USER } },
+    });
 
     res.status(200).json({ success: true, msg: 'FCM token registered' });
   } catch (err) {

@@ -14,6 +14,11 @@ import User, { IUser } from '../models/user';
 // ------------------------------------------------------------------
 
 const FIREBASE_APP_NAME = 'fixera-fcm';
+const FCM_NOT_CONFIGURED = 'FCM not configured';
+
+function isFcmNotConfiguredError(err: unknown): boolean {
+  return err instanceof Error && err.message === FCM_NOT_CONFIGURED;
+}
 
 function getFirebaseApp(): App {
   const existing = getApps().find((a) => a.name === FIREBASE_APP_NAME);
@@ -25,16 +30,21 @@ function getFirebaseApp(): App {
 
   if (!serviceAccountJson) {
     console.warn('⚠️  FCM_SERVICE_ACCOUNT_JSON is not set – push notifications disabled');
-    throw new Error('FCM not configured');
+    throw new Error(FCM_NOT_CONFIGURED);
   }
 
-  const serviceAccount = JSON.parse(
-    Buffer.from(serviceAccountJson, 'base64').toString('utf-8'),
-  ) as ServiceAccount;
+  try {
+    const serviceAccount = JSON.parse(
+      Buffer.from(serviceAccountJson, 'base64').toString('utf-8'),
+    ) as ServiceAccount;
 
-  const app = initializeApp({ credential: cert(serviceAccount) }, FIREBASE_APP_NAME);
-  console.log('🔥 Firebase Admin initialised');
-  return app;
+    const app = initializeApp({ credential: cert(serviceAccount) }, FIREBASE_APP_NAME);
+    console.log('🔥 Firebase Admin initialised');
+    return app;
+  } catch (err) {
+    console.error('FCM_SERVICE_ACCOUNT_JSON is set but invalid (bad base64 or JSON):', err);
+    throw err;
+  }
 }
 
 // ------------------------------------------------------------------
@@ -177,8 +187,9 @@ async function _dispatchTokens(
   let app: App;
   try {
     app = getFirebaseApp();
-  } catch {
-    return; // FCM not configured – skip silently
+  } catch (err) {
+    if (isFcmNotConfiguredError(err)) return;
+    throw err;
   }
 
   const messaging = getMessaging(app);
@@ -214,8 +225,9 @@ async function _dispatchMulticast(
   let app: App;
   try {
     app = getFirebaseApp();
-  } catch {
-    return;
+  } catch (err) {
+    if (isFcmNotConfiguredError(err)) return;
+    throw err;
   }
 
   const messaging = getMessaging(app);

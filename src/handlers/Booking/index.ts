@@ -252,6 +252,21 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         });
       }
 
+      if (!project.professionalId) {
+        return res.status(400).json({
+          success: false,
+          msg: "Project has no assigned professional",
+        });
+      }
+
+      const projectProfessional = await User.findById(project.professionalId).select('_id role');
+      if (!projectProfessional || projectProfessional.role !== 'professional') {
+        return res.status(400).json({
+          success: false,
+          msg: "Project professional is invalid or no longer available",
+        });
+      }
+
       bookingData.project = projectId;
       bookingData.professional = project.professionalId;
 
@@ -641,15 +656,18 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     ]);
 
     // Notify the professional (non-blocking)
-    await sendPushToUser(populated.professional._id.toString(), {
-      title: '📋 New Booking Request',
-      body: `${populated.customer.name} has sent you a new booking request`,
-      type: 'booking_updates',
-      clickUrl: `${process.env.FRONTEND_URL ?? 'http://localhost:3000'}/dashboard`,
-      data: { bookingId: populated._id.toString() },
-    }).catch((err: unknown) => {
-      console.warn('FCM notify professional failed (non-critical):', err);
-    });
+    const notifyProfessionalId = populated.professional?._id?.toString();
+    if (notifyProfessionalId) {
+      void sendPushToUser(notifyProfessionalId, {
+        title: '📋 New Booking Request',
+        body: `${populated.customer.name} has sent you a new booking request`,
+        type: 'booking_updates',
+        clickUrl: `${process.env.FRONTEND_URL ?? 'http://localhost:3000'}/dashboard`,
+        data: { bookingId: populated._id.toString() },
+      }).catch((err: unknown) => {
+        console.warn('FCM notify professional failed (non-critical):', err);
+      });
+    }
 
     return res.status(201).json({
       success: true,
