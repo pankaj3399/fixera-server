@@ -8,7 +8,12 @@ export function normalizeOrigin(origin: string): string {
     const url = new URL(origin);
     return `${url.protocol}//${url.host}`.toLowerCase();
   } catch {
-    return origin.replace(/\/+$/, '').toLowerCase();
+    try {
+      const url = new URL(`https://${origin.replace(/^\/+/, '')}`);
+      return `${url.protocol}//${url.host}`.toLowerCase();
+    } catch {
+      return origin.replace(/\/+$/, '').toLowerCase();
+    }
   }
 }
 
@@ -23,12 +28,8 @@ export function isAllowedOrigin(origin: string): boolean {
   return allowed.has(normalized);
 }
 
+/** Derive origin from trusted request headers only (never from body). */
 export function getOriginFromRequest(req: Request): string {
-  const body = req.body as { origin?: string };
-  if (typeof body.origin === 'string' && body.origin.trim()) {
-    return normalizeOrigin(body.origin.trim());
-  }
-
   const header = req.get('origin') || req.get('referer');
   if (header) {
     try {

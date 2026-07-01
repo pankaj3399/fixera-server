@@ -3,7 +3,6 @@ import User from '../../models/user';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
-  normalizeOrigin,
 } from '../../utils/fcmTokenUtils';
 
 // ------------------------------------------------------------------
@@ -39,9 +38,10 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
     }
 
     const cleanToken = token.trim();
+    const now = new Date();
 
-    const user = await User.findById(userId).select('+fcmTokens');
-    if (!user) {
+    const userExists = await User.findById(userId).select('_id');
+    if (!userExists) {
       res.status(404).json({ success: false, msg: 'User not found' });
       return;
     }
@@ -52,21 +52,50 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
       { $pull: { fcmTokens: { token: cleanToken } } },
     );
 
-    const now = new Date();
-    const existing = (user.fcmTokens ?? []).filter(
-      (entry) => entry && typeof entry === 'object' && entry.token,
-    );
-
-    const sameOrigin = existing.filter(
-      (entry) => normalizeOrigin(entry.origin) === origin && entry.token !== cleanToken,
-    );
-
-    user.fcmTokens = [
-      ...sameOrigin,
-      { token: cleanToken, origin, updatedAt: now },
-    ].slice(-MAX_TOKENS_PER_USER);
-
-    await user.save();
+    // Atomic update: preserve other-origin tokens, dedupe within origin, cap total.
+    await User.findByIdAndUpdate(userId, [
+      {
+        $set: {
+          fcmTokens: {
+            $let: {
+              vars: {
+                otherOrigin: {
+                  $filter: {
+                    input: { $ifNull: ['$fcmTokens', []] },
+                    as: 'entry',
+                    cond: { $ne: ['$$entry.origin', origin] },
+                  },
+                },
+                sameOrigin: {
+                  $filter: {
+                    input: { $ifNull: ['$fcmTokens', []] },
+                    as: 'entry',
+                    cond: {
+                      $and: [
+                        { $eq: ['$$entry.origin', origin] },
+                        { $ne: ['$$entry.token', cleanToken] },
+                      ],
+                    },
+                  },
+                },
+              },
+              in: {
+                $slice: [
+                  {
+                    $concatArrays: [
+                      '$$otherOrigin',
+                      '$$sameOrigin',
+                      [{ token: cleanToken, origin, updatedAt: now }],
+                    ],
+                  },
+                  -MAX_TOKENS_PER_USER,
+                ],
+              },
+            },
+          },
+        },
+      },
+    ]);
 
     res.status(200).json({ success: true, msg: 'FCM token registered' });
   } catch (err) {

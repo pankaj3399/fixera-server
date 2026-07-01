@@ -260,8 +260,14 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         });
       }
 
-      const projectProfessional = await User.findById(project.professionalId).select('_id role');
-      if (!projectProfessional || projectProfessional.role !== 'professional') {
+      const projectProfessional = await User.findById(project.professionalId).select(
+        '_id role professionalStatus',
+      );
+      if (
+        !projectProfessional ||
+        projectProfessional.role !== 'professional' ||
+        projectProfessional.professionalStatus !== 'approved'
+      ) {
         return res.status(400).json({
           success: false,
           msg: "Project professional is invalid or no longer available",
@@ -653,7 +659,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     }>([
       { path: 'customer', select: 'name email phone' },
       { path: 'professional', select: 'name email businessInfo' },
-      { path: 'project', select: 'title description pricing' }
+      { path: 'project', select: 'title description subprojects.pricing' }
     ]);
 
     // Notify the professional (non-blocking)
