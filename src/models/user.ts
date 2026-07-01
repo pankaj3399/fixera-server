@@ -156,6 +156,18 @@ export interface IUser extends Document {
         managedByCompany?: boolean;
     };
     username?: string;
+    // FCM push notification fields
+    fcmTokens?: {
+        token: string;
+        origin: string;
+        updatedAt?: Date;
+    }[];
+    notificationPreferences?: {
+        booking_updates?: { push?: boolean; email?: boolean };
+        messages?: { push?: boolean; email?: boolean };
+        promotions?: { push?: boolean; email?: boolean };
+        system?: { push?: boolean; email?: boolean };
+    };
     // Stripe Connect fields (for professionals)
     stripe?: {
         accountId?: string;
@@ -594,6 +606,34 @@ const UserSchema = new Schema({
             createdAt: { type: Date, required: false }
         }, { _id: false }),
         default: undefined
+    },
+    // FCM push notification fields
+    fcmTokens: {
+        type: [{
+            token: { type: String, required: true },
+            origin: { type: String, required: true },
+            updatedAt: { type: Date, default: Date.now },
+        }],
+        default: [],
+        select: false,
+    },
+    notificationPreferences: {
+        booking_updates: {
+            push: { type: Boolean, default: true },
+            email: { type: Boolean, default: true }
+        },
+        messages: {
+            push: { type: Boolean, default: true },
+            email: { type: Boolean, default: true }
+        },
+        promotions: {
+            push: { type: Boolean, default: false },
+            email: { type: Boolean, default: true }
+        },
+        system: {
+            push: { type: Boolean, default: true },
+            email: { type: Boolean, default: true }
+        }
     },
     // Customer-specific fields
     businessName: {
