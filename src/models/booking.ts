@@ -234,6 +234,15 @@ export interface IBooking extends Document {
     vatRate?: number;
     totalWithVat?: number;
     reverseCharge?: boolean;
+    vatBreakdown?: {
+      description: string;
+      netAmount: number;
+      vatRate: number;
+      vatAmount: number;
+      totalAmount: number;
+      vatCountry?: string;
+      vatLabel?: string;
+    }[];
 
     // Multi-currency support
     originalCurrency?: string;
@@ -790,6 +799,15 @@ const BookingSchema = new Schema({
     vatRate: { type: Number },
     totalWithVat: { type: Number },
     reverseCharge: { type: Boolean },
+    vatBreakdown: [{
+      description: { type: String },
+      netAmount: { type: Number },
+      vatRate: { type: Number },
+      vatAmount: { type: Number },
+      totalAmount: { type: Number },
+      vatCountry: { type: String },
+      vatLabel: { type: String },
+    }],
 
     // Multi-currency support
     originalCurrency: { type: String },

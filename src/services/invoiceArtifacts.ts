@@ -50,12 +50,20 @@ const buildUblInvoiceXml = (
   const professional = booking.professional || {};
   const currentQuote = getCurrentQuote(booking);
   const sign = options?.creditNote ? -1 : 1;
-  const pricingLines = Array.isArray(currentQuote?.pricingLines) && currentQuote.pricingLines.length > 0
+  const pricingLines = Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0
+    ? booking.payment.vatBreakdown.map((line: any) => ({
+        description: line.description,
+        price: line.netAmount,
+        vatRate: line.vatRate,
+        vatAmount: line.vatAmount,
+      }))
+    : Array.isArray(currentQuote?.pricingLines) && currentQuote.pricingLines.length > 0
     ? currentQuote.pricingLines
     : [{
         description: booking.quote?.description || booking.rfqData?.description || "Service",
         price: booking.payment?.netAmount ?? booking.payment?.amount ?? 0,
         vatRate: booking.payment?.vatRate ?? 0,
+        vatAmount: booking.payment?.vatAmount ?? 0,
       }];
 
   const invoiceLines = pricingLines.map((line: any, index: number) => `
@@ -74,6 +82,15 @@ const buildUblInvoiceXml = (
         <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:PriceAmount>
       </cac:Price>
     </cac:InvoiceLine>`).join("");
+  const taxSubtotals = pricingLines.map((line: any) => `
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price || 0) * sign)}</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.vatAmount ?? (Number(line.price || 0) * Number(line.vatRate || 0)) / 100) * sign)}</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:Percent>${toMoney(line.vatRate ?? booking.payment?.vatRate ?? 0)}</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>`).join("");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
@@ -107,6 +124,7 @@ const buildUblInvoiceXml = (
   </cac:AccountingCustomerParty>
   <cac:TaxTotal>
     <cbc:TaxAmount currencyID="${escapeXml(currency)}">${toMoney(Number(booking.payment?.vatAmount || 0) * sign)}</cbc:TaxAmount>
+    ${taxSubtotals}
   </cac:TaxTotal>
   <cac:LegalMonetaryTotal>
     <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:LineExtensionAmount>

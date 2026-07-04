@@ -121,6 +121,7 @@ interface InvoiceBooking {
     totalWithVat?: number;
     currency?: string;
     reverseCharge?: boolean;
+    vatBreakdown?: { description: string; netAmount: number; vatRate: number; vatAmount: number }[];
     discount?: {
       loyaltyAmount?: number;
       repeatBuyerAmount?: number;
@@ -406,11 +407,17 @@ export async function generateBookingInvoice(
   const settings = await PlatformSettings.getCurrentConfig();
   const currentQuote = booking.quoteVersions?.find((quote) => quote.version === booking.currentQuoteVersion)
     || booking.quoteVersions?.[booking.quoteVersions.length - 1];
-  const quoteLines = currentQuote?.pricingLines?.map((line) => ({
-    description: line.description,
-    amount: line.price * sign,
-    vatRate: line.vatRate,
-  })) || [];
+  const quoteLines = booking.payment.vatBreakdown?.length
+    ? booking.payment.vatBreakdown.map((line) => ({
+        description: line.description,
+        amount: line.netAmount * sign,
+        vatRate: line.vatRate,
+      }))
+    : currentQuote?.pricingLines?.map((line) => ({
+        description: line.description,
+        amount: line.price * sign,
+        vatRate: line.vatRate,
+      })) || [];
 
   const selectedSubproject =
     typeof booking.selectedSubprojectIndex === "number" &&

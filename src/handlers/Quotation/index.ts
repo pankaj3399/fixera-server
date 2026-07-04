@@ -63,6 +63,8 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
     areaOfWork: project?.areaOfWork,
     country,
     customerType: customer?.customerType || 'individual',
+    vatNumber: customer?.vatNumber,
+    isVatVerified: customer?.isVatVerified,
     answers: getVatAnswersFromBooking(booking),
   });
 };
@@ -90,7 +92,7 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'customerType location vatNumber businessName')
+      .populate('customer', 'customerType location vatNumber isVatVerified businessName')
       .populate('professional', '_id')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance');
 

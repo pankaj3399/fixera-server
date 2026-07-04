@@ -36,6 +36,15 @@ export interface IPayment extends Document {
   vatRate?: number;
   totalWithVat?: number;
   reverseCharge?: boolean;
+  vatBreakdown?: {
+    description: string;
+    netAmount: number;
+    vatRate: number;
+    vatAmount: number;
+    totalAmount: number;
+    vatCountry?: string;
+    vatLabel?: string;
+  }[];
   platformCommission?: number;
   professionalPayout?: number;
 
@@ -123,6 +132,15 @@ const PaymentSchema = new Schema<IPayment>(
     vatRate: { type: Number },
     totalWithVat: { type: Number },
     reverseCharge: { type: Boolean },
+    vatBreakdown: [{
+      description: { type: String },
+      netAmount: { type: Number },
+      vatRate: { type: Number },
+      vatAmount: { type: Number },
+      totalAmount: { type: Number },
+      vatCountry: { type: String },
+      vatLabel: { type: String },
+    }],
     platformCommission: { type: Number },
     professionalPayout: { type: Number },
 

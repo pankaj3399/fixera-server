@@ -302,6 +302,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         country: customer.location?.country || project.distance?.countryCode,
         answers: normalizedVatAnswers,
         customerType: customer.customerType || "individual",
+        vatNumber: customer.vatNumber,
+        isVatVerified: customer.isVatVerified,
       });
       bookingData.vatDecision = {
         ...vatDecision,
@@ -1586,7 +1588,9 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       return res.status(400).json({ success: false, msg: "Invalid booking ID" });
     }
 
-    const booking = await Booking.findById(bookingId).populate("customer", "customerType");
+    const booking = await Booking.findById(bookingId)
+      .populate("customer", "customerType")
+      .populate("project", "title subprojects extraOptions");
     if (!booking) {
       return res.status(404).json({ success: false, msg: "Booking not found" });
     }
@@ -1613,6 +1617,63 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
       matchedRuleText: undefined,
     };
+
+    const project = booking.project as any;
+    const subprojectIndex = booking.selectedSubprojectIndex;
+    const selectedSubproject =
+      typeof subprojectIndex === "number" &&
+      Array.isArray(project?.subprojects) &&
+      subprojectIndex >= 0 &&
+      subprojectIndex < project.subprojects.length
+        ? project.subprojects[subprojectIndex]
+        : undefined;
+
+    if (
+      selectedSubproject &&
+      selectedSubproject.pricing?.type !== "rfq" &&
+      Number.isFinite(Number(selectedSubproject.pricing?.amount))
+    ) {
+      const baseAmount = Number(selectedSubproject.pricing.amount);
+      const selectedOptions = Array.isArray(booking.selectedExtraOptions) ? booking.selectedExtraOptions : [];
+      const extraOptionsTotal = selectedOptions.reduce((sum: number, selected: any) => {
+        const configuredOption = (project.extraOptions || []).find((option: any) =>
+          option?._id?.toString?.() === selected.extraOptionId?.toString?.()
+        );
+        return sum + Number(selected.bookedPrice ?? configuredOption?.price ?? 0);
+      }, 0);
+      const amount = Math.round((baseAmount + extraOptionsTotal + Number.EPSILON) * 100) / 100;
+
+      if (amount > 0) {
+        booking.quote = {
+          amount,
+          currency: booking.quote?.currency || "EUR",
+          description: `Auto-generated checkout quote for ${project.title || "service"}`,
+          breakdown: [
+            {
+              item: "Package Base",
+              quantity: 1,
+              unitPrice: baseAmount,
+              totalPrice: baseAmount,
+            },
+            ...selectedOptions.map((option: any) => ({
+              item: "Extra Option",
+              quantity: 1,
+              unitPrice: Number(option.bookedPrice || 0),
+              totalPrice: Number(option.bookedPrice || 0),
+            })),
+          ],
+          submittedAt: new Date(),
+          submittedBy: booking.professional,
+        } as any;
+        booking.status = "quote_accepted";
+        booking.statusHistory.push({
+          status: "quote_accepted",
+          timestamp: new Date(),
+          updatedBy: booking.customer,
+          note: "Customer chose standard VAT rate and restored fixed-price checkout",
+        });
+      }
+    }
     await booking.save();
 
     return res.status(200).json({

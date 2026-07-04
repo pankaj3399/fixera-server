@@ -43,6 +43,13 @@ const COUNTRY_ALIASES: Record<string, string> = {
   LIECHTENSTEIN: "LI",
   NORWAY: "NO",
   GREECE: "GR",
+  "UNITED STATES": "US",
+  USA: "US",
+  "UNITED STATES OF AMERICA": "US",
+  CANADA: "CA",
+  AUSTRALIA: "AU",
+  "NEW ZEALAND": "NZ",
+  INDIA: "IN",
 };
 
 const STANDARD_RATES: Record<string, number> = {
@@ -50,6 +57,7 @@ const STANDARD_RATES: Record<string, number> = {
   IE: 23, LT: 21, LV: 21, EE: 24, ES: 21, AD: 4.5, PT: 23, IT: 22, SM: 0,
   DK: 25, NO: 25, SE: 25, FI: 25.5, PL: 23, CZ: 21, UA: 20, RO: 21, MD: 20,
   SK: 23, HU: 27, SI: 22, HR: 25, GR: 24, CY: 19, BG: 20, TR: 20,
+  US: 0, CA: 0, AU: 0, NZ: 0, IN: 0,
 };
 
 export const B2B_SAME_AS_B2C_COUNTRIES = new Set(["BE", "CH", "LI", "NO", "GR"]);
@@ -61,7 +69,7 @@ export const normalizeVatCountry = (country?: string | null): string => {
   if (!raw) return "BE";
   const upper = raw.toUpperCase();
   if (/^[A-Z]{2}$/.test(upper)) return upper;
-  return COUNTRY_ALIASES[upper] || upper.slice(0, 2);
+  return COUNTRY_ALIASES[upper] || "BE";
 };
 
 export const getStandardVatRate = (country?: string | null): number => {
@@ -116,9 +124,18 @@ export const evaluateVatRule = (rule: IVatLogicRule, answers: Record<string, unk
   }, true);
 };
 
-export const applyB2BInvoiceRule = (decision: VatDecision, customerType?: string): VatDecision => {
+const hasVerifiedVatNumber = (vatNumber?: string | null, isVatVerified?: boolean): boolean =>
+  Boolean(isVatVerified && vatNumber && /^[A-Z]{2}[A-Z0-9]{6,14}$/i.test(vatNumber.replace(/\s/g, "")));
+
+export const applyB2BInvoiceRule = (
+  decision: VatDecision,
+  customerType?: string,
+  vatNumber?: string | null,
+  isVatVerified?: boolean
+): VatDecision => {
   if (customerType !== "business") return decision;
   if (isB2BSameAsB2CCountry(decision.country)) return decision;
+  if (!hasVerifiedVatNumber(vatNumber, isVatVerified)) return decision;
 
   return {
     ...decision,
@@ -141,6 +158,8 @@ export const getVatRateOptionsFromConfig = async (params: {
   areaOfWork?: string;
   country?: string;
   customerType?: string;
+  vatNumber?: string | null;
+  isVatVerified?: boolean;
   answers?: Record<string, unknown>;
 }): Promise<VatRateOption[]> => {
   const country = normalizeVatCountry(params.country);
@@ -152,9 +171,15 @@ export const getVatRateOptionsFromConfig = async (params: {
     country,
     answers: params.answers,
     customerType: params.customerType,
+    vatNumber: params.vatNumber,
+    isVatVerified: params.isVatVerified,
   });
 
-  if (params.customerType === "business" && !isB2BSameAsB2CCountry(country)) {
+  if (
+    params.customerType === "business" &&
+    !isB2BSameAsB2CCountry(country) &&
+    hasVerifiedVatNumber(params.vatNumber, params.isVatVerified)
+  ) {
     return [{
       rate: 0,
       country,
@@ -196,6 +221,8 @@ export const resolveVatDecisionFromConfig = async (params: {
   country?: string;
   answers?: Record<string, unknown>;
   customerType?: string;
+  vatNumber?: string | null;
+  isVatVerified?: boolean;
 }): Promise<VatDecision> => {
   const country = normalizeVatCountry(params.country);
   const fallbackRate = getStandardVatRate(country);
@@ -225,11 +252,11 @@ export const resolveVatDecisionFromConfig = async (params: {
       ...fallback,
       action: "rfq",
       explanation: "Renovation services require quotation-level VAT review.",
-    }, params.customerType);
+    }, params.customerType, params.vatNumber, params.isVatVerified);
   }
 
   if (!config?.vatManagement?.enabled) {
-    return applyB2BInvoiceRule(fallback, params.customerType);
+    return applyB2BInvoiceRule(fallback, params.customerType, params.vatNumber, params.isVatVerified);
   }
 
   const rules = [...(config.vatManagement.logicRules || [])]
@@ -253,11 +280,11 @@ export const resolveVatDecisionFromConfig = async (params: {
       matchedRuleText: rule.customText,
       ruleGroup: config.vatManagement.rateRuleGroup,
     };
-    return applyB2BInvoiceRule(next, params.customerType);
+    return applyB2BInvoiceRule(next, params.customerType, params.vatNumber, params.isVatVerified);
   }
 
   return applyB2BInvoiceRule({
     ...fallback,
     ruleGroup: config.vatManagement.rateRuleGroup,
-  }, params.customerType);
+  }, params.customerType, params.vatNumber, params.isVatVerified);
 };

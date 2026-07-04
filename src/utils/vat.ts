@@ -10,6 +10,7 @@ import {
   B2B_VAT_EXEMPTION_NOTE,
   getStandardVatRate,
   isB2BSameAsB2CCountry,
+  normalizeVatCountry,
 } from './vatManagement';
 
 // VAT rates by country (standard rates)
@@ -111,11 +112,16 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
     customerType,
   } = params;
 
-  const customerCountryUpper = customerCountry.toUpperCase();
+  const customerCountryUpper = normalizeVatCountry(customerCountry);
   const roundAmount = (value: number): number => Math.round(value * 100) / 100;
   const localRate = getVATRate(customerCountryUpper);
 
-  if (customerType === 'business' && !isB2BSameAsB2CCountry(customerCountryUpper)) {
+  if (
+    customerType === 'business' &&
+    !isB2BSameAsB2CCountry(customerCountryUpper) &&
+    customerVATNumber &&
+    validateVATNumberFormat(customerVATNumber)
+  ) {
     return {
       vatRate: 0,
       vatAmount: 0,
