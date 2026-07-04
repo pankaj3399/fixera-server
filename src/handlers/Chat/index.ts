@@ -7,6 +7,8 @@ import ChatReport from "../../models/chatReport";
 import User from "../../models/user";
 import { generateFileName, uploadToS3, validateImageFile, validateFile, validateVideoFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
 import type { IChatAttachment } from "../../models/chatMessage";
+import { sendPushToUser } from "../../utils/fcmService";
+import { getFrontendUrl } from "../../utils/frontendUrl";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
@@ -517,6 +519,27 @@ export const sendMessage = async (req: Request, res: Response) => {
   });
 
   await message.populate("senderId", "name email username businessInfo profileImage role");
+
+  // --- Fire push notification to the recipient (non-blocking) ---
+  let recipientId: string;
+  if (conversation.type === 'support') {
+    recipientId = userId === supportAdminId ? targetUserId : supportAdminId;
+  } else {
+    recipientId = isCustomerSender ? professionalId : customerId;
+  }
+
+  if (recipientId) {
+    const senderName = req.user?.name ?? 'Someone';
+    const previewText = text ? (text.length > 80 ? text.slice(0, 80) + '…' : text) : '📎 Attachment';
+
+    sendPushToUser(recipientId, {
+      title: `New message from ${senderName}`,
+      body: previewText,
+      type: 'messages',
+      clickUrl: `${getFrontendUrl()}/chat?conversationId=${conversationId}`,
+      data: { conversationId },
+    }).catch(() => { /* never block the response */ });
+  }
 
   return res.status(201).json({
     success: true,
