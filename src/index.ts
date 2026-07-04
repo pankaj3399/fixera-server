@@ -77,11 +77,18 @@ app.use(errorHandler);
 
 // Traditional server: connect once at startup, then listen
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+const STUCK_VERIFY_SWEEP_MS = 10 * 60 * 1000;
 
 connectDB()
   .then(async () => {
     await BacklinkSubmission.syncIndexes();
     await recoverStuckVerifyingSubmissions();
+    const sweepTimer = setInterval(() => {
+      void recoverStuckVerifyingSubmissions().catch((error) => {
+        console.error('Stuck verification sweep failed:', error);
+      });
+    }, STUCK_VERIFY_SWEEP_MS);
+    sweepTimer.unref();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
