@@ -102,6 +102,10 @@ export function validateVATNumberFormat(vatNumber: string | null): boolean {
  * 4. EU (ex-BE) B2B (with VAT number): 0% VAT (Reverse charge)
  * 5. Non-EU: 0% VAT
  *
+ * IMPORTANT: callers must only pass `customerVATNumber` when the number has
+ * been VIES-verified (i.e. `customer.isVatVerified === true`). Passing an
+ * unverified number would incorrectly grant the reverse-charge exemption.
+ *
  * @param params - VAT calculation parameters
  * @returns VAT calculation result
  */

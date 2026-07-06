@@ -214,13 +214,20 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         reject(error);
       });
 
-      // Header
+      // Header. For self-billed documents the professional remains the legal
+      // supplier; the platform is only the preparer of the document.
       const issuer = data.issuer || {};
       doc
         .fontSize(20)
         .text(issuer.name || "FIXERA", 50, 50)
         .fontSize(10)
-        .text("Property Services Marketplace", 50, 75)
+        .text(
+          data.selfBilling
+            ? "Document prepared by the platform on behalf of the supplier"
+            : "Property Services Marketplace",
+          50,
+          75
+        )
         .text([issuer.street, issuer.postalCode, issuer.city, issuer.country].filter(Boolean).join(", ") || "Belgium", 50, 90);
       if (issuer.vatNumber) {
         doc.text(`VAT: ${issuer.vatNumber}`, 50, 105);
@@ -257,8 +264,8 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         doc.text(`VAT: ${data.customer.vatNumber}`, 50, 230);
       }
 
-      // Service Provider section
-      doc.fontSize(12).text("SERVICE PROVIDER:", 320, 150);
+      // Supplier section (the professional is the legal supplier of the service)
+      doc.fontSize(12).text(data.selfBilling ? "SUPPLIER:" : "SERVICE PROVIDER:", 320, 150);
 
       doc.fontSize(10).text(data.professional.companyName || data.professional.name, 320, 170);
 

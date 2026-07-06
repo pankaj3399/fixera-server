@@ -250,6 +250,21 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       bookingData.professional = professionalId;
+
+      // Professional bookings have no project-level service configuration, but
+      // country-based standard rates and B2B reverse-charge rules still apply.
+      const vatDecision = await resolveVatDecisionFromConfig({
+        serviceConfigurationId,
+        country: customer.location?.country,
+        answers: normalizedVatAnswers,
+        customerType: customer.customerType || "individual",
+        vatNumber: customer.vatNumber,
+        isVatVerified: customer.isVatVerified,
+      });
+      bookingData.vatDecision = {
+        ...vatDecision,
+        answers: Object.entries(normalizedVatAnswers).map(([fieldName, value]) => ({ fieldName, value })),
+      };
     } else {
       const project = await Project.findById(projectId);
       if (!project) {
@@ -1572,6 +1587,58 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
   } catch (error: any) {
     console.error('Get my payments error:', error);
     next(error);
+  }
+};
+
+/**
+ * Preview the VAT decision for the current customer before a booking is
+ * created, so the booking wizard can show the anticipated rate and outcome.
+ */
+export const previewVatDecision = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    const { projectId, serviceConfigurationId, vatAnswers } = req.body;
+
+    const customer = await User.findById(userId).select(
+      "role customerType vatNumber isVatVerified location"
+    );
+    if (!customer || customer.role !== "customer") {
+      return res.status(403).json({ success: false, msg: "Only customers can preview VAT" });
+    }
+
+    const normalizedVatAnswers = Array.isArray(vatAnswers)
+      ? vatAnswers.reduce((acc: Record<string, unknown>, answer: any) => {
+          if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+          return acc;
+        }, {})
+      : {};
+
+    let project: any = null;
+    if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
+      project = await Project.findById(projectId).select(
+        "services category service areaOfWork serviceConfigurationId distance"
+      );
+    }
+    const projectService = Array.isArray(project?.services) && project.services.length > 0
+      ? project.services[0]
+      : null;
+
+    const decision = await resolveVatDecisionFromConfig({
+      serviceConfigurationId: serviceConfigurationId || project?.serviceConfigurationId,
+      category: projectService?.category || project?.category,
+      service: projectService?.service || project?.service,
+      areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
+      country: customer.location?.country || project?.distance?.countryCode,
+      answers: normalizedVatAnswers,
+      customerType: customer.customerType || "individual",
+      vatNumber: customer.vatNumber,
+      isVatVerified: customer.isVatVerified,
+    });
+
+    return res.json({ success: true, data: decision });
+  } catch (error) {
+    console.error("Error previewing VAT decision:", error);
+    return res.status(500).json({ success: false, msg: "Failed to preview VAT" });
   }
 };
 

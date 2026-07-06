@@ -11,6 +11,7 @@ import {
   cancelBooking,
   uploadRFQAttachment,
   proceedAtStandardVatRate,
+  previewVatDecision,
 } from '../../handlers/Booking';
 import {
   respondToQuoteWithPayment,
@@ -47,6 +48,9 @@ router.use(protect);
 
 // Create booking (RFQ submission) - Customer only
 router.post('/create', createBooking);
+
+// Preview VAT decision for the booking wizard (before booking creation)
+router.post('/vat-preview', previewVatDecision);
 
 // Upload RFQ attachment (10MB limit)
 router.post('/rfq-upload', rfqUpload.single('file'), uploadRFQAttachment);

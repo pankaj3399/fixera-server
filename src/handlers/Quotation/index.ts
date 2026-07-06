@@ -14,7 +14,7 @@ import PlatformSettings from '../../models/platformSettings';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
-import { getVatRateOptionsFromConfig } from '../../utils/vatManagement';
+import { getVatRateOptionsFromConfig, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
 import {
   sendRfqAcceptedEmail,
   sendRfqRejectedEmail,
@@ -877,7 +877,7 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
     }
     if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
       const { default: Project } = await import('../../models/project');
-      linkedProject = await Project.findById(projectId).select('title subprojects professionalId status');
+      linkedProject = await Project.findById(projectId).select('title subprojects professionalId status services category service areaOfWork serviceConfigurationId');
       if (!linkedProject) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_PROJECT', message: 'Project not found' } });
       }
@@ -910,6 +910,23 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       ? resolveLinkedSubprojectIndex(linkedProject, selectedSubprojectIndex)
       : undefined;
 
+    // Resolve the VAT decision up front so quotation VAT rate options and
+    // checkout use the correct country/B2B rules for this customer.
+    const linkedProjectService = Array.isArray(linkedProject?.services) && linkedProject.services.length > 0
+      ? linkedProject.services[0]
+      : null;
+    const vatDecision = await resolveVatDecisionFromConfig({
+      serviceConfigurationId: linkedProject?.serviceConfigurationId?.toString(),
+      category: linkedProjectService?.category || linkedProject?.category,
+      service: linkedProjectService?.service || linkedProject?.service,
+      areaOfWork: linkedProjectService?.areaOfWork || linkedProject?.areaOfWork,
+      country: customer.location?.country,
+      answers: {},
+      customerType: customer.customerType || 'individual',
+      vatNumber: customer.vatNumber,
+      isVatVerified: customer.isVatVerified,
+    });
+
     const bookingData: any = {
       customer: customerId,
       professional: userId,
@@ -919,6 +936,7 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       ...(typeof resolvedSubprojectIndex === 'number'
         ? { selectedSubprojectIndex: resolvedSubprojectIndex }
         : {}),
+      vatDecision: { ...vatDecision, answers: [] },
       location: {
         type: 'Point',
         coordinates: customer.location.coordinates,

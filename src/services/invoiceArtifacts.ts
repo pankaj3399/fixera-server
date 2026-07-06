@@ -1,8 +1,11 @@
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import { uploadBufferToS3 } from "../utils/s3Upload";
+import { normalizeVatCountry, B2B_VAT_EXEMPTION_NOTE } from "../utils/vatManagement";
 import { generateBookingInvoice } from "./invoiceGenerator";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
+
+export const SELF_BILLING_NOTE = "Prepared and sent on behalf of the supplier.";
 
 type InvoiceArtifactResult = {
   invoiceNumber: string;
@@ -39,6 +42,22 @@ const getCurrentQuote = (booking: any) => {
   return versions.find((quote: any) => quote.version === booking.currentQuoteVersion) || versions[versions.length - 1];
 };
 
+const buildUblAddress = (parts: {
+  street?: string;
+  city?: string;
+  postalCode?: string;
+  country?: string;
+}): string => {
+  const countryCode = normalizeVatCountry(parts.country) || "BE";
+  return `
+      <cac:PostalAddress>
+        ${parts.street ? `<cbc:StreetName>${escapeXml(parts.street)}</cbc:StreetName>` : ""}
+        ${parts.city ? `<cbc:CityName>${escapeXml(parts.city)}</cbc:CityName>` : ""}
+        ${parts.postalCode ? `<cbc:PostalZone>${escapeXml(parts.postalCode)}</cbc:PostalZone>` : ""}
+        <cac:Country><cbc:IdentificationCode>${escapeXml(countryCode)}</cbc:IdentificationCode></cac:Country>
+      </cac:PostalAddress>`;
+};
+
 const buildUblInvoiceXml = (
   booking: any,
   invoiceNumber: string,
@@ -50,6 +69,14 @@ const buildUblInvoiceXml = (
   const professional = booking.professional || {};
   const currentQuote = getCurrentQuote(booking);
   const sign = options?.creditNote ? -1 : 1;
+  const reverseCharge = Boolean(booking.payment?.reverseCharge);
+  // Self-billed documents: 389 = self-billed invoice, 261 = self-billed credit note (UNCL1001)
+  const invoiceTypeCode = options?.creditNote ? "261" : "389";
+  const taxCategoryId = reverseCharge ? "AE" : "S";
+  const taxCategoryExtras = reverseCharge
+    ? `<cbc:TaxExemptionReasonCode>VATEX-EU-IC</cbc:TaxExemptionReasonCode>
+        <cbc:TaxExemptionReason>${escapeXml(B2B_VAT_EXEMPTION_NOTE)}</cbc:TaxExemptionReason>`
+    : "";
   const pricingLines = Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0
     ? booking.payment.vatBreakdown.map((line: any) => ({
         description: line.description,
@@ -74,6 +101,7 @@ const buildUblInvoiceXml = (
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
         <cac:ClassifiedTaxCategory>
+          <cbc:ID>${taxCategoryId}</cbc:ID>
           <cbc:Percent>${toMoney(line.vatRate ?? booking.payment?.vatRate ?? 0)}</cbc:Percent>
           <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
         </cac:ClassifiedTaxCategory>
@@ -87,7 +115,9 @@ const buildUblInvoiceXml = (
       <cbc:TaxableAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price || 0) * sign)}</cbc:TaxableAmount>
       <cbc:TaxAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.vatAmount ?? (Number(line.price || 0) * Number(line.vatRate || 0)) / 100) * sign)}</cbc:TaxAmount>
       <cac:TaxCategory>
+        <cbc:ID>${taxCategoryId}</cbc:ID>
         <cbc:Percent>${toMoney(line.vatRate ?? booking.payment?.vatRate ?? 0)}</cbc:Percent>
+        ${taxCategoryExtras}
         <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
       </cac:TaxCategory>
     </cac:TaxSubtotal>`).join("");
@@ -100,26 +130,44 @@ const buildUblInvoiceXml = (
   <cbc:ProfileID>urn:fdc:peppol.eu:2017:poacc:billing:01:1.0</cbc:ProfileID>
   <cbc:ID>${escapeXml(invoiceNumber)}</cbc:ID>
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
-  <cbc:InvoiceTypeCode>${options?.creditNote ? "381" : "380"}</cbc:InvoiceTypeCode>
+  <cbc:InvoiceTypeCode>${invoiceTypeCode}</cbc:InvoiceTypeCode>
+  <cbc:Note>${escapeXml(SELF_BILLING_NOTE)}</cbc:Note>
+  ${reverseCharge ? `<cbc:Note>${escapeXml(B2B_VAT_EXEMPTION_NOTE)}</cbc:Note>` : ""}
   <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
   <cbc:BuyerReference>${escapeXml(booking.bookingNumber || booking._id?.toString?.())}</cbc:BuyerReference>
   ${options?.relatedInvoiceNumber ? `<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${escapeXml(options.relatedInvoiceNumber)}</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference>` : ""}
   <cac:AccountingSupplierParty>
     <cac:Party>
-      <cac:PartyName><cbc:Name>${escapeXml(professional.businessInfo?.companyName || professional.name || "Supplier")}</cbc:Name></cac:PartyName>
+      <cac:PartyName><cbc:Name>${escapeXml(professional.businessInfo?.companyName || professional.name || "Supplier")}</cbc:Name></cac:PartyName>${buildUblAddress({
+        street: professional.businessInfo?.address,
+        city: professional.businessInfo?.city,
+        postalCode: professional.businessInfo?.postalCode,
+        country: professional.businessInfo?.country,
+      })}
       <cac:PartyTaxScheme>
         <cbc:CompanyID>${escapeXml(professional.vatNumber || professional.businessInfo?.vatNumber || "")}</cbc:CompanyID>
         <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
       </cac:PartyTaxScheme>
+      <cac:PartyLegalEntity>
+        <cbc:RegistrationName>${escapeXml(professional.businessInfo?.companyName || professional.name || "Supplier")}</cbc:RegistrationName>
+      </cac:PartyLegalEntity>
     </cac:Party>
   </cac:AccountingSupplierParty>
   <cac:AccountingCustomerParty>
     <cac:Party>
-      <cac:PartyName><cbc:Name>${escapeXml(customer.businessName || customer.name || "Customer")}</cbc:Name></cac:PartyName>
+      <cac:PartyName><cbc:Name>${escapeXml(customer.businessName || customer.name || "Customer")}</cbc:Name></cac:PartyName>${buildUblAddress({
+        street: customer.companyAddress?.address || customer.location?.address,
+        city: customer.companyAddress?.city || customer.location?.city,
+        postalCode: customer.companyAddress?.postalCode || customer.location?.postalCode,
+        country: customer.companyAddress?.country || customer.location?.country,
+      })}
       <cac:PartyTaxScheme>
         <cbc:CompanyID>${escapeXml(customer.vatNumber || "")}</cbc:CompanyID>
         <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
       </cac:PartyTaxScheme>
+      <cac:PartyLegalEntity>
+        <cbc:RegistrationName>${escapeXml(customer.businessName || customer.name || "Customer")}</cbc:RegistrationName>
+      </cac:PartyLegalEntity>
     </cac:Party>
   </cac:AccountingCustomerParty>
   <cac:TaxTotal>
