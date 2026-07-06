@@ -184,6 +184,22 @@ export interface IBooking extends Document {
   milestonePayments?: IBookingMilestone[];
   selectedSubprojectIndex?: number;
   selectedExtraOptions?: { extraOptionId: string; bookedPrice: number }[];
+  checkoutSnapshot?: {
+    pricingType: 'fixed' | 'unit';
+    unitAmount: number;
+    quantity: number;
+    baseSubtotal: number;
+    extraOptionsTotal: number;
+    totalAmount: number;
+    currency: string;
+    selectedOptions: {
+      extraOptionId: string;
+      name: string;
+      unitPrice: number;
+      quantity: number;
+      totalPrice: number;
+    }[];
+  };
   vatDecision?: {
     action: 'standard_rate' | 'reduced_rate' | 'rfq';
     country: string;
@@ -718,6 +734,22 @@ const BookingSchema = new Schema({
     extraOptionId: { type: String, required: true },
     bookedPrice: { type: Number, required: true, min: 0 },
   }],
+  checkoutSnapshot: {
+    pricingType: { type: String, enum: ['fixed', 'unit'] },
+    unitAmount: { type: Number, min: 0 },
+    quantity: { type: Number, min: 0 },
+    baseSubtotal: { type: Number, min: 0 },
+    extraOptionsTotal: { type: Number, min: 0 },
+    totalAmount: { type: Number, min: 0 },
+    currency: { type: String, default: 'EUR' },
+    selectedOptions: [{
+      extraOptionId: { type: String, required: true },
+      name: { type: String },
+      unitPrice: { type: Number, required: true, min: 0 },
+      quantity: { type: Number, required: true, min: 0 },
+      totalPrice: { type: Number, required: true, min: 0 },
+    }],
+  },
   vatDecision: {
     action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'] },
     country: { type: String },

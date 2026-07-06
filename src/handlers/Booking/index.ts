@@ -62,6 +62,130 @@ const normalizeRfqAnswers = (answers: any[] | undefined) => {
   });
 };
 
+const roundMoney = (value: number): number =>
+  Math.round((value + Number.EPSILON) * 100) / 100;
+
+const normalizeSelectedExtraOptionIndexes = (project: any, selectedExtraOptions: unknown): number[] => {
+  if (!Array.isArray(selectedExtraOptions)) return [];
+  return Array.from(
+    new Set(
+      selectedExtraOptions
+        .map((value: unknown) =>
+          typeof value === "number"
+            ? value
+            : typeof value === "string"
+              ? Number.parseInt(value, 10)
+              : Number.NaN
+        )
+        .filter(
+          (index: number) =>
+            Number.isInteger(index) &&
+            index >= 0 &&
+            Array.isArray(project.extraOptions) &&
+            index < project.extraOptions.length
+        )
+    )
+  );
+};
+
+const buildCheckoutSnapshot = (params: {
+  project: any;
+  selectedSubproject: any;
+  selectedExtraOptions: unknown;
+  estimatedUsage: unknown;
+}) => {
+  const pricingType = params.selectedSubproject?.pricing?.type;
+  const unitAmount = Number(params.selectedSubproject?.pricing?.amount);
+  if ((pricingType !== "fixed" && pricingType !== "unit") || !Number.isFinite(unitAmount) || unitAmount < 0) {
+    return null;
+  }
+
+  const usageQuantityRaw =
+    typeof params.estimatedUsage === "number"
+      ? params.estimatedUsage
+      : typeof params.estimatedUsage === "string"
+        ? Number.parseFloat(params.estimatedUsage)
+        : Number.NaN;
+  const quantity = pricingType === "unit" && Number.isFinite(usageQuantityRaw)
+    ? usageQuantityRaw
+    : 1;
+
+  if (pricingType === "unit" && (!Number.isFinite(quantity) || quantity <= 0)) {
+    return null;
+  }
+
+  const selectedOptionIndexes = normalizeSelectedExtraOptionIndexes(params.project, params.selectedExtraOptions);
+  const selectedOptions = selectedOptionIndexes.flatMap((optionIndex) => {
+    const option = params.project.extraOptions?.[optionIndex];
+    if (!option || typeof option.price !== "number") return [];
+    return [{
+      extraOptionId: option._id?.toString?.() || String(optionIndex),
+      name: option.name || `Option ${optionIndex}`,
+      unitPrice: option.price,
+      quantity: 1,
+      totalPrice: option.price,
+    }];
+  });
+
+  const baseSubtotal = roundMoney(unitAmount * quantity);
+  const extraOptionsTotal = roundMoney(selectedOptions.reduce((sum, option) => sum + option.totalPrice, 0));
+  const totalAmount = roundMoney(baseSubtotal + extraOptionsTotal);
+
+  if (!(totalAmount > 0)) return null;
+
+  return {
+    pricingType,
+    unitAmount,
+    quantity,
+    baseSubtotal,
+    extraOptionsTotal,
+    totalAmount,
+    currency: "EUR",
+    selectedOptions,
+  };
+};
+
+const snapshotToQuoteBreakdown = (snapshot: NonNullable<ReturnType<typeof buildCheckoutSnapshot>>, subprojectIndex?: number) => [
+  ...(typeof subprojectIndex === "number"
+    ? [{
+        item: `checkout_snapshot:selected_package_index:${subprojectIndex}`,
+        quantity: 1,
+        unitPrice: 0,
+        totalPrice: 0,
+      }]
+    : []),
+  {
+    item: `checkout_snapshot:selected_package_type:${snapshot.pricingType}`,
+    quantity: 1,
+    unitPrice: 0,
+    totalPrice: 0,
+  },
+  {
+    item: "Package Base",
+    quantity: snapshot.quantity,
+    unitPrice: snapshot.unitAmount,
+    totalPrice: snapshot.baseSubtotal,
+  },
+  ...snapshot.selectedOptions.map((option) => ({
+    item: `Extra Option: ${option.name}`,
+    quantity: option.quantity,
+    unitPrice: option.unitPrice,
+    totalPrice: option.totalPrice,
+  })),
+  {
+    item: "checkout_snapshot:selected_options_total",
+    quantity: snapshot.selectedOptions.length,
+    unitPrice: snapshot.selectedOptions.length > 0 ? snapshot.extraOptionsTotal : 0,
+    totalPrice: snapshot.extraOptionsTotal,
+  },
+  {
+    item: "checkout_snapshot:computed_total",
+    quantity: 1,
+    unitPrice: snapshot.totalAmount,
+    totalPrice: snapshot.totalAmount,
+  },
+];
+
 const presignBookingFiles = async (bookingDoc: any) => {
   const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
 
@@ -504,6 +628,31 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
       }
 
+      const selectedSubprojectForCheckout =
+        typeof subprojectIndex === "number" &&
+        Array.isArray(project.subprojects) &&
+        subprojectIndex >= 0 &&
+        subprojectIndex < project.subprojects.length
+          ? project.subprojects[subprojectIndex]
+          : undefined;
+      const checkoutSnapshot = selectedSubprojectForCheckout
+        ? buildCheckoutSnapshot({
+            project,
+            selectedSubproject: selectedSubprojectForCheckout,
+            selectedExtraOptions,
+            estimatedUsage,
+          })
+        : null;
+      if (checkoutSnapshot) {
+        bookingData.checkoutSnapshot = checkoutSnapshot;
+        if (checkoutSnapshot.selectedOptions.length > 0) {
+          bookingData.selectedExtraOptions = checkoutSnapshot.selectedOptions.map((option) => ({
+            extraOptionId: option.extraOptionId,
+            bookedPrice: option.totalPrice,
+          }));
+        }
+      }
+
       const wantsPaymentAtCheckout =
         paymentAtCheckoutRequested && !requiresVatRfqReview(bookingData.vatDecision);
       if (wantsPaymentAtCheckout) {
@@ -519,10 +668,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
-        const selectedSubproject = project.subprojects[subprojectIndex] as any;
-        const pricingType = selectedSubproject?.pricing?.type;
-        const baseUnitAmount = Number(selectedSubproject?.pricing?.amount);
-
+        const pricingType = selectedSubprojectForCheckout?.pricing?.type;
         if (pricingType === "rfq") {
           return res.status(400).json({
             success: false,
@@ -530,136 +676,28 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
-        if (!Number.isFinite(baseUnitAmount) || baseUnitAmount < 0) {
+        if (!checkoutSnapshot) {
           return res.status(400).json({
             success: false,
             msg: "Selected package does not have a valid checkout price",
           });
         }
 
-        let computedCheckoutAmount = baseUnitAmount;
-        const usageQuantityRaw =
-          typeof estimatedUsage === "number"
-            ? estimatedUsage
-            : typeof estimatedUsage === "string"
-              ? Number.parseFloat(estimatedUsage)
-              : Number.NaN;
-        const normalizedUsageQuantity =
-          pricingType === "unit" && Number.isFinite(usageQuantityRaw)
-            ? usageQuantityRaw
-            : 1;
-        if (pricingType === "unit") {
-          if (!Number.isFinite(normalizedUsageQuantity) || normalizedUsageQuantity <= 0) {
-            return res.status(400).json({
-              success: false,
-              msg: "Estimated usage is required for unit-priced checkout payments",
-            });
-          }
-
-          computedCheckoutAmount = baseUnitAmount * normalizedUsageQuantity;
-        }
-
-        const normalizedExtraOptionIndexes = Array.isArray(selectedExtraOptions)
-          ? Array.from(
-              new Set(
-                selectedExtraOptions
-                  .map((value: unknown) =>
-                    typeof value === "number"
-                      ? value
-                      : typeof value === "string"
-                        ? Number.parseInt(value, 10)
-                        : Number.NaN
-                  )
-                  .filter(
-                    (index: number) =>
-                      Number.isInteger(index) &&
-                      index >= 0 &&
-                      Array.isArray(project.extraOptions) &&
-                      index < project.extraOptions.length
-                  )
-              )
-            )
-          : [];
-
-        let extraOptionsTotal = 0;
-        const selectedOptionsPrices: Array<{
-          index: number;
-          name: string;
-          unitPrice: number;
-          quantity: number;
-          totalPrice: number;
-        }> = [];
-        for (const optionIndex of normalizedExtraOptionIndexes) {
-          const option = project.extraOptions?.[optionIndex];
-          if (option && typeof option.price === "number") {
-            extraOptionsTotal += option.price;
-            selectedOptionsPrices.push({
-              index: optionIndex,
-              name: option.name || `Option ${optionIndex}`,
-              unitPrice: option.price,
-              quantity: 1,
-              totalPrice: option.price,
-            });
-            computedCheckoutAmount += option.price;
-          }
-        }
-
-        const basePackageSubtotal = Math.round(
-          (baseUnitAmount * normalizedUsageQuantity + Number.EPSILON) * 100
-        ) / 100;
         const discountsTotal = 0;
         const taxesTotal = 0;
-        const roundedCheckoutAmount =
-          Math.round((computedCheckoutAmount + Number.EPSILON) * 100) / 100;
-        if (!(roundedCheckoutAmount > 0)) {
+        if (!(checkoutSnapshot.totalAmount > 0)) {
           return res.status(400).json({
             success: false,
             msg: "Checkout payment requires a positive total amount",
           });
         }
 
-        if (normalizedExtraOptionIndexes.length > 0) {
-          bookingData.selectedExtraOptions = normalizedExtraOptionIndexes.map((idx: number) => {
-            const opt = project.extraOptions[idx];
-            return { extraOptionId: (opt as any)._id.toString(), bookedPrice: opt.price };
-          });
-        }
-
         bookingData.quote = {
-          amount: roundedCheckoutAmount,
-          currency: "EUR",
+          amount: checkoutSnapshot.totalAmount,
+          currency: checkoutSnapshot.currency,
           description: `Auto-generated checkout quote for ${project.title}`,
           breakdown: [
-            {
-              item: `checkout_snapshot:selected_package_index:${subprojectIndex}`,
-              quantity: 1,
-              unitPrice: 0,
-              totalPrice: 0,
-            },
-            {
-              item: `checkout_snapshot:selected_package_type:${pricingType}`,
-              quantity: 1,
-              unitPrice: 0,
-              totalPrice: 0,
-            },
-            {
-              item: "Package Base",
-              quantity: normalizedUsageQuantity,
-              unitPrice: baseUnitAmount,
-              totalPrice: basePackageSubtotal,
-            },
-            ...selectedOptionsPrices.map((option) => ({
-              item: `Extra Option #${option.index}: ${option.name}`,
-              quantity: option.quantity,
-              unitPrice: option.unitPrice,
-              totalPrice: option.totalPrice,
-            })),
-            {
-              item: "checkout_snapshot:selected_options_total",
-              quantity: selectedOptionsPrices.length,
-              unitPrice: selectedOptionsPrices.length > 0 ? extraOptionsTotal : 0,
-              totalPrice: extraOptionsTotal,
-            },
+            ...snapshotToQuoteBreakdown(checkoutSnapshot, subprojectIndex),
             {
               item: "checkout_snapshot:discounts_total",
               quantity: 1,
@@ -671,12 +709,6 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
               quantity: 1,
               unitPrice: taxesTotal,
               totalPrice: taxesTotal,
-            },
-            {
-              item: "checkout_snapshot:computed_total",
-              quantity: 1,
-              unitPrice: roundedCheckoutAmount,
-              totalPrice: roundedCheckoutAmount,
             },
           ],
           submittedAt: new Date(),
@@ -1709,34 +1741,47 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       selectedSubproject.pricing?.type !== "rfq" &&
       Number.isFinite(Number(selectedSubproject.pricing?.amount))
     ) {
-      const baseAmount = Number(selectedSubproject.pricing.amount);
+      const snapshot = booking.checkoutSnapshot || buildCheckoutSnapshot({
+        project,
+        selectedSubproject,
+        selectedExtraOptions: [],
+        estimatedUsage: 1,
+      });
+      if (!snapshot) {
+        return res.status(400).json({
+          success: false,
+          msg: "Unable to restore checkout because the original package price is unavailable",
+        });
+      }
       const selectedOptions = Array.isArray(booking.selectedExtraOptions) ? booking.selectedExtraOptions : [];
-      const extraOptionsTotal = selectedOptions.reduce((sum: number, selected: any) => {
-        const configuredOption = (project.extraOptions || []).find((option: any) =>
-          option?._id?.toString?.() === selected.extraOptionId?.toString?.()
-        );
-        return sum + Number(selected.bookedPrice ?? configuredOption?.price ?? 0);
-      }, 0);
-      const amount = Math.round((baseAmount + extraOptionsTotal + Number.EPSILON) * 100) / 100;
+      const selectedOptionsById = new Map(snapshot.selectedOptions.map((option: any) => [String(option.extraOptionId), option]));
+      const fallbackOptionLines = selectedOptions
+        .filter((selected: any) => !selectedOptionsById.has(String(selected.extraOptionId)))
+        .map((selected: any) => {
+          const configuredOption = (project.extraOptions || []).find((option: any) =>
+            option?._id?.toString?.() === selected.extraOptionId?.toString?.()
+          );
+          const price = Number(selected.bookedPrice ?? configuredOption?.price ?? 0);
+          return {
+            item: `Extra Option: ${configuredOption?.name || selected.extraOptionId || "Extra option"}`,
+            quantity: 1,
+            unitPrice: Number.isFinite(price) ? price : 0,
+            totalPrice: Number.isFinite(price) ? price : 0,
+          };
+        })
+        .filter((line: any) => line.totalPrice > 0);
+      const amount = roundMoney(
+        snapshot.totalAmount + fallbackOptionLines.reduce((sum: number, line: any) => sum + line.totalPrice, 0)
+      );
 
       if (amount > 0) {
         booking.quote = {
           amount,
-          currency: booking.quote?.currency || "EUR",
+          currency: booking.quote?.currency || snapshot.currency || "EUR",
           description: `Auto-generated checkout quote for ${project.title || "service"}`,
           breakdown: [
-            {
-              item: "Package Base",
-              quantity: 1,
-              unitPrice: baseAmount,
-              totalPrice: baseAmount,
-            },
-            ...selectedOptions.map((option: any) => ({
-              item: "Extra Option",
-              quantity: 1,
-              unitPrice: Number(option.bookedPrice || 0),
-              totalPrice: Number(option.bookedPrice || 0),
-            })),
+            ...snapshotToQuoteBreakdown(snapshot, subprojectIndex),
+            ...fallbackOptionLines,
           ],
           submittedAt: new Date(),
           submittedBy: booking.professional,

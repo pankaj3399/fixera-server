@@ -308,8 +308,9 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email')
-      .populate('professional', 'name username email businessInfo');
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName')
+      .populate('professional', 'name username email businessInfo')
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -461,8 +462,9 @@ export const submitQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email')
-      .populate('professional', 'name username email businessInfo');
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName')
+      .populate('professional', 'name username email businessInfo')
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -622,8 +624,9 @@ export const editQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email')
-      .populate('professional', 'name username email businessInfo');
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName')
+      .populate('professional', 'name username email businessInfo')
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
