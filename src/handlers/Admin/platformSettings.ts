@@ -85,8 +85,12 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
         return res.status(400).json({ success: false, msg: 'Invalid e-invoicing provider' });
       }
       config.eInvoicing = {
-        peppolEnabled: eInvoicing.peppolEnabled === true,
-        provider: ['odoo', 'billit', 'manual'].includes(eInvoicing.provider) ? eInvoicing.provider : 'manual',
+        peppolEnabled: eInvoicing.peppolEnabled !== undefined
+          ? eInvoicing.peppolEnabled === true
+          : (config.eInvoicing?.peppolEnabled ?? false),
+        provider: eInvoicing.provider !== undefined && ['odoo', 'billit', 'manual'].includes(String(eInvoicing.provider))
+          ? eInvoicing.provider
+          : (config.eInvoicing?.provider ?? 'manual'),
         peppolParticipantId: typeof eInvoicing.peppolParticipantId === 'string'
           ? eInvoicing.peppolParticipantId.trim()
           : config.eInvoicing?.peppolParticipantId,

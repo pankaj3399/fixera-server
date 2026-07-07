@@ -708,11 +708,12 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       console.error('Error awarding booking completion points:', e);
     }
 
-    try {
-      await ensureBookingInvoiceArtifacts(finalizedBooking._id.toString());
-    } catch (invoiceError: any) {
-      console.error('Failed to generate booking invoice artifacts:', invoiceError?.message || invoiceError);
-    }
+    void ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
+      console.error(
+        'Failed to generate booking invoice artifacts:',
+        invoiceError instanceof Error ? invoiceError.message : invoiceError
+      );
+    });
 
     try {
       const [customerUser, professionalUser] = await Promise.all([

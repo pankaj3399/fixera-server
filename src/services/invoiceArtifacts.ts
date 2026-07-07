@@ -295,7 +295,10 @@ export async function ensureBookingInvoiceArtifacts(bookingId: string): Promise<
 
   try {
     const booking = await loadBookingForInvoice(bookingId);
-    if (!booking?.payment) return null;
+    if (!booking?.payment) {
+      await clearInvoiceGenerationClaim(bookingId);
+      return null;
+    }
 
     const { invoiceNumber, pdfBuffer } = await generateBookingInvoice(booking as any);
     const generatedAt = new Date();
@@ -379,6 +382,7 @@ export async function ensureCreditInvoiceArtifacts(bookingId: string): Promise<C
   try {
     const booking = await loadBookingForInvoice(bookingId);
     if (!booking?.payment?.invoiceNumber) {
+      await clearCreditNoteGenerationClaim(bookingId);
       return null;
     }
 

@@ -136,7 +136,9 @@ const getQuotePricingVatCalculation = (booking: any, amount: number) => {
   if (!hasCompleteVatMetadata) {
     return null;
   }
-  return calculateVatFromPricingLines(pricingLines, amount);
+  const originalLineNet = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
+  const discountedNet = originalLineNet > 0 && amount > 0 && amount <= originalLineNet ? amount : undefined;
+  return calculateVatFromPricingLines(pricingLines, discountedNet);
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(Math.max(value, min), max);

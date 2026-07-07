@@ -51,6 +51,9 @@ const getVatAnswersFromBooking = (booking: any): Record<string, unknown> => {
 const getAllowedVatOptionsForBooking = async (booking: any) => {
   const customer = booking.customer as any;
   const project = booking.project as any;
+  const projectService = Array.isArray(project?.services) && project.services.length > 0
+    ? project.services[0]
+    : null;
   const country = booking.vatDecision?.country
     || customer?.location?.country
     || project?.distance?.countryCode
@@ -58,9 +61,9 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
 
   return getVatRateOptionsFromConfig({
     serviceConfigurationId: project?.serviceConfigurationId?.toString(),
-    category: project?.category,
-    service: project?.service,
-    areaOfWork: project?.areaOfWork,
+    category: projectService?.category || project?.category,
+    service: projectService?.service || project?.service,
+    areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
     country,
     customerType: customer?.customerType || 'individual',
     vatNumber: customer?.vatNumber,
@@ -114,11 +117,15 @@ const applyAllowedVatRateToLegacyPricingLines = async (
 
 export const getQuotationVatRateOptions = async (req: Request, res: Response) => {
   try {
-    const { bookingId } = req.params;
+    const { bookingId } = params(req.params);
     const userId = (req as any).user?._id?.toString();
 
     if (!userId) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid booking ID' } });
     }
 
     const booking = await Booking.findById(bookingId)

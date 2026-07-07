@@ -355,10 +355,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    let configIdForVat = serviceConfigurationId;
-    if (!Array.isArray(vatAnswers) && bookingType === "project" && projectId && mongoose.Types.ObjectId.isValid(projectId)) {
+    let configIdForVat: string | undefined;
+    if (bookingType === "project" && projectId && mongoose.Types.ObjectId.isValid(projectId)) {
       const projectForVat = await Project.findById(projectId).select("serviceConfigurationId");
-      configIdForVat = configIdForVat || projectForVat?.serviceConfigurationId?.toString();
+      configIdForVat = projectForVat?.serviceConfigurationId?.toString();
     }
 
     const normalizedVatAnswers = await resolveNormalizedVatAnswers(
@@ -471,7 +471,17 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       const projectService = Array.isArray(project.services) && project.services.length > 0
         ? project.services[0]
         : null;
-      const selectedServiceConfigId = serviceConfigurationId || project.serviceConfigurationId;
+      const selectedServiceConfigId = project.serviceConfigurationId?.toString();
+      if (
+        serviceConfigurationId &&
+        selectedServiceConfigId &&
+        serviceConfigurationId !== selectedServiceConfigId
+      ) {
+        return res.status(400).json({
+          success: false,
+          msg: "serviceConfigurationId does not match the selected project",
+        });
+      }
       const vatDecision = await resolveVatDecisionFromConfig({
         serviceConfigurationId: selectedServiceConfigId,
         category: projectService?.category || project.category,
@@ -1780,16 +1790,22 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       selectedSubproject.pricing?.type !== "rfq" &&
       Number.isFinite(Number(selectedSubproject.pricing?.amount))
     ) {
-      const snapshot = booking.checkoutSnapshot || buildCheckoutSnapshot({
-        project,
-        selectedSubproject,
-        selectedExtraOptions: [],
-        estimatedUsage: 1,
-      });
+      const snapshot = booking.checkoutSnapshot || (
+        selectedSubproject.pricing?.type === "unit"
+          ? null
+          : buildCheckoutSnapshot({
+              project,
+              selectedSubproject,
+              selectedExtraOptions: [],
+              estimatedUsage: 1,
+            })
+      );
       if (!snapshot) {
         return res.status(400).json({
           success: false,
-          msg: "Unable to restore checkout because the original package price is unavailable",
+          msg: selectedSubproject.pricing?.type === "unit"
+            ? "Unable to restore checkout because the original usage quantity is unavailable"
+            : "Unable to restore checkout because the original package price is unavailable",
         });
       }
       const selectedOptions = Array.isArray(booking.selectedExtraOptions) ? booking.selectedExtraOptions : [];

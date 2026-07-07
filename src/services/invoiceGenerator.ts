@@ -466,7 +466,8 @@ export async function generateBookingInvoice(
     };
   });
   const discount = booking.payment.discount;
-  const discounts = [
+  const usingDiscountedVatBreakdown = Boolean(booking.payment.vatBreakdown?.length);
+  const discounts = usingDiscountedVatBreakdown ? [] : [
     discount?.loyaltyAmount ? { label: "Loyalty discount", amount: discount.loyaltyAmount * sign } : undefined,
     discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign } : undefined,
     discount?.pointsDiscountAmount ? { label: "Points discount", amount: discount.pointsDiscountAmount * sign } : undefined,
