@@ -69,6 +69,22 @@ const normalizeOdooVat = (vat?: string): string | undefined => {
   return compact;
 };
 
+const odooCallOnce = async <T>(
+  config: OdooAccountingConfig,
+  model: string,
+  method: string,
+  body: Record<string, unknown>
+): Promise<{ value: T; attempts: number }> => ({
+  value: await odooJson2Call<T>(
+    { baseUrl: config.baseUrl, apiKey: config.apiKey },
+    model,
+    method,
+    body,
+    config.companyId
+  ),
+  attempts: 1,
+});
+
 const odooCallWithRetries = async <T>(
   config: OdooAccountingConfig,
   model: string,
@@ -136,9 +152,14 @@ const getTaxIdsForLine = (
   line: OdooInvoiceLine,
   reverseCharge: boolean
 ): number[] => {
-  const taxId = reverseCharge
-    ? config.reverseChargeTaxId
-    : config.taxIdsByRate[String(line.vatRate ?? 0)] || config.defaultTaxId;
+  if (reverseCharge) {
+    return config.reverseChargeTaxId ? [config.reverseChargeTaxId] : [];
+  }
+  const vatRate = Number(line.vatRate ?? 0);
+  if (vatRate <= 0) {
+    return [];
+  }
+  const taxId = config.taxIdsByRate[String(vatRate)];
   return taxId ? [taxId] : [];
 };
 
@@ -211,7 +232,7 @@ const ensureOdooPartner = async (
     partnerVals.country_id = countryId;
   }
 
-  const { value: partnerIdRaw } = await odooCallWithRetries<unknown>(
+  const { value: partnerIdRaw } = await odooCallOnce<unknown>(
     config,
     "res.partner",
     "create",
@@ -311,7 +332,7 @@ const ensureUblAttachmentOnOdooMove = async (
   );
   if (existingAttachments[0]?.id) return;
 
-  await odooCallWithRetries(config, "ir.attachment", "create", {
+  await odooCallOnce(config, "ir.attachment", "create", {
     vals_list: {
       name: attachmentName,
       type: "binary",
@@ -361,7 +382,7 @@ const dispatchToOdoo = async (
     const partnerId = existingMove ? undefined : await ensureOdooPartner(config, booking, payload);
     const moveId = existingMove?.id || await (async () => {
       const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId as number);
-      const { value: moveIdRaw } = await odooCallWithRetries<unknown>(config, "account.move", "create", { vals_list: moveVals });
+      const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
       return normalizeOdooId(moveIdRaw, "invoice");
     })();
     await ensureUblAttachmentOnOdooMove(config, moveId, payload);
