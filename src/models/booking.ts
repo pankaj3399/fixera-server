@@ -1,6 +1,7 @@
 import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
+import { VatBreakdownLine } from "../Types/stripe";
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
   ? STRIPE_CONFIG.supportedCurrencies
@@ -86,6 +87,7 @@ export interface IQuoteVersion {
   materialsIncluded: boolean;
   materials?: IQuoteMaterial[];
   description: string;
+  pricingLines?: IQuotationPricingLine[];
   totalAmount: number;
   currency: string;
   milestones?: IQuotationMilestone[];
@@ -95,6 +97,14 @@ export interface IQuoteVersion {
   validUntil: Date;
   createdAt: Date;
   changeNote?: string;
+}
+
+export interface IQuotationPricingLine {
+  description: string;
+  price: number;
+  vatRate: number;
+  vatCountry?: string;
+  vatLabel?: string;
 }
 
 export interface IExtraCost {
@@ -175,6 +185,34 @@ export interface IBooking extends Document {
   milestonePayments?: IBookingMilestone[];
   selectedSubprojectIndex?: number;
   selectedExtraOptions?: { extraOptionId: string; bookedPrice: number }[];
+  checkoutSnapshot?: {
+    pricingType: 'fixed' | 'unit';
+    unitAmount: number;
+    quantity: number;
+    baseSubtotal: number;
+    extraOptionsTotal: number;
+    totalAmount: number;
+    currency: string;
+    selectedOptions: {
+      extraOptionId: string;
+      name: string;
+      unitPrice: number;
+      quantity: number;
+      totalPrice: number;
+    }[];
+  };
+  vatDecision?: {
+    action: 'standard_rate' | 'reduced_rate' | 'rfq';
+    country: string;
+    standardRate: number;
+    appliedRate: number;
+    reducedRate?: number;
+    reverseCharge?: boolean;
+    explanation?: string;
+    matchedRuleText?: string;
+    ruleGroup?: string;
+    answers?: { fieldName: string; value: any }[];
+  };
 
   // Booking location (customer's location from their profile)
   location: {
@@ -213,6 +251,7 @@ export interface IBooking extends Document {
     vatRate?: number;
     totalWithVat?: number;
     reverseCharge?: boolean;
+    vatBreakdown?: VatBreakdownLine[];
 
     // Multi-currency support
     originalCurrency?: string;
@@ -244,7 +283,18 @@ export interface IBooking extends Document {
 
     invoiceNumber?: string;
     invoiceUrl?: string;
+    invoiceUblUrl?: string;
     invoiceGeneratedAt?: Date;
+    peppolDispatchStatus?: string;
+    peppolDispatchReference?: string;
+    peppolDispatchedAt?: Date;
+    creditNoteNumber?: string;
+    creditNoteUrl?: string;
+    creditNoteUblUrl?: string;
+    creditNoteGeneratedAt?: Date;
+    creditNoteRelatedInvoiceNumber?: string;
+    creditNotePeppolDispatchStatus?: string;
+    creditNotePeppolDispatchReference?: string;
 
     // Auto-discount breakdown
     discount?: {
@@ -598,6 +648,13 @@ const BookingSchema = new Schema({
       description: { type: String, maxlength: 500 }
     }],
     description: { type: String, required: true, maxlength: 5000 },
+    pricingLines: [{
+      description: { type: String, required: true, maxlength: 500 },
+      price: { type: Number, required: true, min: 0 },
+      vatRate: { type: Number, required: true, min: 0, max: 100 },
+      vatCountry: { type: String, maxlength: 50 },
+      vatLabel: { type: String, maxlength: 200 },
+    }],
     totalAmount: { type: Number, required: true, min: 0 },
     currency: { type: String, enum: ['USD', 'EUR', 'GBP', 'CAD', 'AUD'], default: 'EUR' },
     milestones: [{
@@ -670,6 +727,37 @@ const BookingSchema = new Schema({
     extraOptionId: { type: String, required: true },
     bookedPrice: { type: Number, required: true, min: 0 },
   }],
+  checkoutSnapshot: {
+    pricingType: { type: String, enum: ['fixed', 'unit'], required: true },
+    unitAmount: { type: Number, required: true, min: 0 },
+    quantity: { type: Number, required: true, min: 0 },
+    baseSubtotal: { type: Number, required: true, min: 0 },
+    extraOptionsTotal: { type: Number, required: true, min: 0 },
+    totalAmount: { type: Number, required: true, min: 0 },
+    currency: { type: String, required: true, default: 'EUR' },
+    selectedOptions: [{
+      extraOptionId: { type: String, required: true },
+      name: { type: String, required: true },
+      unitPrice: { type: Number, required: true, min: 0 },
+      quantity: { type: Number, required: true, min: 0 },
+      totalPrice: { type: Number, required: true, min: 0 },
+    }],
+  },
+  vatDecision: {
+    action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'], required: true },
+    country: { type: String, required: true },
+    standardRate: { type: Number, required: true, min: 0, max: 100 },
+    appliedRate: { type: Number, required: true, min: 0, max: 100 },
+    reducedRate: { type: Number, min: 0, max: 100 },
+    reverseCharge: { type: Boolean },
+    explanation: { type: String, maxlength: 1000 },
+    matchedRuleText: { type: String, maxlength: 1000 },
+    ruleGroup: { type: String },
+    answers: [{
+      fieldName: { type: String, required: true },
+      value: { type: Schema.Types.Mixed },
+    }],
+  },
 
   // Location
   location: {
@@ -736,6 +824,15 @@ const BookingSchema = new Schema({
     vatRate: { type: Number },
     totalWithVat: { type: Number },
     reverseCharge: { type: Boolean },
+    vatBreakdown: [{
+      description: { type: String, required: true },
+      netAmount: { type: Number, required: true },
+      vatRate: { type: Number, required: true },
+      vatAmount: { type: Number, required: true },
+      totalAmount: { type: Number, required: true },
+      vatCountry: { type: String },
+      vatLabel: { type: String },
+    }],
 
     // Multi-currency support
     originalCurrency: { type: String },
@@ -774,7 +871,18 @@ const BookingSchema = new Schema({
     // Invoice
     invoiceNumber: { type: String },
     invoiceUrl: { type: String },
+    invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
+    peppolDispatchStatus: { type: String },
+    peppolDispatchReference: { type: String },
+    peppolDispatchedAt: { type: Date },
+    creditNoteNumber: { type: String },
+    creditNoteUrl: { type: String },
+    creditNoteUblUrl: { type: String },
+    creditNoteGeneratedAt: { type: Date },
+    creditNoteRelatedInvoiceNumber: { type: String },
+    creditNotePeppolDispatchStatus: { type: String },
+    creditNotePeppolDispatchReference: { type: String },
 
     // Auto-discount breakdown
     discount: {

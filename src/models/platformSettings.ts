@@ -15,7 +15,7 @@ export interface IPlatformSettings extends Omit<Document, '_id'> {
   };
   eInvoicing?: {
     peppolEnabled?: boolean;
-    provider?: 'odoo' | 'billit' | 'manual';
+    provider?: 'odoo' | 'manual';
     peppolParticipantId?: string;
   };
   lastModifiedBy: mongoose.Types.ObjectId;
@@ -52,7 +52,7 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
   },
   eInvoicing: {
     peppolEnabled: { type: Boolean, default: false },
-    provider: { type: String, enum: ['odoo', 'billit', 'manual'], default: 'manual' },
+    provider: { type: String, enum: ['odoo', 'manual'], default: 'manual' },
     peppolParticipantId: { type: String, trim: true },
   },
   lastModifiedBy: {
@@ -72,6 +72,12 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
 // Pre-save: clamp commission, increment version + timestamp only on updates
 platformSettingsSchema.pre('save', function (this: IPlatformSettings, next) {
   this.commissionPercent = Math.min(Math.max(this.commissionPercent, 0), 100);
+  if (this.eInvoicing?.provider !== 'odoo') {
+    this.eInvoicing = {
+      ...this.eInvoicing,
+      provider: 'manual',
+    };
+  }
   if (!this.isNew) {
     this.version += 1;
     this.lastModified = new Date();

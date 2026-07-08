@@ -1,5 +1,9 @@
 import { Schema, model, Document, Types } from "mongoose";
 import { STRIPE_CONFIG } from "../services/stripe";
+import { VatBreakdownLine } from "../Types/stripe";
+import { PeppolDispatchStatus } from "../services/peppolDispatch";
+
+const PEPPOL_DISPATCH_STATUSES: PeppolDispatchStatus[] = ["skipped", "queued", "sent", "failed"];
 
 export type PaymentStatus =
   | "pending"
@@ -35,6 +39,8 @@ export interface IPayment extends Document {
   vatAmount?: number;
   vatRate?: number;
   totalWithVat?: number;
+  reverseCharge?: boolean;
+  vatBreakdown?: VatBreakdownLine[];
   platformCommission?: number;
   professionalPayout?: number;
 
@@ -53,7 +59,18 @@ export interface IPayment extends Document {
 
   invoiceNumber?: string;
   invoiceUrl?: string;
+  invoiceUblUrl?: string;
   invoiceGeneratedAt?: Date;
+  peppolDispatchStatus?: string;
+  peppolDispatchReference?: string;
+  peppolDispatchedAt?: Date;
+  creditNoteNumber?: string;
+  creditNoteUrl?: string;
+  creditNoteUblUrl?: string;
+  creditNoteGeneratedAt?: Date;
+  creditNoteRelatedInvoiceNumber?: string;
+  creditNotePeppolDispatchStatus?: string;
+  creditNotePeppolDispatchReference?: string;
 
   metadata?: Record<string, any>;
 
@@ -110,6 +127,16 @@ const PaymentSchema = new Schema<IPayment>(
     vatAmount: { type: Number },
     vatRate: { type: Number },
     totalWithVat: { type: Number },
+    reverseCharge: { type: Boolean },
+    vatBreakdown: [{
+      description: { type: String, required: true },
+      netAmount: { type: Number, required: true },
+      vatRate: { type: Number, required: true },
+      vatAmount: { type: Number, required: true },
+      totalAmount: { type: Number, required: true },
+      vatCountry: { type: String },
+      vatLabel: { type: String },
+    }],
     platformCommission: { type: Number },
     professionalPayout: { type: Number },
 
@@ -128,7 +155,18 @@ const PaymentSchema = new Schema<IPayment>(
 
     invoiceNumber: { type: String },
     invoiceUrl: { type: String },
+    invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
+    peppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    peppolDispatchReference: { type: String },
+    peppolDispatchedAt: { type: Date },
+    creditNoteNumber: { type: String },
+    creditNoteUrl: { type: String },
+    creditNoteUblUrl: { type: String },
+    creditNoteGeneratedAt: { type: Date },
+    creditNoteRelatedInvoiceNumber: { type: String },
+    creditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    creditNotePeppolDispatchReference: { type: String },
 
     metadata: { type: Schema.Types.Mixed },
   },
