@@ -248,10 +248,11 @@ export const generatePaymentInvoice = async (req: Request, res: Response) =>
 
 export const generatePaymentCreditNote = async (req: Request, res: Response) =>
   withPaymentArtifact(req, res, {
-    allowedStatuses: ['completed', 'refunded', 'partially_refunded'],
+    // Authorized is included so admins can correct invoices before capture/completion.
+    allowedStatuses: ['authorized', 'completed', 'refunded', 'partially_refunded'],
     statusErrorMessage: (status) => `Cannot generate credit note for payment with status "${status}".`,
     preValidate: (payment) =>
-      payment.invoiceNumber
+      payment.invoiceNumber && !String(payment.invoiceNumber).startsWith('GENERATING-')
         ? null
         : 'Generate the original invoice before creating a credit note',
     generate: (bookingId, paymentId) => ensureCreditInvoiceArtifacts(bookingId, paymentId),

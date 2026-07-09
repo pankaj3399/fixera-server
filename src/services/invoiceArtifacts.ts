@@ -69,6 +69,8 @@ const claimInvoiceGeneration = async (bookingId: string) =>
             { "payment.invoiceNumber": { $exists: false } },
             { "payment.invoiceNumber": null },
             { "payment.invoiceNumber": "" },
+            // Reclaim abandoned in-flight claims (no URL yet).
+            { "payment.invoiceNumber": /^GENERATING-/ },
           ],
         },
         {
@@ -95,6 +97,7 @@ const claimCreditNoteGeneration = async (bookingId: string) =>
             { "payment.creditNoteNumber": { $exists: false } },
             { "payment.creditNoteNumber": null },
             { "payment.creditNoteNumber": "" },
+            { "payment.creditNoteNumber": /^GENERATING-CN-/ },
           ],
         },
         {
@@ -124,7 +127,8 @@ const clearCreditNoteGenerationClaim = async (bookingId: string) => {
   );
 };
 
-const GENERATION_CLAIM_TTL_MS = 15 * 60 * 1000;
+/** Short TTL so a hung/background generation does not block admin retries for 15 minutes. */
+const GENERATION_CLAIM_TTL_MS = 60 * 1000;
 
 const parseGenerationClaimTimestamp = (value: string, prefix: string): number | null => {
   if (!value.startsWith(prefix)) return null;
@@ -440,21 +444,13 @@ export async function ensureBookingInvoiceArtifacts(
       `attachment; filename="${invoiceNumber}.xml"`
     );
 
-    const peppolResult = await maybeDispatchPeppolInvoice({
-      booking,
-      invoiceNumber,
-      ublXml,
-      invoiceUblUrl,
-    });
-
-    const update = {
+    // Persist PDF/UBL before Peppol so a slow/hanging Odoo call cannot leave a stuck GENERATING claim.
+    const update: InvoiceArtifactResult = {
       invoiceNumber,
       invoiceUrl,
       invoiceUblUrl,
       invoiceGeneratedAt: generatedAt,
-      peppolDispatchStatus: peppolResult.status,
-      peppolDispatchReference: peppolResult.reference,
-      peppolDispatchedAt: peppolResult.dispatchedAt,
+      peppolDispatchStatus: "skipped",
     };
 
     await Booking.updateOne(
@@ -466,13 +462,47 @@ export async function ensureBookingInvoiceArtifacts(
           "payment.invoiceUblUrl": update.invoiceUblUrl,
           "payment.invoiceGeneratedAt": update.invoiceGeneratedAt,
           "payment.peppolDispatchStatus": update.peppolDispatchStatus,
-          "payment.peppolDispatchReference": update.peppolDispatchReference,
-          "payment.peppolDispatchedAt": update.peppolDispatchedAt,
         },
       }
     );
-
     await persistPaymentArtifactUpdate(booking._id, paymentId, update);
+
+    try {
+      const peppolResult = await maybeDispatchPeppolInvoice({
+        booking,
+        invoiceNumber,
+        ublXml,
+        invoiceUblUrl,
+      });
+      update.peppolDispatchStatus = peppolResult.status;
+      update.peppolDispatchReference = peppolResult.reference;
+      await Booking.updateOne(
+        { _id: booking._id },
+        {
+          $set: {
+            "payment.peppolDispatchStatus": peppolResult.status,
+            "payment.peppolDispatchReference": peppolResult.reference,
+            "payment.peppolDispatchedAt": peppolResult.dispatchedAt,
+          },
+        }
+      );
+      await persistPaymentArtifactUpdate(booking._id, paymentId, {
+        peppolDispatchStatus: peppolResult.status,
+        peppolDispatchReference: peppolResult.reference,
+        peppolDispatchedAt: peppolResult.dispatchedAt,
+      });
+    } catch (peppolError) {
+      console.error(
+        `[INVOICE] Peppol dispatch failed for booking ${bookingId} after artifacts were saved:`,
+        peppolError instanceof Error ? peppolError.message : peppolError
+      );
+      update.peppolDispatchStatus = "failed";
+      await Booking.updateOne(
+        { _id: booking._id },
+        { $set: { "payment.peppolDispatchStatus": "failed" } }
+      );
+      await persistPaymentArtifactUpdate(booking._id, paymentId, { peppolDispatchStatus: "failed" });
+    }
 
     return update;
   } catch (error) {
@@ -487,7 +517,7 @@ export async function ensureCreditInvoiceArtifacts(
 ): Promise<CreditArtifactResult | null> {
   await clearStaleGenerationClaimsIfNeeded(bookingId);
   const existing = await Booking.findById(bookingId);
-  if (!existing?.payment?.invoiceNumber) {
+  if (!existing?.payment?.invoiceNumber || String(existing.payment.invoiceNumber).startsWith("GENERATING-")) {
     return null;
   }
   if (hasCreditNoteArtifacts(existing.payment)) {
@@ -534,22 +564,15 @@ export async function ensureCreditInvoiceArtifacts(
       `attachment; filename="${creditNoteNumber}.xml"`
     );
 
-    const peppolResult = await maybeDispatchPeppolInvoice({
-      booking,
-      invoiceNumber: creditNoteNumber,
-      ublXml,
-      invoiceUblUrl: creditNoteUblUrl,
-      documentType: "credit_note",
-    });
-
+    // Persist PDF/UBL before Peppol so a slow Odoo call cannot leave a stuck GENERATING-CN claim.
     const update = {
       creditNoteNumber,
       creditNoteUrl,
       creditNoteUblUrl,
       creditNoteGeneratedAt: generatedAt,
       creditNoteRelatedInvoiceNumber: relatedInvoiceNumber,
-      creditNotePeppolDispatchStatus: peppolResult.status,
-      creditNotePeppolDispatchReference: peppolResult.reference,
+      creditNotePeppolDispatchStatus: "skipped" as string | undefined,
+      creditNotePeppolDispatchReference: undefined as string | undefined,
     };
 
     await Booking.updateOne(
@@ -562,12 +585,48 @@ export async function ensureCreditInvoiceArtifacts(
           "payment.creditNoteGeneratedAt": update.creditNoteGeneratedAt,
           "payment.creditNoteRelatedInvoiceNumber": update.creditNoteRelatedInvoiceNumber,
           "payment.creditNotePeppolDispatchStatus": update.creditNotePeppolDispatchStatus,
-          "payment.creditNotePeppolDispatchReference": update.creditNotePeppolDispatchReference,
         },
       }
     );
-
     await persistPaymentArtifactUpdate(booking._id, paymentId, update);
+
+    try {
+      const peppolResult = await maybeDispatchPeppolInvoice({
+        booking,
+        invoiceNumber: creditNoteNumber,
+        ublXml,
+        invoiceUblUrl: creditNoteUblUrl,
+        documentType: "credit_note",
+      });
+      update.creditNotePeppolDispatchStatus = peppolResult.status;
+      update.creditNotePeppolDispatchReference = peppolResult.reference;
+      await Booking.updateOne(
+        { _id: booking._id },
+        {
+          $set: {
+            "payment.creditNotePeppolDispatchStatus": peppolResult.status,
+            "payment.creditNotePeppolDispatchReference": peppolResult.reference,
+          },
+        }
+      );
+      await persistPaymentArtifactUpdate(booking._id, paymentId, {
+        creditNotePeppolDispatchStatus: peppolResult.status,
+        creditNotePeppolDispatchReference: peppolResult.reference,
+      });
+    } catch (peppolError) {
+      console.error(
+        `[INVOICE] Peppol credit-note dispatch failed for booking ${bookingId} after artifacts were saved:`,
+        peppolError instanceof Error ? peppolError.message : peppolError
+      );
+      update.creditNotePeppolDispatchStatus = "failed";
+      await Booking.updateOne(
+        { _id: booking._id },
+        { $set: { "payment.creditNotePeppolDispatchStatus": "failed" } }
+      );
+      await persistPaymentArtifactUpdate(booking._id, paymentId, {
+        creditNotePeppolDispatchStatus: "failed",
+      });
+    }
 
     return {
       creditNoteNumber,
