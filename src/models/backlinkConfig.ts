@@ -28,7 +28,14 @@ export interface IBacklinkConfigModel extends Model<IBacklinkConfig> {
  * The service layer always unions this list with the FRONTEND_URL env var
  * at runtime, so dev/staging environments are covered automatically.
  */
-const PROD_ALLOWED_DOMAINS = ['fixtract-rho.vercel.app', 'www.fixtract-rho.vercel.app'];
+// Include legacy fixera hostnames so existing DB seeds keep working until
+// migrate:fixera-to-fixtract rewrites allowedTargetDomains.
+const PROD_ALLOWED_DOMAINS = [
+  'fixtract-rho.vercel.app',
+  'www.fixtract-rho.vercel.app',
+  'fixera-rho.vercel.app',
+  'www.fixera-rho.vercel.app',
+];
 
 export const DEFAULT_BACKLINK_CONFIG = {
   isEnabled: false,

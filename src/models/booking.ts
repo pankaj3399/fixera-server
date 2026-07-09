@@ -256,7 +256,8 @@ export interface IBooking extends Document {
     // Multi-currency support
     originalCurrency?: string;
     fxRate?: number;
-    fxProvider?: 'stripe' | 'fixtract';
+    /** 'fixera' kept for existing DB rows until migrate:fixera-to-fixtract runs */
+    fxProvider?: 'stripe' | 'fixtract' | 'fixera';
 
     // Payment timeline
     authorizedAt?: Date;
@@ -841,7 +842,8 @@ const BookingSchema = new Schema({
     fxRate: { type: Number },
     fxProvider: {
       type: String,
-      enum: ['stripe', 'fixtract']
+      // Accept legacy 'fixera' so existing bookings validate until migration runs
+      enum: ['stripe', 'fixtract', 'fixera']
     },
 
     // Payment timeline
