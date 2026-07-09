@@ -17,7 +17,7 @@ const getS3KeyFromValue = (value?: string): string | null => {
 };
 
 const buildS3UrlFromKey = (key: string): string => {
-  const bucket = process.env.S3_BUCKET_NAME || 'abby-fixera';
+  const bucket = process.env.S3_BUCKET_NAME || 'fixera-uploads';
   const region = process.env.AWS_REGION || 'us-east-1';
   return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
 };
