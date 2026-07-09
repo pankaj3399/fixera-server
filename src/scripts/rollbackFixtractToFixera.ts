@@ -39,11 +39,6 @@ async function runUpdate(
     return count;
   }
 
-  if (Array.isArray(update)) {
-    const result = await col.updateMany(filter, update);
-    return result.modifiedCount;
-  }
-
   const result = await col.updateMany(filter, update);
   return result.modifiedCount;
 }

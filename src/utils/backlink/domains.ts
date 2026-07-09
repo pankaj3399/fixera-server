@@ -21,7 +21,13 @@ function domainsFromEnv(): string[] {
 export function getEffectiveAllowedDomains(config: IBacklinkConfig): string[] {
   const fromDb = (config.allowedTargetDomains ?? []).map((d) => d.toLowerCase());
   const fromEnv = domainsFromEnv();
-  return Array.from(new Set([...fromEnv, ...fromDb]));
+  const domains = Array.from(new Set([...fromEnv, ...fromDb]));
+  if (domains.length === 0) {
+    console.warn(
+      "[backlinks] No allowed target domains: set FRONTEND_URL or add domains in admin backlink settings."
+    );
+  }
+  return domains;
 }
 
 /** True when the hostname is one of Fixtract's own domains (not a valid external submission). */

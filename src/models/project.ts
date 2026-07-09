@@ -329,7 +329,9 @@ const IntakeMeetingSchema = new Schema<IIntakeMeeting>({
 // Keep both field names so existing documents with fixeraManaged still round-trip
 // through Mongoose (strict mode would otherwise strip the legacy key).
 const RenovationPlanningSchema = new Schema<IRenovationPlanning>({
-  fixtractManaged: { type: Boolean, default: false },
+  // No schema default — a default would materialize fixtractManaged:false on
+  // legacy docs and skip the transform fallback from fixeraManaged.
+  fixtractManaged: { type: Boolean },
   fixeraManaged: { type: Boolean },
   resources: [{ type: String }],
 });
@@ -338,8 +340,9 @@ function normalizeRenovationPlanning(
   _doc: unknown,
   ret: IRenovationPlanning
 ): IRenovationPlanning {
-  if (ret.fixtractManaged == null && typeof ret.fixeraManaged === "boolean") {
-    ret.fixtractManaged = ret.fixeraManaged;
+  if (ret.fixtractManaged == null) {
+    ret.fixtractManaged =
+      typeof ret.fixeraManaged === "boolean" ? ret.fixeraManaged : false;
   }
   return ret;
 }

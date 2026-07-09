@@ -5,8 +5,8 @@
  *   - projects.renovationPlanning.fixeraManaged → fixtractManaged
  *   - bookings.payment.fxProvider "fixera" → "fixtract"
  *   - platform settings company name defaults
- *   - clear seeded backlink allowedTargetDomains (FRONTEND_URL is the runtime default;
- *     admins re-add any extras in the admin UI)
+ *   - strip known hardcoded backlink seed domains (keep admin-added extras;
+ *     FRONTEND_URL remains the runtime baseline)
  *
  * Usage:
  *   npx tsx src/scripts/migrateFixeraToFixtract.ts --dry-run
@@ -33,11 +33,6 @@ async function runUpdate(
 
   if (count === 0 || DRY_RUN) {
     return count;
-  }
-
-  if (Array.isArray(update)) {
-    const result = await col.updateMany(filter, update);
-    return result.modifiedCount;
   }
 
   const result = await col.updateMany(filter, update);
@@ -85,14 +80,38 @@ async function migrate() {
   );
   console.log(`  → modified ${platformCompanyModified}\n`);
 
-  // Drop hardcoded domain seeds. Runtime allow-list is FRONTEND_URL (+ admin extras).
-  const backlinkCleared = await runUpdate(
-    "backlinkconfigs.allowedTargetDomains → []",
-    "backlinkconfigs",
-    { allowedTargetDomains: { $exists: true, $not: { $size: 0 } } },
-    { $set: { allowedTargetDomains: [] } }
-  );
-  console.log(`  → modified ${backlinkCleared}\n`);
+  // Strip only known hardcoded seed domains; keep any admin-added extras.
+  const LEGACY_SEEDED_DOMAINS = new Set([
+    "fixera-rho.vercel.app",
+    "www.fixera-rho.vercel.app",
+    "fixtract-rho.vercel.app",
+    "www.fixtract-rho.vercel.app",
+    "fixera.com",
+    "www.fixera.com",
+  ]);
+  const backlinkCol = mongoose.connection.collection("backlinkconfigs");
+  const backlinkConfigs = await backlinkCol.find({}).toArray();
+  let backlinkDomainsUpdated = 0;
+  for (const doc of backlinkConfigs) {
+    const domains: string[] = Array.isArray(doc.allowedTargetDomains)
+      ? doc.allowedTargetDomains
+      : [];
+    const updated = domains.filter(
+      (d) => !LEGACY_SEEDED_DOMAINS.has(String(d).toLowerCase())
+    );
+    if (updated.length === domains.length) continue;
+    console.log(
+      `[backlinkconfigs] ${doc._id}: remove seeded domains → keep [${updated.join(", ")}]`
+    );
+    if (!DRY_RUN) {
+      await backlinkCol.updateOne(
+        { _id: doc._id },
+        { $set: { allowedTargetDomains: updated } }
+      );
+    }
+    backlinkDomainsUpdated += 1;
+  }
+  console.log(`  → updated ${backlinkDomainsUpdated} backlink config(s)\n`);
 
   console.log(DRY_RUN ? "Dry run complete." : "Migration complete.");
   await mongoose.disconnect();
