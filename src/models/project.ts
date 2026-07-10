@@ -26,10 +26,14 @@ export interface IIntakeMeeting {
 }
 
 export interface IRenovationPlanning {
-  fixtractManaged?: boolean;
-  /** @deprecated Legacy field name; still present on pre-rebrand documents */
-  fixeraManaged?: boolean;
+  /** Persisted DB field (unchanged in Phase-1 rebrand) */
+  fixeraManaged: boolean;
   resources: string[];
+  /**
+   * Frontend alias only — virtual mapped to/from fixeraManaged.
+   * Not a separate MongoDB key.
+   */
+  fixtractManaged?: boolean;
 }
 
 export interface IMedia {
@@ -325,30 +329,23 @@ const IntakeMeetingSchema = new Schema<IIntakeMeeting>({
   resources: [{ type: String }],
 });
 
-// Renovation Planning Schema
-// Keep both field names so existing documents with fixeraManaged still round-trip
-// through Mongoose (strict mode would otherwise strip the legacy key).
+// Renovation Planning Schema — DB key stays fixeraManaged (Phase-1: no schema rename).
+// Virtual alias lets the rebranded frontend send/read fixtractManaged without a new key.
 const RenovationPlanningSchema = new Schema<IRenovationPlanning>({
-  // No schema default — a default would materialize fixtractManaged:false on
-  // legacy docs and skip the transform fallback from fixeraManaged.
-  fixtractManaged: { type: Boolean },
-  fixeraManaged: { type: Boolean },
+  fixeraManaged: { type: Boolean, default: false },
   resources: [{ type: String }],
 });
 
-function normalizeRenovationPlanning(
-  _doc: unknown,
-  ret: IRenovationPlanning
-): IRenovationPlanning {
-  if (ret.fixtractManaged == null) {
-    ret.fixtractManaged =
-      typeof ret.fixeraManaged === "boolean" ? ret.fixeraManaged : false;
-  }
-  return ret;
-}
+RenovationPlanningSchema.virtual("fixtractManaged")
+  .get(function (this: { fixeraManaged?: boolean }) {
+    return this.fixeraManaged ?? false;
+  })
+  .set(function (this: { fixeraManaged?: boolean }, value: boolean) {
+    this.fixeraManaged = value;
+  });
 
-RenovationPlanningSchema.set("toJSON", { transform: normalizeRenovationPlanning });
-RenovationPlanningSchema.set("toObject", { transform: normalizeRenovationPlanning });
+RenovationPlanningSchema.set("toJSON", { virtuals: true });
+RenovationPlanningSchema.set("toObject", { virtuals: true });
 
 // Media Schema
 const MediaSchema = new Schema<IMedia>({

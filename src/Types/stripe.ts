@@ -89,8 +89,7 @@ export interface BookingPayment {
   // Multi-currency support
   originalCurrency?: string;
   fxRate?: number;
-  /** 'fixera' kept for existing DB rows until migrate:fixera-to-fixtract runs */
-  fxProvider?: 'stripe' | 'fixtract' | 'fixera';
+  fxProvider?: 'stripe' | 'fixera';
 
   // Timestamps
   authorizedAt?: Date;
