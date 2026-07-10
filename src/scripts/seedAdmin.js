@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 // Database connection
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/fixtract');
+    const conn = await mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/fixera');
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
     console.error('Database connection error:', error);
