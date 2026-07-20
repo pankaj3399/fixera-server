@@ -96,19 +96,30 @@ function isPushDisabled(
 // Public API
 // ------------------------------------------------------------------
 
+export interface SendPushOptions {
+  /**
+   * When true, skip User.notificationPreferences check.
+   * Used by central `notify()` which already applies registry tiers + prefs.
+   */
+  skipPrefCheck?: boolean;
+}
+
 /**
  * Send a push notification to a single user.
- * Respects user notification preferences and silently removes stale tokens.
+ * Respects user notification preferences (unless skipPrefCheck) and silently removes stale tokens.
  */
 export async function sendPushToUser(
   userId: string,
   payload: PushPayload,
+  options?: SendPushOptions,
 ): Promise<void> {
   const user = await User.findById(userId).select('+fcmTokens notificationPreferences');
   const tokens = getTokensForCurrentDeployment(user?.fcmTokens);
   if (!tokens.length) return;
 
-  if (isPushDisabled(user!.notificationPreferences, payload.type)) return;
+  if (!options?.skipPrefCheck && isPushDisabled(user!.notificationPreferences, payload.type)) {
+    return;
+  }
 
   await _dispatchTokens(tokens, payload, userId);
 }

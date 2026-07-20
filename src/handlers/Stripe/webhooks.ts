@@ -365,6 +365,20 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
             (paymentIntent.currency || 'EUR').toUpperCase()
           );
         }
+        // Inbox + push for professional "new booking" (email already covered by payment confirmed)
+        if (professionalUser?._id) {
+          const { notifyAsync } = await import('../../utils/notifications/notify');
+          notifyAsync({
+            userId: professionalUser._id.toString(),
+            eventKey: 'professional.booking_created',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              customerName: customerUser?.name,
+            },
+          });
+        }
       } catch (emailError: any) {
         console.error('Failed to send payment-confirmed email:', emailError?.message || emailError);
       }
@@ -487,6 +501,27 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
           isPartial,
           String(booking._id)
         );
+      }
+      if (booking.payment.status === 'refunded') {
+        const { notifyAsync } = await import('../../utils/notifications/notify');
+        if (customerUser?._id) {
+          notifyAsync({
+            userId: customerUser._id.toString(),
+            eventKey: 'customer.booking_cancelled_refunded',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: { bookingId: String(booking._id) },
+          });
+        }
+        if (booking.professional) {
+          notifyAsync({
+            userId: String(booking.professional),
+            eventKey: 'professional.booking_cancelled_refunded',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: { bookingId: String(booking._id) },
+          });
+        }
       }
     }
   } catch (emailError: any) {

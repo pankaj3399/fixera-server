@@ -83,6 +83,9 @@ import { runWarrantyClaimChecks } from "../../utils/warrantyClaimChecks";
 import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineCheck";
 import { runDisputeSlaCheck } from "../../utils/disputeSlaCheck";
 import { runRefundNegotiationSlaCheck } from "../../utils/refundNegotiationSlaCheck";
+import { runNotificationReminders } from "../../utils/notifications/runNotificationReminders";
+import { runCompletionAutoAccept } from "../../utils/notifications/runCompletionAutoAccept";
+import { expirePendingReferrals } from "../../utils/referralSystem";
 import {
   listCmsContent,
   getCmsContentById,
@@ -333,6 +336,36 @@ adminRouter.route('/run-refund-sla-check').post(async (_req, res) => {
   } catch (error: any) {
     console.error('[Admin] Manual refund SLA check failed:', error);
     return res.status(500).json({ success: false, msg: 'Refund SLA check failed' });
+  }
+});
+
+adminRouter.route('/run-notification-reminders').post(async (_req, res) => {
+  try {
+    const result = await runNotificationReminders();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Notification reminders failed:', error);
+    return res.status(500).json({ success: false, msg: 'Notification reminders failed' });
+  }
+});
+
+adminRouter.route('/run-completion-auto-accept').post(async (_req, res) => {
+  try {
+    const result = await runCompletionAutoAccept();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Completion auto-accept failed:', error);
+    return res.status(500).json({ success: false, msg: 'Completion auto-accept failed' });
+  }
+});
+
+adminRouter.route('/run-referral-expiry').post(async (_req, res) => {
+  try {
+    const expired = await expirePendingReferrals();
+    return res.json({ success: true, data: { expired } });
+  } catch (error: any) {
+    console.error('[Admin] Referral expiry failed:', error);
+    return res.status(500).json({ success: false, msg: 'Referral expiry failed' });
   }
 });
 

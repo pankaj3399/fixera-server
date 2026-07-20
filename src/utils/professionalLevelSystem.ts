@@ -261,6 +261,18 @@ export const updateProfessionalLevel = async (
     user.professionalLevel = levelInfo.currentLevel;
     await user.save(opts?.session ? { session: opts.session } : {});
     console.log(`Professional Level: ${user.email} ${oldLevel} -> ${levelInfo.currentLevel}`);
+    try {
+      const { notifyAsync } = await import('./notifications/notify');
+      notifyAsync({
+        userId: professionalId.toString(),
+        eventKey: 'professional.leveling_up',
+        entityType: 'user',
+        entityId: professionalId.toString(),
+        context: { levelName: levelInfo.currentLevel },
+      });
+    } catch (notifyErr) {
+      console.error('Failed to notify professional level-up:', notifyErr);
+    }
   }
 
   return {

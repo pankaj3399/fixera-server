@@ -266,6 +266,26 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
           String(freshBooking._id)
         );
       }
+
+      const { notifyAsync } = await import("../../utils/notifications/notify");
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: "customer.booking_cancelled_refunded",
+          entityType: "booking",
+          entityId: String(freshBooking._id),
+          context: { bookingId: String(freshBooking._id) },
+        });
+      }
+      if (professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: "professional.booking_cancelled_refunded",
+          entityType: "booking",
+          entityId: String(freshBooking._id),
+          context: { bookingId: String(freshBooking._id) },
+        });
+      }
     } catch (emailError: any) {
       console.error("Approve cancellation email error:", emailError?.message || emailError);
     }

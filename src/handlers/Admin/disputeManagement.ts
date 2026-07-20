@@ -704,6 +704,14 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
 
       try {
+        const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
+        const bookingAmount = (resolvedBooking.payment?.amount || 0) + Math.max(0, finalExtraCostAmount);
+        await updateUserLoyalty(String(resolvedBooking.customer), bookingAmount);
+      } catch (e) {
+        console.error('Error updating customer loyalty:', e);
+      }
+
+      try {
         if (proId) await updateProfessionalLevel(proId);
       } catch (e) {
         console.error('Error updating professional level:', e);
@@ -713,6 +721,30 @@ export const resolveDispute = async (req: Request, res: Response) => {
         await awardBookingCompletionPoints(proId, resolvedBooking.customer, resolvedBooking._id);
       } catch (e) {
         console.error('Error awarding booking completion points:', e);
+      }
+
+      try {
+        const { notifyAsync } = await import('../../utils/notifications/notify');
+        if (resolvedBooking.customer) {
+          notifyAsync({
+            userId: String(resolvedBooking.customer),
+            eventKey: 'customer.review_request',
+            entityType: 'booking',
+            entityId: String(resolvedBooking._id),
+            context: { bookingId: String(resolvedBooking._id) },
+          });
+        }
+        if (proId) {
+          notifyAsync({
+            userId: proId,
+            eventKey: 'professional.review_request',
+            entityType: 'booking',
+            entityId: String(resolvedBooking._id),
+            context: { bookingId: String(resolvedBooking._id) },
+          });
+        }
+      } catch (e) {
+        console.error('Error sending review request notifications:', e);
       }
     }
 
@@ -732,6 +764,26 @@ export const resolveDispute = async (req: Request, res: Response) => {
           String(resolvedBooking._id),
           (resolvedBooking as any).payment?.currency || 'EUR'
         );
+      }
+
+      const { notifyAsync } = await import('../../utils/notifications/notify');
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.dispute_resolved',
+          entityType: 'booking',
+          entityId: String(resolvedBooking._id),
+          context: { bookingId: String(resolvedBooking._id) },
+        });
+      }
+      if (professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: 'professional.dispute_resolved',
+          entityType: 'booking',
+          entityId: String(resolvedBooking._id),
+          context: { bookingId: String(resolvedBooking._id) },
+        });
       }
     } catch (emailError: any) {
       console.error('Failed to send dispute-resolved email:', emailError?.message || emailError);

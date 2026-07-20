@@ -17,13 +17,11 @@ import { createPaymentIntent } from '../Stripe/payment';
 import { getVatRateOptionsFromConfig, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
 import {
   sendRfqAcceptedEmail,
-  sendRfqRejectedEmail,
   sendQuotationReceivedEmail,
   sendQuotationUpdatedEmail,
-  sendQuotationAcceptedEmail,
-  sendQuotationRejectedEmail,
   sendDirectQuotationEmail,
 } from '../../utils/emailService';
+import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 
@@ -409,7 +407,6 @@ export const respondToRFQ = async (req: Request, res: Response) => {
 
       await booking.save();
 
-      // Send email to customer
       try {
         await sendRfqAcceptedEmail(customer.email, customer.name, getProfessionalDisplayName(professional), booking._id.toString());
       } catch (e) {
@@ -443,9 +440,22 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     await booking.save();
 
     try {
-      await sendRfqRejectedEmail(customer.email, customer.name, getProfessionalDisplayName(professional), rejectionReason);
+      const customerId = customer._id?.toString?.() || customer.id;
+      if (customerId) {
+        notifyAsync({
+          userId: customerId,
+          eventKey: 'customer.rfq_rejected',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            professionalName: getProfessionalDisplayName(professional),
+            reason: rejectionReason,
+          },
+        });
+      }
     } catch (e) {
-      console.error('Failed to send RFQ rejected email:', e);
+      console.error('Failed to notify RFQ rejected:', e);
     }
 
     return res.json({
@@ -842,9 +852,23 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       await booking.save();
 
       try {
-        await sendQuotationRejectedEmail(professional.email, getProfessionalDisplayName(professional), customer.name, booking.quotationNumber || '', rejectionReason);
+        const professionalId = professional._id?.toString?.() || professional.id;
+        if (professionalId) {
+          notifyAsync({
+            userId: professionalId,
+            eventKey: 'professional.quote_rejected',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              customerName: customer.name,
+              quotationNumber: booking.quotationNumber || '',
+              reason: rejectionReason,
+            },
+          });
+        }
       } catch (e) {
-        console.error('Failed to send quotation rejected email:', e);
+        console.error('Failed to notify quotation rejected:', e);
       }
 
       return res.json({
@@ -890,9 +914,22 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
     await booking.save();
 
     try {
-      await sendQuotationAcceptedEmail(professional.email, getProfessionalDisplayName(professional), customer.name, booking.quotationNumber || '', booking._id.toString());
+      const professionalId = professional._id?.toString?.() || professional.id;
+      if (professionalId) {
+        notifyAsync({
+          userId: professionalId,
+          eventKey: 'professional.quote_accepted',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            customerName: customer.name,
+            quotationNumber: booking.quotationNumber || '',
+          },
+        });
+      }
     } catch (e) {
-      console.error('Failed to send quotation accepted email:', e);
+      console.error('Failed to notify quotation accepted:', e);
     }
 
     return res.json({
@@ -1177,7 +1214,7 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
     }
 
     const booking = await Booking.findById(bookingId)
-      .select('professional status actualStartDate milestonePayments statusHistory bookingType project')
+      .select('customer professional status actualStartDate milestonePayments statusHistory bookingType project')
       .populate('project', 'professionalId');
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -1224,6 +1261,22 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
           updatedBy: new mongoose.Types.ObjectId(userId),
           note: `Milestone started: ${milestone.title}`,
         });
+
+        const customerId = booking.customer?.toString?.() || (booking as any).customer?._id?.toString?.();
+        if (customerId) {
+          notifyAsync({
+            userId: customerId,
+            eventKey: 'customer.booking_started',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              professionalName: getProfessionalDisplayName(
+                await User.findById(userId).select('name username businessInfo').lean()
+              ),
+            },
+          });
+        }
       }
     }
 
@@ -1246,6 +1299,23 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
           updatedBy: new mongoose.Types.ObjectId(userId),
           note: 'All milestones completed',
         });
+
+        const customerId = booking.customer?.toString?.();
+        if (customerId) {
+          notifyAsync({
+            userId: customerId,
+            eventKey: 'customer.completion_requested',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              professionalName: getProfessionalDisplayName(
+                await User.findById(userId).select('name username businessInfo').lean()
+              ),
+              extraCostTotal: 0,
+            },
+          });
+        }
       }
     }
 

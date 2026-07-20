@@ -26,6 +26,8 @@ export interface IUser extends Document {
     idCountryOfIssue?: string;
     idExpirationDate?: Date;
     idExpiryEmailSentAt?: Date;
+    idExpiryReminderLastSentAt?: Date;
+    idExpiryReminderCount?: number;
     pendingIdChanges?: {
         field?: string;
         oldValue?: string;
@@ -270,6 +272,15 @@ const UserSchema = new Schema({
     idExpiryEmailSentAt: {
         type: Date,
         required: false
+    },
+    idExpiryReminderLastSentAt: {
+        type: Date,
+        required: false
+    },
+    idExpiryReminderCount: {
+        type: Number,
+        required: false,
+        default: 0
     },
     pendingIdChanges: {
         type: [{

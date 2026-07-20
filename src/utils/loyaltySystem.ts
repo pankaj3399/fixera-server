@@ -152,9 +152,25 @@ export const updateUserLoyalty = async (
           return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
         }
 
+        const overrideLeveledUp = oldLevel !== overrideLevel;
+        if (overrideLeveledUp) {
+          try {
+            const { notifyAsync } = await import('./notifications/notify');
+            notifyAsync({
+              userId: String(result._id),
+              eventKey: 'customer.loyalty_tier_up',
+              entityType: 'user',
+              entityId: String(result._id),
+              context: { levelName: overrideLevel },
+            });
+          } catch (notifyErr) {
+            console.error('Failed to notify loyalty tier-up:', notifyErr);
+          }
+        }
+
         return {
           user: result,
-          leveledUp: oldLevel !== overrideLevel,
+          leveledUp: overrideLeveledUp,
           oldLevel,
           newLevel: overrideLevel
         };
@@ -189,6 +205,18 @@ export const updateUserLoyalty = async (
 
       if (leveledUp) {
         console.log(`Loyalty: Level up! ${result.email} ${oldLevel} → ${newLevel}`);
+        try {
+          const { notifyAsync } = await import('./notifications/notify');
+          notifyAsync({
+            userId: String(result._id),
+            eventKey: 'customer.loyalty_tier_up',
+            entityType: 'user',
+            entityId: String(result._id),
+            context: { levelName: newLevel },
+          });
+        } catch (notifyErr) {
+          console.error('Failed to notify loyalty tier-up:', notifyErr);
+        }
       }
 
       return { user: result, leveledUp, oldLevel, newLevel };

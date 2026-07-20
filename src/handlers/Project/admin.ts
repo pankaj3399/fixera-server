@@ -10,6 +10,7 @@ import {
     sendProjectDeactivatedEmail,
     sendProjectReactivatedEmail
 } from '../../utils/emailService';
+import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { getPresignedUrl, parseS3KeyFromUrl } from '../../utils/s3Upload';
 
@@ -168,6 +169,13 @@ export const approveProject = async (req: Request, res: Response) => {
                 String(project._id)
             );
             console.log('Approval email send result:', emailSent ? 'SUCCESS' : 'FAILED');
+            notifyAsync({
+                userId: professional._id.toString(),
+                eventKey: 'professional.project_published',
+                entityType: 'project',
+                entityId: String(project._id),
+                context: { projectTitle: project.title },
+            });
         } else {
             console.log('No email sent - professional or email not found');
         }
@@ -226,6 +234,13 @@ export const rejectProject = async (req: Request, res: Response) => {
                 String(project._id)
             );
             console.log('Rejection email send result:', emailSent ? 'SUCCESS' : 'FAILED');
+            notifyAsync({
+                userId: professional._id.toString(),
+                eventKey: 'professional.project_rejected',
+                entityType: 'project',
+                entityId: String(project._id),
+                context: { projectTitle: project.title, reason: feedback },
+            });
         } else {
             console.log('No email sent - professional or email not found');
         }
@@ -324,6 +339,13 @@ export const deactivateProject = async (req: Request, res: Response) => {
                 reason,
                 String(project._id)
             );
+            notifyAsync({
+                userId: professional._id.toString(),
+                eventKey: 'professional.project_suspended',
+                entityType: 'project',
+                entityId: String(project._id),
+                context: { projectTitle: project.title, reason },
+            });
         }
 
         res.json({ message: 'Project deactivated', project });

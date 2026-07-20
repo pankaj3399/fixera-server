@@ -1948,6 +1948,35 @@ export const sendProfessionalCompletedEmail = async (
   });
 };
 
+// Professional started work → customer
+export const sendBookingStartedEmail = async (
+  custEmail: string,
+  custName: string,
+  profName: string,
+  bookingId: string
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Work Has Started')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(profName)}</strong> has started work on your booking.
+        </p>
+        <p style="color: #666; line-height: 1.6;">
+          You can follow progress and message the professional from your booking page.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Booking', '#2563eb')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(custEmail, 'Work Has Started - Fixtract', content, {
+    template: 'booking_started',
+    relatedBooking: bookingId,
+  });
+};
+
 // Customer confirmed completion → professional
 export const sendCustomerConfirmedCompletionEmail = async (
   profEmail: string,

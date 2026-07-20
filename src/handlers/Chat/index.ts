@@ -7,8 +7,7 @@ import ChatReport from "../../models/chatReport";
 import User from "../../models/user";
 import { generateFileName, uploadToS3, validateImageFile, validateFile, validateVideoFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
 import type { IChatAttachment } from "../../models/chatMessage";
-import { sendPushToUser } from "../../utils/fcmService";
-import { getFrontendUrl } from "../../utils/frontendUrl";
+import { notifyAsync } from "../../utils/notifications/notify";
 import { params } from "../../utils/requestParams";
 
 const toObjectId = (value: string) =>
@@ -533,13 +532,17 @@ export const sendMessage = async (req: Request, res: Response) => {
     const senderName = req.user?.name ?? 'Someone';
     const previewText = text ? (text.length > 80 ? text.slice(0, 80) + '…' : text) : '📎 Attachment';
 
-    sendPushToUser(recipientId, {
-      title: `New message from ${senderName}`,
-      body: previewText,
-      type: 'messages',
-      clickUrl: `${getFrontendUrl()}/chat?conversationId=${conversationId}`,
-      data: { conversationId },
-    }).catch(() => { /* never block the response */ });
+    notifyAsync({
+      userId: recipientId,
+      eventKey: 'user.chat_message',
+      entityType: 'conversation',
+      entityId: conversationId,
+      context: {
+        actorName: senderName,
+        previewText,
+        conversationId,
+      },
+    });
   }
 
   return res.status(201).json({

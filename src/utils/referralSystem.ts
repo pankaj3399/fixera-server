@@ -188,6 +188,18 @@ export const processReferralCompletion = async (
   if (rewardAmount <= 0) {
     await User.findByIdAndUpdate(referral.referrer, { $inc: { completedReferrals: 1 } });
     console.log(`Referral completed: referrer=${referral.referrer} (${rewardType}), reward amount is 0 — no points issued`);
+    try {
+      const { notifyAsync } = await import('./notifications/notify');
+      notifyAsync({
+        userId: referral.referrer.toString(),
+        eventKey: referrer.role === 'professional' ? 'professional.referral_rewarded' : 'customer.referral_completed',
+        entityType: 'referral',
+        entityId: referral._id.toString(),
+        context: {},
+      });
+    } catch (notifyErr) {
+      console.error('Failed to notify referral reward:', notifyErr);
+    }
     return { completed: true };
   }
 
@@ -209,6 +221,22 @@ export const processReferralCompletion = async (
     });
 
     console.log(`Referral completed: referrer=${referral.referrer} (${rewardType}) earned ${rewardAmount} points for referred user=${userId}`);
+
+    try {
+      const { notifyAsync } = await import('./notifications/notify');
+      const eventKey = referrer.role === 'professional'
+        ? 'professional.referral_rewarded'
+        : 'customer.referral_completed';
+      notifyAsync({
+        userId: referral.referrer.toString(),
+        eventKey,
+        entityType: 'referral',
+        entityId: referral._id.toString(),
+        context: {},
+      });
+    } catch (notifyErr) {
+      console.error('Failed to notify referral reward:', notifyErr);
+    }
   } catch (err) {
     await Referral.findByIdAndUpdate(referral._id, {
       $set: { status: 'pending', referrerRewardAmount: 0 },

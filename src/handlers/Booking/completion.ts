@@ -32,10 +32,10 @@ import {
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
 import {
-  sendProfessionalCompletedEmail,
   sendCustomerConfirmedCompletionEmail,
   sendDisputeRaisedEmail,
 } from '../../utils/emailService';
+import { notifyAsync } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 
@@ -356,22 +356,27 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
 
     try {
       const customerUser = updatedBooking.customer ? await User.findById(updatedBooking.customer).lean() : null;
-      const professionalUser = await User.findById(authUser._id).select('email name username').lean();
-      if (customerUser?.email) {
+      const professionalUser = await User.findById(authUser._id).select('email name username businessInfo').lean();
+      if (customerUser?._id) {
         const emailExtraCostTotal = extraCostTotal > 0
           ? (await computeExtraCostCustomerCharge(customerUser, extraCostTotal)).customerChargeAmount
           : extraCostTotal;
-        await sendProfessionalCompletedEmail(
-          customerUser.email,
-          customerUser.name || 'Customer',
-          getProfessionalDisplayName(professionalUser),
-          emailExtraCostTotal,
-          String(updatedBooking._id),
-          (updatedBooking as any).payment?.currency || 'EUR'
-        );
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.completion_requested',
+          entityType: 'booking',
+          entityId: String(updatedBooking._id),
+          context: {
+            bookingId: String(updatedBooking._id),
+            professionalName: getProfessionalDisplayName(professionalUser),
+            extraCostTotal: emailExtraCostTotal,
+            amountLabel: String(emailExtraCostTotal),
+            currency: (updatedBooking as any).payment?.currency || 'EUR',
+          },
+        });
       }
-    } catch (emailError: any) {
-      console.error('Failed to send professional-completed email:', emailError?.message || emailError);
+    } catch (notifyError: any) {
+      console.error('Failed to notify customer of completion request:', notifyError?.message || notifyError);
     }
 
     return res.json({
@@ -695,6 +700,14 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       console.error('Error processing referral completion:', e);
     }
 
+    try {
+      const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
+      const bookingAmount = (finalizedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
+      await updateUserLoyalty(String(finalizedBooking.customer), bookingAmount);
+    } catch (e) {
+      console.error('Error updating customer loyalty:', e);
+    }
+
     const proId = await getProfessionalId(finalizedBooking);
     try {
       if (proId) await updateProfessionalLevel(proId);
@@ -727,6 +740,26 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           customerUser?.name || 'Customer',
           String(finalizedBooking._id)
         );
+      }
+
+      // Ask both parties for reviews
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.review_request',
+          entityType: 'booking',
+          entityId: String(finalizedBooking._id),
+          context: { bookingId: String(finalizedBooking._id) },
+        });
+      }
+      if (proId) {
+        notifyAsync({
+          userId: proId,
+          eventKey: 'professional.review_request',
+          entityType: 'booking',
+          entityId: String(finalizedBooking._id),
+          context: { bookingId: String(finalizedBooking._id) },
+        });
       }
     } catch (emailError: any) {
       console.error('Failed to send customer-confirmed-completion email:', emailError?.message || emailError);
@@ -871,6 +904,24 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
           trimmedReason,
           String(disputedBooking._id)
         );
+      }
+      if (proId) {
+        notifyAsync({
+          userId: proId,
+          eventKey: 'professional.dispute_started',
+          entityType: 'booking',
+          entityId: String(disputedBooking._id),
+          context: { bookingId: String(disputedBooking._id) },
+        });
+      }
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.dispute_started',
+          entityType: 'booking',
+          entityId: String(disputedBooking._id),
+          context: { bookingId: String(disputedBooking._id) },
+        });
       }
     } catch (emailError: any) {
       console.error('Failed to send dispute-raised email:', emailError?.message || emailError);

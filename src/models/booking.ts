@@ -458,6 +458,24 @@ export interface IBooking extends Document {
   bookingNumber: string; // Unique booking reference number (e.g., BK-2024-001234)
   notes?: string; // Internal notes
   professionalCompletedAt?: Date;
+  notificationReminders?: {
+    unfinishedCheckoutLastSentAt?: Date;
+    unfinishedCheckoutCount?: number;
+    rescheduleLastSentAt?: Date;
+    rescheduleCount?: number;
+    refundLastSentAt?: Date;
+    refundCount?: number;
+    completionLastSentAt?: Date;
+    completionCount?: number;
+    completionExtraDueLastSentAt?: Date;
+    completionExtraDueCount?: number;
+    reviewLastSentAt?: Date;
+    reviewRemindersSent?: number;
+    rfqPendingLastSentAt?: Date;
+    rfqPendingCount?: number;
+    notStartedLastSentAt?: Date;
+    notStartedCount?: number;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -1271,7 +1289,25 @@ const BookingSchema = new Schema({
   },
   professionalCompletedAt: {
     type: Date
-  }
+  },
+  notificationReminders: {
+    unfinishedCheckoutLastSentAt: { type: Date },
+    unfinishedCheckoutCount: { type: Number, default: 0 },
+    rescheduleLastSentAt: { type: Date },
+    rescheduleCount: { type: Number, default: 0 },
+    refundLastSentAt: { type: Date },
+    refundCount: { type: Number, default: 0 },
+    completionLastSentAt: { type: Date },
+    completionCount: { type: Number, default: 0 },
+    completionExtraDueLastSentAt: { type: Date },
+    completionExtraDueCount: { type: Number, default: 0 },
+    reviewLastSentAt: { type: Date },
+    reviewRemindersSent: { type: Number, default: 0 },
+    rfqPendingLastSentAt: { type: Date },
+    rfqPendingCount: { type: Number, default: 0 },
+    notStartedLastSentAt: { type: Date },
+    notStartedCount: { type: Number, default: 0 },
+  },
 }, {
   timestamps: true
 });
