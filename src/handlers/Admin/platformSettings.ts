@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import PlatformSettings from "../../models/platformSettings";
 import connecToDatabase from "../../config/db";
 import { IUser } from "../../models/user";
-import { validateVATNumberFormat } from "../../utils/vatValidation";
+import { validateVATNumberFormat, normalizeVATNumberFormat } from "../../utils/vatValidation";
 
 const serializeEInvoicingSettings = (eInvoicing: any = {}) => ({
   peppolEnabled: eInvoicing.peppolEnabled === true,
@@ -74,7 +74,7 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
       if (trimmed && !validateVATNumberFormat(trimmed)) {
         return res.status(400).json({ success: false, msg: 'Invalid company VAT number format' });
       }
-      config.companyVatNumber = trimmed;
+      config.companyVatNumber = trimmed ? normalizeVATNumberFormat(trimmed) : trimmed;
     }
     if (companyAddress && typeof companyAddress === 'object') {
       config.companyAddress = {
