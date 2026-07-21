@@ -150,6 +150,8 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
     user.idProofUploadedAt = new Date();
     user.isIdVerified = false; // Reset verification status when new file is uploaded
     user.idExpiryEmailSentAt = undefined; // Allow expiry reminders to run for the newly uploaded ID
+    user.idExpiryReminderLastSentAt = undefined;
+    user.idExpiryReminderCount = 0;
 
     // If re-uploading ID while approved, trigger re-verification
     if (wasApproved && hadPreviousId) {
@@ -1099,6 +1101,8 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
     // Any ID info update should allow future expiry reminders for the new data
     user.idExpiryEmailSentAt = undefined;
+    user.idExpiryReminderLastSentAt = undefined;
+    user.idExpiryReminderCount = 0;
 
     await user.save({ validateModifiedOnly: true });
 

@@ -34,11 +34,13 @@ import {
   sendRescheduleRequestedEmail,
   sendRescheduleResolvedEmail,
 } from '../../utils/emailService';
+import { notifyAsync } from '../../utils/notifications/notify';
+import { getProfessionalDisplayName } from '../../utils/displayName';
 import { MAX_RESCHEDULES_PER_BOOKING } from '../../constants/booking';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { releaseScheduleSlots } from '../../utils/scheduleRelease';
-import { getProfessionalDisplayName } from '../../utils/displayName';
+import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
 
 const REFUNDABLE_PAYMENT_STATUSES = new Set(['authorized', 'completed', 'partially_refunded']);
@@ -697,26 +699,59 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
 
-        // Process referral completion for the customer
-        try {
-          const bookingAmount = booking.payment?.amount || 0;
-          await processReferralCompletion(booking.customer, booking._id, bookingAmount);
-        } catch (e) {
-          console.error('Error processing referral completion:', e);
-        }
+        if (!finalizeResult.alreadyCompleted) {
+          // Process referral completion for the customer
+          try {
+            const bookingAmount = booking.payment?.amount || 0;
+            await processReferralCompletion(booking.customer, booking._id, bookingAmount);
+          } catch (e) {
+            console.error('Error processing referral completion:', e);
+          }
 
-        // Update professional's level after booking completion
-        const proId = await getProfessionalId(booking);
-        try {
-          if (proId) await updateProfessionalLevel(proId);
-        } catch (e) {
-          console.error('Error updating professional level:', e);
-        }
+          try {
+            const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
+            await updateUserLoyalty(String(booking.customer), booking.payment?.amount || 0);
+          } catch (e) {
+            console.error('Error updating customer loyalty:', e);
+          }
 
-        try {
-          await awardBookingCompletionPoints(proId, booking.customer, booking._id);
-        } catch (e) {
-          console.error('Error awarding booking completion points:', e);
+          // Update professional's level after booking completion
+          const proId = await getProfessionalId(booking);
+          try {
+            if (proId) await updateProfessionalLevel(proId);
+          } catch (e) {
+            console.error('Error updating professional level:', e);
+          }
+
+          try {
+            await awardBookingCompletionPoints(proId, booking.customer, booking._id);
+          } catch (e) {
+            console.error('Error awarding booking completion points:', e);
+          }
+
+          try {
+            const customerId = booking.customer?.toString?.() || String(booking.customer);
+            if (customerId) {
+              notifyAsync({
+                userId: customerId,
+                eventKey: 'customer.review_request',
+                entityType: 'booking',
+                entityId: String(booking._id),
+                context: { bookingId: String(booking._id) },
+              });
+            }
+            if (proId) {
+              notifyAsync({
+                userId: proId,
+                eventKey: 'professional.review_request',
+                entityType: 'booking',
+                entityId: String(booking._id),
+                context: { bookingId: String(booking._id) },
+              });
+            }
+          } catch (e) {
+            console.error('Error sending review request notifications:', e);
+          }
         }
 
         return res.json({
@@ -773,6 +808,13 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           console.error('Error processing referral completion:', e);
         }
 
+        try {
+          const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
+          await updateUserLoyalty(String(booking.customer), booking.payment?.amount || 0);
+        } catch (e) {
+          console.error('Error updating customer loyalty:', e);
+        }
+
         // Update professional's level after booking completion
         const proId2 = await getProfessionalId(booking);
         try {
@@ -785,6 +827,30 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           await awardBookingCompletionPoints(proId2, booking.customer, booking._id);
         } catch (e) {
           console.error('Error awarding booking completion points:', e);
+        }
+
+        try {
+          const customerId = booking.customer?.toString?.() || String(booking.customer);
+          if (customerId) {
+            notifyAsync({
+              userId: customerId,
+              eventKey: 'customer.review_request',
+              entityType: 'booking',
+              entityId: String(booking._id),
+              context: { bookingId: String(booking._id) },
+            });
+          }
+          if (proId2) {
+            notifyAsync({
+              userId: proId2,
+              eventKey: 'professional.review_request',
+              entityType: 'booking',
+              entityId: String(booking._id),
+              context: { bookingId: String(booking._id) },
+            });
+          }
+        } catch (e) {
+          console.error('Error sending review request notifications:', e);
         }
 
         return res.json({
@@ -823,6 +889,40 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
     }
 
     await booking.save();
+
+    if (
+      requestedStatus === 'in_progress' &&
+      previousStatus !== 'in_progress'
+    ) {
+      const customerId =
+        booking.customer?._id?.toString?.() || booking.customer?.toString?.();
+      if (customerId) {
+        let professionalName = 'Your professional';
+        try {
+          const professionalId = await getProfessionalId(booking);
+          if (professionalId) {
+            const professionalUser = await User.findById(professionalId)
+              .select('name username businessInfo')
+              .lean();
+            if (professionalUser) {
+              professionalName = getProfessionalDisplayName(professionalUser);
+            }
+          }
+        } catch {
+          // non-critical
+        }
+        notifyAsync({
+          userId: customerId,
+          eventKey: 'customer.booking_started',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            professionalName,
+          },
+        });
+      }
+    }
 
     res.json({
       success: true,
@@ -1217,6 +1317,24 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           String(booking._id)
         );
       }
+      // Notify the party who must respond (not the requester)
+      if (isProfessional && customerId) {
+        notifyAsync({
+          userId: customerId,
+          eventKey: 'customer.reschedule_requested',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: { bookingId: String(booking._id) },
+        });
+      } else if (isCustomer && professionalId) {
+        notifyAsync({
+          userId: professionalId,
+          eventKey: 'professional.reschedule_requested',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: { bookingId: String(booking._id) },
+        });
+      }
     } catch (emailError: any) {
       console.error('Failed to send reschedule-requested email:', emailError?.message || emailError);
     }
@@ -1420,6 +1538,18 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
             typeof note === 'string' ? note.trim() : undefined,
             String(booking._id)
           );
+        }
+        if (normalizedAction === 'accept') {
+          const professionalId = professional._id?.toString?.() || professional.id;
+          if (professionalId) {
+            notifyAsync({
+              userId: professionalId,
+              eventKey: 'professional.reschedule_accepted',
+              entityType: 'booking',
+              entityId: String(booking._id),
+              context: { bookingId: String(booking._id) },
+            });
+          }
         }
       } catch (emailError: any) {
         console.error('Failed to send reschedule-resolved email:', emailError?.message || emailError);

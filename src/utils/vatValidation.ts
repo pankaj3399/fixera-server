@@ -1,11 +1,27 @@
+/**
+ * EU VAT format checks used for settings / B2B gating.
+ *
+ * Belgian numbers are always BE + 10 digits. Enterprise numbers may start with
+ * 0 (legacy) or 1 (current KBO/BCE range). The old pattern `BE0?\d{9}` wrongly
+ * rejected valid `BE1…` numbers such as BE1002103337.
+ */
+export function normalizeVATNumberFormat(vatNumber: string): string {
+  const cleaned = vatNumber.replace(/[\s.-]/g, '').toUpperCase();
+  // Legacy BE numbers sometimes omit the leading 0 (9 digits after country code).
+  if (/^BE\d{9}$/.test(cleaned)) {
+    return `BE0${cleaned.slice(2)}`;
+  }
+  return cleaned;
+}
+
 export function validateVATNumberFormat(vatNumber: string | null): boolean {
   if (!vatNumber) return false;
 
-  const cleaned = vatNumber.replace(/\s/g, "").toUpperCase();
+  const cleaned = normalizeVATNumberFormat(vatNumber);
   const countryCode = cleaned.slice(0, 2);
   const perCountryPatterns: Record<string, RegExp> = {
     AT: /^ATU\d{8}$/,
-    BE: /^BE0?\d{9}$/,
+    BE: /^BE[01]\d{9}$/,
     BG: /^BG\d{9,10}$/,
     CY: /^CY\d{8}[A-Z]$/,
     CZ: /^CZ\d{8,10}$/,

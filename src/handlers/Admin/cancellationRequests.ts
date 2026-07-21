@@ -245,29 +245,53 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
         freshBooking.customer ? User.findById(freshBooking.customer).select("email name").lean() : null,
         freshBooking.professional ? User.findById(freshBooking.professional).select("email name businessInfo username").lean() : null,
       ]);
-      if (customerUser?.email && professionalUser?.email) {
-        await sendBookingCancelledEmail(
-          customerUser.email,
-          professionalUser.email,
-          customerUser.name || "Customer",
-          getProfessionalDisplayName(professionalUser),
-          cancellation.reason,
-          "admin",
-          String(freshBooking._id)
-        );
+      try {
+        if (customerUser?.email && professionalUser?.email) {
+          await sendBookingCancelledEmail(
+            customerUser.email,
+            professionalUser.email,
+            customerUser.name || "Customer",
+            getProfessionalDisplayName(professionalUser),
+            cancellation.reason,
+            "admin",
+            String(freshBooking._id)
+          );
+        }
+        if (customerUser?.email && refundAmount > 0) {
+          await sendRefundProcessedEmail(
+            customerUser.email,
+            customerUser.name || "Customer",
+            refundAmount,
+            freshBooking.payment?.currency || "EUR",
+            refundAmount < totalWithVat,
+            String(freshBooking._id)
+          );
+        }
+      } catch (emailError: any) {
+        console.error("Approve cancellation email error:", emailError?.message || emailError);
       }
-      if (customerUser?.email && refundAmount > 0) {
-        await sendRefundProcessedEmail(
-          customerUser.email,
-          customerUser.name || "Customer",
-          refundAmount,
-          freshBooking.payment?.currency || "EUR",
-          refundAmount < totalWithVat,
-          String(freshBooking._id)
-        );
+
+      const { notifyAsync } = await import("../../utils/notifications/notify");
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: "customer.booking_cancelled_refunded",
+          entityType: "booking",
+          entityId: String(freshBooking._id),
+          context: { bookingId: String(freshBooking._id) },
+        });
       }
-    } catch (emailError: any) {
-      console.error("Approve cancellation email error:", emailError?.message || emailError);
+      if (professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: "professional.booking_cancelled_refunded",
+          entityType: "booking",
+          entityId: String(freshBooking._id),
+          context: { bookingId: String(freshBooking._id) },
+        });
+      }
+    } catch (notifyError: any) {
+      console.error("Approve cancellation notify error:", notifyError?.message || notifyError);
     }
 
     await auditLog({

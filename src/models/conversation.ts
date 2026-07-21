@@ -25,6 +25,7 @@ export interface IConversation extends Document {
   lastMessageSenderId?: Types.ObjectId;
   customerUnreadCount: number;
   professionalUnreadCount: number;
+  unreadChatReminderLastSentAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -101,6 +102,10 @@ const ConversationSchema = new Schema<IConversation>(
       default: 0,
       min: 0,
       required: true,
+    },
+    unreadChatReminderLastSentAt: {
+      type: Date,
+      required: false,
     },
     starredBy: {
       type: [{ type: Schema.Types.ObjectId, ref: "User" }],

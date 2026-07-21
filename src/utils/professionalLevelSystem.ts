@@ -5,6 +5,28 @@ import PointTransaction from '../models/pointTransaction';
 import ProfessionalLevelConfig, { ProfessionalLevelName } from '../models/professionalLevelConfig';
 import { deductPoints } from './pointsSystem';
 
+const PROFESSIONAL_LEVEL_RANK: Record<ProfessionalLevelName, number> = {
+  New: 0,
+  'Level 1': 1,
+  'Level 2': 2,
+  'Level 3': 3,
+  Expert: 4,
+};
+
+async function isProfessionalLevelUpgrade(
+  oldLevel: string,
+  newLevel: string,
+  _opts?: { session?: mongoose.ClientSession },
+): Promise<boolean> {
+  const oldRank = PROFESSIONAL_LEVEL_RANK[oldLevel as ProfessionalLevelName];
+  const newRank = PROFESSIONAL_LEVEL_RANK[newLevel as ProfessionalLevelName];
+  if (oldRank === undefined || newRank === undefined) {
+    // Unknown custom names: treat change as upgrade only when different and new isn't "New"
+    return oldLevel !== newLevel && newLevel !== 'New';
+  }
+  return newRank > oldRank;
+}
+
 export interface ProfessionalMetrics {
   completedBookings: number;
   daysActive: number;
@@ -231,16 +253,16 @@ export const calculateProfessionalLevel = async (
 export const updateProfessionalLevel = async (
   professionalId: mongoose.Types.ObjectId | string,
   opts?: { session?: mongoose.ClientSession }
-): Promise<{ levelChanged: boolean; oldLevel: string; newLevel: string }> => {
+): Promise<{ levelChanged: boolean; oldLevel: string; newLevel: string; leveledUp: boolean }> => {
   const findOpts = opts?.session ? { session: opts.session } : {};
   const user = await User.findById(professionalId, null, findOpts);
   if (!user) {
     console.warn(`Professional Level: User not found for professionalId=${professionalId}, skipping level update`);
-    return { levelChanged: false, oldLevel: 'New', newLevel: 'New' };
+    return { levelChanged: false, oldLevel: 'New', newLevel: 'New', leveledUp: false };
   }
   if (user.role !== 'professional') {
     console.warn(`Professional Level: User ${professionalId} has role="${user.role}", expected "professional", skipping level update`);
-    return { levelChanged: false, oldLevel: 'New', newLevel: 'New' };
+    return { levelChanged: false, oldLevel: 'New', newLevel: 'New', leveledUp: false };
   }
 
   const oldLevel = user.professionalLevel || 'New';
@@ -252,21 +274,39 @@ export const updateProfessionalLevel = async (
     return {
       levelChanged: oldLevel !== user.manualProfessionalLevelOverride,
       oldLevel,
-      newLevel: user.manualProfessionalLevelOverride
+      newLevel: user.manualProfessionalLevelOverride,
+      leveledUp: false,
     };
   }
   const levelInfo = await calculateProfessionalLevel(professionalId, opts);
+  const leveledUp = await isProfessionalLevelUpgrade(oldLevel, levelInfo.currentLevel, opts);
 
   if (oldLevel !== levelInfo.currentLevel) {
     user.professionalLevel = levelInfo.currentLevel;
     await user.save(opts?.session ? { session: opts.session } : {});
-    console.log(`Professional Level: ${user.email} ${oldLevel} -> ${levelInfo.currentLevel}`);
+    console.log(`Professional Level: ${professionalId} ${oldLevel} -> ${levelInfo.currentLevel}`);
+    // Defer notify when inside a transaction — caller must flush after commit.
+    if (leveledUp && !opts?.session) {
+      try {
+        const { notifyAsync } = await import('./notifications/notify');
+        notifyAsync({
+          userId: professionalId.toString(),
+          eventKey: 'professional.leveling_up',
+          entityType: 'user',
+          entityId: professionalId.toString(),
+          context: { levelName: levelInfo.currentLevel },
+        });
+      } catch (notifyErr) {
+        console.error('Failed to notify professional level-up:', notifyErr);
+      }
+    }
   }
 
   return {
     levelChanged: oldLevel !== levelInfo.currentLevel,
     oldLevel,
-    newLevel: levelInfo.currentLevel
+    newLevel: levelInfo.currentLevel,
+    leveledUp,
   };
 };
 
@@ -302,6 +342,7 @@ export const applyPointsBoost = async (
   const session = await mongoose.startSession();
   try {
     let levelChanged = false;
+    let leveledUp = false;
     let newLevel = 'New';
 
     await session.withTransaction(async () => {
@@ -316,8 +357,25 @@ export const applyPointsBoost = async (
       // Recalculate level within same transaction
       const result = await updateProfessionalLevel(professionalId, { session });
       levelChanged = result.levelChanged;
+      leveledUp = result.leveledUp;
       newLevel = result.newLevel;
     });
+
+    // Notify only after commit, and only for upward transitions
+    if (leveledUp) {
+      try {
+        const { notifyAsync } = await import('./notifications/notify');
+        notifyAsync({
+          userId: professionalId.toString(),
+          eventKey: 'professional.leveling_up',
+          entityType: 'user',
+          entityId: professionalId.toString(),
+          context: { levelName: newLevel },
+        });
+      } catch (notifyErr) {
+        console.error('Failed to notify professional level-up after boost:', notifyErr);
+      }
+    }
 
     return { boostedBookings, newLevel, levelChanged };
   } finally {

@@ -180,6 +180,18 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
           },
           $inc: { professionalUnreadCount: 1 },
         });
+
+        const { notifyAsync } = await import('../../utils/notifications/notify');
+        notifyAsync({
+          userId: professionalId,
+          eventKey: 'professional.review_received',
+          entityType: 'booking',
+          entityId: bookingId,
+          context: {
+            bookingId,
+            actorName: customer?.name || 'Customer',
+          },
+        });
       }
     } catch (notifError) {
       console.error("Failed to send review notification in chat:", notifError);
@@ -249,6 +261,27 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
     };
 
     await booking.save();
+
+    try {
+      const customerId = booking.customer?.toString();
+      if (customerId) {
+        const { notifyAsync } = await import('../../utils/notifications/notify');
+        const professional = await User.findById(userId).select('name username businessInfo').lean();
+        const { getProfessionalDisplayName } = await import('../../utils/displayName');
+        notifyAsync({
+          userId: customerId,
+          eventKey: 'customer.review_received',
+          entityType: 'booking',
+          entityId: bookingId,
+          context: {
+            bookingId,
+            actorName: getProfessionalDisplayName(professional),
+          },
+        });
+      }
+    } catch (notifyErr) {
+      console.error('Failed to notify customer of professional review:', notifyErr);
+    }
 
     return res.status(200).json({
       success: true,

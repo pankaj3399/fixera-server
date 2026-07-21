@@ -14,8 +14,7 @@ import { sendBookingCancelledEmail, sendCancellationRequestRaisedEmail } from ".
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
-import { sendPushToUser } from "../../utils/fcmService";
-import { getFrontendUrl } from "../../utils/frontendUrl";
+import { notifyAsync } from "../../utils/notifications/notify";
 import { IUser } from "../../models/user";
 import { applyB2BInvoiceRule, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
@@ -811,14 +810,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     // Notify the professional (non-blocking)
     const notifyProfessionalId = populated.professional?._id?.toString();
     if (notifyProfessionalId) {
-      void sendPushToUser(notifyProfessionalId, {
-        title: '📋 New Booking Request',
-        body: `${populated.customer.name} has sent you a new booking request`,
-        type: 'booking_updates',
-        clickUrl: `${getFrontendUrl()}/bookings/${populated._id.toString()}`,
-        data: { bookingId: populated._id.toString() },
-      }).catch((err: unknown) => {
-        console.warn('FCM notify professional failed (non-critical):', err);
+      notifyAsync({
+        userId: notifyProfessionalId,
+        eventKey: 'professional.rfq_received',
+        entityType: 'booking',
+        entityId: populated._id.toString(),
+        context: {
+          bookingId: populated._id.toString(),
+          customerName: populated.customer?.name,
+          projectTitle: (populated as any).project?.title,
+        },
       });
     }
 
@@ -1561,6 +1562,34 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
         otherPartyEmail: otherPartyEmail || undefined,
         otherPartyName,
       });
+
+      // Inbox + push for both parties (email to other party already sent above)
+      if (isCustomer && professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: 'professional.refund_request',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: { bookingId: String(booking._id) },
+        });
+        if (customerUser?._id) {
+          notifyAsync({
+            userId: customerUser._id.toString(),
+            eventKey: 'customer.refund_negotiation',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: { bookingId: String(booking._id) },
+          });
+        }
+      } else if (!isCustomer && customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.refund_negotiation',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: { bookingId: String(booking._id) },
+        });
+      }
     } catch (emailError: any) {
       console.error('Failed to send cancellation-request-raised email:', emailError?.message || emailError);
     }

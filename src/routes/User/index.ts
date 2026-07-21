@@ -43,6 +43,12 @@ import { getProfessionalFavoriteStats, dismissFavoriteNotifications } from "../.
 import { exportMyData } from "../../handlers/User/dataExport";
 import { deleteMyAccount } from "../../handlers/User/accountManagement";
 import { registerFcmToken, unregisterFcmToken, getNotificationPreferences, updateNotificationPreferences } from "../../handlers/User/fcmHandler";
+import {
+  listNotifications,
+  getUnreadNotificationCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+} from "../../handlers/User/notificationInbox";
 import { submitBacklink, listBacklinks, getBacklinkStats, getBacklinkById } from "../../handlers/User/backlinkManagement";
 
 const userRouter = Router();
@@ -149,6 +155,12 @@ userRouter.route("/me/account").delete(deleteMyAccount)
 // FCM push notifications
 userRouter.route("/fcm/token").post(registerFcmToken).delete(unregisterFcmToken)
 userRouter.route("/notification-preferences").get(getNotificationPreferences).patch(updateNotificationPreferences)
+
+// In-app notification inbox
+userRouter.route("/notifications").get(listNotifications)
+userRouter.route("/notifications/unread-count").get(getUnreadNotificationCount)
+userRouter.route("/notifications/read-all").post(markAllNotificationsRead)
+userRouter.route("/notifications/:id/read").patch(markNotificationRead)
 
 // Backlink Rewards Routes
 userRouter.route("/backlinks/submit").post(submitBacklink)
