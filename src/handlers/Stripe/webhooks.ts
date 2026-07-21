@@ -355,12 +355,11 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
       const amountPaid = (booking.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
       const currency = (paymentIntent.currency || 'EUR').toUpperCase();
       try {
-        if (customerUser?.email && professionalUser?.email) {
+        if (customerUser?.email) {
           await sendPaymentConfirmedEmail(
             customerUser.email,
-            professionalUser.email,
             customerUser.name || 'Customer',
-            getProfessionalDisplayName(professionalUser),
+            professionalUser ? getProfessionalDisplayName(professionalUser) : 'Professional',
             amountPaid,
             String(booking._id),
             currency

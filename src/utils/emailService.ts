@@ -1725,7 +1725,6 @@ const formatDateTime = (value: Date | string | null | undefined): string => {
 // Payment confirmed → both parties
 export const sendPaymentConfirmedEmail = async (
   custEmail: string,
-  profEmail: string,
   custName: string,
   profName: string,
   amount: number,
@@ -1754,8 +1753,6 @@ export const sendPaymentConfirmedEmail = async (
     </div>
   `;
   // Professional "new booking" mail is sent via notify(professional.booking_created).
-  // Keep this helper customer-only so pros are not double-emailed.
-  void profEmail;
   return sendEmail(custEmail, 'Payment Confirmed - Fixtract', custContent, {
     template: 'payment_confirmed',
     relatedBooking: bookingId,

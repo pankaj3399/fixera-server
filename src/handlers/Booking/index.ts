@@ -31,19 +31,21 @@ const applyProceedAtStandardVatIfRequested = (
   const standardRate = Number.isFinite(vatDecision.standardRate)
     ? vatDecision.standardRate
     : vatDecision.appliedRate ?? 21;
-  return applyB2BInvoiceRule(
-    {
-      ...vatDecision,
-      action: "standard_rate",
-      appliedRate: standardRate,
-      reverseCharge: false,
-      explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
-      matchedRuleText: undefined,
-    },
+  const overrideFields = {
+    action: "standard_rate" as const,
+    appliedRate: standardRate,
+    reverseCharge: false,
+    explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
+    matchedRuleText: undefined,
+  };
+  const afterB2B = applyB2BInvoiceRule(
+    { ...vatDecision, ...overrideFields },
     customer?.customerType,
     customer?.vatNumber,
     customer?.isVatVerified
   );
+  // Customer's explicit standard-rate choice overrides B2B reverse-charge.
+  return { ...afterB2B, ...overrideFields };
 };
 
 const presignMaybeS3Url = async (url?: string | null) => {
