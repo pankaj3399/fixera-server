@@ -19,6 +19,35 @@ import { IUser } from "../../models/user";
 import { applyB2BInvoiceRule, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 
+/** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
+const applyProceedAtStandardVatIfRequested = (
+  vatDecision: any,
+  requested: boolean,
+  customer: { customerType?: string; vatNumber?: string | null; isVatVerified?: boolean } | null | undefined
+) => {
+  if (!requested || !vatDecision || vatDecision.action !== "rfq" || vatDecision.reverseCharge) {
+    return vatDecision;
+  }
+  const standardRate = Number.isFinite(vatDecision.standardRate)
+    ? vatDecision.standardRate
+    : vatDecision.appliedRate ?? 21;
+  const overrideFields = {
+    action: "standard_rate" as const,
+    appliedRate: standardRate,
+    reverseCharge: false,
+    explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
+    matchedRuleText: undefined,
+  };
+  const afterB2B = applyB2BInvoiceRule(
+    { ...vatDecision, ...overrideFields },
+    customer?.customerType,
+    customer?.vatNumber,
+    customer?.isVatVerified
+  );
+  // Customer's explicit standard-rate choice overrides B2B reverse-charge.
+  return { ...afterB2B, ...overrideFields };
+};
+
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
   const signed = await presignS3Url(url);
@@ -297,12 +326,18 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       paymentAtCheckout,
       serviceConfigurationId,
       vatAnswers,
+      proceedAtStandardVat,
     } = req.body;
     const paymentAtCheckoutRequested =
       paymentAtCheckout === true ||
       paymentAtCheckout === 1 ||
       paymentAtCheckout === "1" ||
       paymentAtCheckout === "true";
+    const proceedAtStandardVatRequested =
+      proceedAtStandardVat === true ||
+      proceedAtStandardVat === 1 ||
+      proceedAtStandardVat === "1" ||
+      proceedAtStandardVat === "true";
 
     // Validate required fields
     if (!bookingType || (bookingType !== 'professional' && bookingType !== 'project')) {
@@ -440,7 +475,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         isVatVerified: customer.isVatVerified,
       });
       bookingData.vatDecision = {
-        ...vatDecision,
+        ...applyProceedAtStandardVatIfRequested(vatDecision, proceedAtStandardVatRequested, customer),
         answers: Object.entries(normalizedVatAnswers).map(([fieldName, value]) => ({ fieldName, value })),
       };
     } else {
@@ -509,7 +544,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         isVatVerified: customer.isVatVerified,
       });
       bookingData.vatDecision = {
-        ...vatDecision,
+        ...applyProceedAtStandardVatIfRequested(vatDecision, proceedAtStandardVatRequested, customer),
         answers: Object.entries(normalizedVatAnswers).map(([fieldName, value]) => ({ fieldName, value })),
       };
 
