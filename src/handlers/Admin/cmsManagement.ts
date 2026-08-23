@@ -27,6 +27,7 @@ import {
   applyCoverImageAltUpdate,
   coverImageAltForCreate,
 } from "../../utils/cmsCoverImageAlt";
+import { sanitizeCmsActiveCountries } from "../../utils/cms/activeCountries";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 
@@ -396,6 +397,7 @@ export const createCmsContent = async (req: Request, res: Response) => {
       relatedContent: sanitizeObjectIdArray(body.relatedContent),
       relatedServices: sanitizeObjectIdArray(body.relatedServices),
       relatedServiceSlug,
+      activeCountries: sanitizeCmsActiveCountries(body.activeCountries),
     });
 
     const fallback = doc.toObject() as Record<string, any>;
@@ -539,6 +541,10 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       } else {
         doc.relatedServiceSlug = undefined;
       }
+    }
+
+    if (Array.isArray(body.activeCountries)) {
+      doc.activeCountries = sanitizeCmsActiveCountries(body.activeCountries);
     }
 
     await doc.save();

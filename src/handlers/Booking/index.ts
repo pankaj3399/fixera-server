@@ -963,9 +963,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       { path: 'project', select: 'title description subprojects.pricing' }
     ]);
 
-    // Notify the professional (non-blocking)
+    // Notify the professional for RFQ requests only — checkout bookings notify after payment.
     const notifyProfessionalId = populated.professional?._id?.toString();
-    if (notifyProfessionalId) {
+    if (notifyProfessionalId && populated.status === "rfq") {
       await notify({
         userId: notifyProfessionalId,
         eventKey: 'professional.rfq_received',

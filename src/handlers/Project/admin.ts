@@ -177,7 +177,7 @@ export const approveProject = async (req: Request, res: Response) => {
                 eventKey: 'professional.project_published',
                 entityType: 'project',
                 entityId: String(project._id),
-                context: { projectTitle: project.title },
+                context: { projectTitle: project.title, projectId: String(project._id) },
             });
         } else {
             console.log('No email sent - professional or email not found');
@@ -243,7 +243,7 @@ export const rejectProject = async (req: Request, res: Response) => {
                 eventKey: 'professional.project_rejected',
                 entityType: 'project',
                 entityId: String(project._id),
-                context: { projectTitle: project.title, reason: feedback },
+                context: { projectTitle: project.title, reason: feedback, projectId: String(project._id) },
             });
         } else {
             console.log('No email sent - professional or email not found');
@@ -350,7 +350,7 @@ export const deactivateProject = async (req: Request, res: Response) => {
                 eventKey: 'professional.project_suspended',
                 entityType: 'project',
                 entityId: String(project._id),
-                context: { projectTitle: project.title, reason },
+                context: { projectTitle: project.title, reason, projectId: String(project._id) },
             });
         }
 

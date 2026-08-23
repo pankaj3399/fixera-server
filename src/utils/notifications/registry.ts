@@ -823,7 +823,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       body: ctx.projectTitle
         ? `"${ctx.projectTitle}" is now live.`
         : 'Your project has been published.',
-      clickUrl: frontend('/professional/projects'),
+      clickUrl: frontend(`/professional/projects/${ctx.projectId || ''}`),
     }),
     'project',
   ),
@@ -837,7 +837,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       body: ctx.projectTitle
         ? `"${ctx.projectTitle}" was rejected${ctx.reason ? `: ${ctx.reason}` : '.'}`
         : 'Your project was rejected.',
-      clickUrl: frontend('/professional/projects'),
+      clickUrl: frontend(`/professional/projects/${ctx.projectId || ''}`),
     }),
     'project',
   ),
@@ -851,7 +851,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       body: ctx.projectTitle
         ? `"${ctx.projectTitle}" has been suspended.`
         : 'One of your projects was suspended.',
-      clickUrl: frontend('/professional/projects'),
+      clickUrl: frontend(`/professional/projects/${ctx.projectId || ''}`),
     }),
     'project',
   ),
