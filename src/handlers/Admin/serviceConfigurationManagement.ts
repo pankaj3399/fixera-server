@@ -3,7 +3,7 @@ import ServiceConfiguration from '../../models/serviceConfiguration';
 import CmsContent from '../../models/cmsContent';
 import { IUser } from '../../models/user';
 import { toSlug } from '../../utils/slug';
-import { withArticle47ProfessionalQuestion } from '../../utils/vatManagement';
+import { withArticle47ProfessionalQuestion, ARTICLE_47_FIELD_NAME, resolveArticle47Classification, normalizeArticle47Classification, DEFAULT_ARTICLE_47_CLASSIFICATION } from '../../utils/vatManagement';
 
 function respondWithSchemaError(res: Response, error: any, fallbackMessage: string) {
     if (error?.name === 'ValidationError' && error.errors) {
@@ -134,11 +134,15 @@ const validateVatManagement = (vatManagement: any): string | null => {
         return 'VAT management requires an explicit Article 47 classification before it can be enabled.';
     }
 
+    const article47Classification = resolveArticle47Classification(vatManagement.article47Classification);
     const questions = [
       ...(Array.isArray(vatManagement.reducedVatQuestions) ? vatManagement.reducedVatQuestions : []),
       ...(Array.isArray(vatManagement.professionalVatQuestions) ? vatManagement.professionalVatQuestions : []),
     ];
     const fieldNames = new Set<string>();
+    if (article47Classification === 'project_dependent') {
+        fieldNames.add(ARTICLE_47_FIELD_NAME);
+    }
     for (const question of questions) {
         const fieldName = String(question?.fieldName || '').trim();
         if (!fieldName || !String(question?.question || '').trim()) {
@@ -206,6 +210,17 @@ const mergeVatManagement = (existingVatManagement: any, patch: any) => {
     };
 };
 
+const article47ForEnabledVat = (classification: unknown) => {
+    const normalized = normalizeArticle47Classification(
+        typeof classification === 'string' ? classification : undefined,
+    );
+    if (normalized) return normalized;
+    if (classification == null || classification === '') {
+        return DEFAULT_ARTICLE_47_CLASSIFICATION;
+    }
+    return classification;
+};
+
 /**
  * Create a new service configuration
  * @route POST /api/admin/service-configurations
@@ -215,6 +230,10 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
         const configurationData = req.body;
 
         if (configurationData?.vatManagement) {
+            if (configurationData.vatManagement.enabled) {
+                configurationData.vatManagement.article47Classification =
+                    article47ForEnabledVat(configurationData.vatManagement.article47Classification);
+            }
             configurationData.vatManagement.professionalVatQuestions =
                 withArticle47ProfessionalQuestion(configurationData.vatManagement);
         }
@@ -273,6 +292,10 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
 
         if (updateData?.vatManagement !== undefined) {
             updateData.vatManagement = mergeVatManagement(existingConfiguration.vatManagement, updateData.vatManagement);
+            if (updateData.vatManagement.enabled) {
+                updateData.vatManagement.article47Classification =
+                    article47ForEnabledVat(updateData.vatManagement.article47Classification);
+            }
             updateData.vatManagement.professionalVatQuestions =
                 withArticle47ProfessionalQuestion(updateData.vatManagement);
             const vatError = validateVatManagement(updateData.vatManagement);

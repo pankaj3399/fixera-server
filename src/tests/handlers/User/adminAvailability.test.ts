@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { DateTime } from 'luxon';
 import type { IUser } from '../../../models/user';
-import { isAdminAvailableForMeeting } from '../../../handlers/User/adminAvailability';
+import {
+  isAdminAvailableForMeeting,
+  normalizeAvailability,
+  parseClockTime,
+} from '../../../handlers/User/adminAvailability';
 
 const meetingAt = (value: string, timeZone: string) =>
   DateTime.fromISO(value, { zone: timeZone }).toUTC().toJSDate();
@@ -67,5 +71,50 @@ describe('admin support meeting availability', () => {
         60,
       ),
     ).toBe(false);
+  });
+});
+
+describe('admin weekly schedule normalization', () => {
+  it('accepts browser time values that include seconds', () => {
+    const result = normalizeAvailability({
+      saturday: { available: true, startTime: '08:00:00', endTime: '17:00:00' },
+    });
+    expect(result).toEqual({
+      availability: expect.objectContaining({
+        saturday: { available: true, startTime: '08:00', endTime: '17:00' },
+      }),
+    });
+  });
+
+  it('pads single-digit hours so 8:00-17:00 saves', () => {
+    const result = normalizeAvailability({
+      saturday: { available: true, startTime: '8:00', endTime: '17:00' },
+    });
+    expect('availability' in result && result.availability?.saturday).toEqual({
+      available: true,
+      startTime: '08:00',
+      endTime: '17:00',
+    });
+  });
+
+  it('rejects an available day with no times, as happens when the UI toggle does not persist displayed defaults', () => {
+    const result = normalizeAvailability({
+      saturday: { available: true },
+    });
+    expect(result).toEqual({ error: 'Saturday needs a start and end time' });
+  });
+
+  it('rejects equal start and end times with a day-specific message', () => {
+    const result = normalizeAvailability({
+      saturday: { available: true, startTime: '09:00', endTime: '09:00' },
+    });
+    expect(result).toEqual({ error: 'Saturday end time must be after start time' });
+  });
+
+  it('normalizes parseClockTime for seconds and unpadded hours', () => {
+    expect(parseClockTime('08:00:00')).toBe('08:00');
+    expect(parseClockTime('8:00')).toBe('08:00');
+    expect(parseClockTime('09:00')).toBe('09:00');
+    expect(parseClockTime('24:00')).toBeUndefined();
   });
 });

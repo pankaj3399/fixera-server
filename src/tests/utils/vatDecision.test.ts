@@ -104,18 +104,40 @@ describe("resolveVatDecisionFromConfig", () => {
     expect(decision.appliedRate).toBe(21);
   });
 
-  it("requires admin review instead of guessing Article 47 for legacy VAT configs", async () => {
+  it("defaults legacy VAT configs without Article 47 to immovable and applies logic rules", async () => {
     mockConfig({
-      category: "Solar",
-      vatManagement: { enabled: true, reducedVatQuestions: [], logicRules: [] },
+      category: "Interior",
+      service: "Painter & Wallpaperer",
+      vatManagement: {
+        enabled: true,
+        rateRuleGroup: "building_work",
+        reducedVatQuestions: [],
+        logicRules: [
+          {
+            country: "BE",
+            standardRate: 21,
+            reducedRate: 6,
+            conditions: [
+              { fieldName: "building_age", operator: "greater_than_or_equal", value: 10 },
+              { fieldName: "private_housing", operator: "equals", value: "Yes", connector: "AND" },
+            ],
+            action: "reduced_rate",
+            customText: "6% reduced VAT",
+            priority: 1,
+            isActive: true,
+          },
+        ],
+      },
     });
     const decision = await resolveVatDecisionFromConfig({
       serviceConfigurationId: "652f1f77bcf86cd799439011",
       country: "BE",
+      answers: { building_age: 15, private_housing: "Yes" },
       customerType: "individual",
     });
-    expect(decision.action).toBe("rfq");
-    expect(decision.explanation).toContain("Article 47 classification");
+    expect(decision.action).toBe("reduced_rate");
+    expect(decision.appliedRate).toBe(6);
+    expect(decision.propertyNature).toBe("immovable");
   });
 
   it("overrides with reverse charge for verified EU B2B outside exception countries", async () => {

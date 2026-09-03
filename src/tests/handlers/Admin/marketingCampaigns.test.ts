@@ -216,6 +216,36 @@ describe('marketing campaign admin handlers', () => {
     expect(campaignCreate).not.toHaveBeenCalled();
   });
 
+  it('substitutes preview text in an inline test email', async () => {
+    const res = mockRes();
+
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: 'admin@example.com',
+          locale: 'en',
+          campaign: {
+            content: {
+              en: {
+                subject: 'test-equinix',
+                previewText: 'Why Equinix?',
+                htmlContent: '<div>{{ .PreviewText }}</div><p>Body content</p>',
+              },
+            },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(sendTestEmail).toHaveBeenCalledWith(expect.objectContaining({
+      previewText: 'Why Equinix?',
+      htmlContent: expect.stringContaining('Why Equinix?'),
+    }));
+    expect(sendTestEmail.mock.calls[0][0].htmlContent).not.toContain('{{ .PreviewText }}');
+  });
+
   it('validates and renders a remote Brevo template for a test send', async () => {
     getTemplateHtml.mockResolvedValue('<p>Hi {{ contact.FIRSTNAME }},</p><p>Template body</p>');
     const res = mockRes();

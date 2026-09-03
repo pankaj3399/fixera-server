@@ -97,6 +97,7 @@ export type PropertyNature = "movable" | "immovable";
 
 export const REVERSE_CHARGE_LABEL = "Reverse Charge";
 export const ARTICLE_47_FIELD_NAME = "article47_immovable";
+export const DEFAULT_ARTICLE_47_CLASSIFICATION: Article47Classification = "immovable";
 export const ARTICLE_47_QUESTION =
   "Will the work be carried out on a fixed part of the property or on something that will become permanently fixed to the property? (Article 47)";
 
@@ -105,6 +106,20 @@ const KNOWN_COUNTRY_CODES = new Set([
   ...Object.keys(STANDARD_RATES),
   ...Object.values(COUNTRY_ALIASES),
 ]);
+
+export const normalizeArticle47Classification = (
+  classification?: string | null
+): Article47Classification | undefined => {
+  if (classification === "movable" || classification === "immovable" || classification === "project_dependent") {
+    return classification;
+  }
+  return undefined;
+};
+
+/** Legacy VAT configs may omit Article 47; default to immovable (matches admin UI). */
+export const resolveArticle47Classification = (
+  classification?: string | null
+): Article47Classification => normalizeArticle47Classification(classification) ?? DEFAULT_ARTICLE_47_CLASSIFICATION;
 
 /** ISO-2 when recognized; empty string when missing or unknown. Does not default to BE. */
 export const parseVatCountryCode = (country?: string | null): string => {
@@ -191,17 +206,17 @@ export const resolvePropertyNature = (params: {
   classification?: Article47Classification | string | null;
   professionalAnswers?: Record<string, unknown>;
 }): PropertyNature | undefined => {
-  if (params.classification === "immovable") return "immovable";
-  if (params.classification === "movable") return "movable";
-  if (params.classification === "project_dependent") {
+  const classification = normalizeArticle47Classification(params.classification);
+  if (classification === "immovable") return "immovable";
+  if (classification === "movable") return "movable";
+  if (classification === "project_dependent") {
     const answer = params.professionalAnswers?.[ARTICLE_47_FIELD_NAME];
     if (answer === undefined || answer === null || String(answer).trim() === "") {
       return undefined;
     }
     return isTruthyAnswer(answer) ? "immovable" : "movable";
   }
-  const answer = params.professionalAnswers?.[ARTICLE_47_FIELD_NAME];
-  return isTruthyAnswer(answer) ? "immovable" : "movable";
+  return undefined;
 };
 
 export const resolvePlaceOfSupplyCountry = (params: {
@@ -442,10 +457,13 @@ export const resolveVatDecisionFromConfig = async (params: {
     : null;
 
   const vat = config?.vatManagement;
+  const article47Classification = vat?.enabled
+    ? resolveArticle47Classification(vat.article47Classification)
+    : normalizeArticle47Classification(vat?.article47Classification);
   const propertyNature =
     params.propertyNature ??
     resolvePropertyNature({
-      classification: vat?.article47Classification,
+      classification: article47Classification,
       professionalAnswers: params.professionalAnswers,
     });
   const exemptFromBelgianReverseCharge =
@@ -466,7 +484,7 @@ export const resolveVatDecisionFromConfig = async (params: {
   const fallbackRate = getStandardVatRate(country);
   if (
     !params.propertyNature &&
-    vat?.article47Classification === "project_dependent" &&
+    article47Classification === "project_dependent" &&
     propertyNature === undefined
   ) {
     return {
@@ -515,14 +533,6 @@ export const resolveVatDecisionFromConfig = async (params: {
 
   if (!vat?.enabled) {
     return applyB2B(fallback);
-  }
-
-  if (!vat.article47Classification) {
-    return applyB2B({
-      ...fallback,
-      action: "rfq",
-      explanation: "VAT management is enabled but its Article 47 classification has not been reviewed by an administrator.",
-    });
   }
 
   const combinedAnswers = {
@@ -574,7 +584,8 @@ export const withArticle47ProfessionalQuestion = <T extends {
   }>;
 }>(vat: T): NonNullable<T["professionalVatQuestions"]> => {
   const existing = vat.professionalVatQuestions || [];
-  if (vat.article47Classification !== "project_dependent") return existing;
+  const classification = resolveArticle47Classification(vat.article47Classification);
+  if (classification !== "project_dependent") return existing;
   if (existing.some((question) => question.fieldName === ARTICLE_47_FIELD_NAME)) return existing;
   return [
     {

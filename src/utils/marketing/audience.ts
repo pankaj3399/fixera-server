@@ -7,6 +7,7 @@ import MarketingSubscriber, {
 } from '../../models/marketingSubscriber';
 import type { ICampaignAudience } from '../../models/marketingCampaign';
 import { generateUnsubscribeToken } from './unsubscribeToken';
+import { promotionalEmailOptIn, isPromotionalEmailEnabled, toConsentDate } from './promotionalConsent';
 import {
   restoreBrevoMarketingContact,
   suppressBrevoMarketingContact,
@@ -135,9 +136,13 @@ export async function syncSubscribersFromUsers(): Promise<{
       const email = normalizeEmail(user.email);
       if (!email) continue;
 
-      const promotionsEmail = (user as any).notificationPreferences?.promotions?.email;
-      const optedIn =
-        promotionsEmail === true && (user as any).marketingConsentAt instanceof Date;
+      if (isPromotionalEmailEnabled(user.notificationPreferences) && !toConsentDate(user.marketingConsentAt)) {
+        const backfilled = new Date();
+        await User.updateOne({ _id: user._id }, { $set: { marketingConsentAt: backfilled } });
+        (user as { marketingConsentAt?: Date }).marketingConsentAt = backfilled;
+      }
+
+      const { optedIn, consentVerifiedAt } = promotionalEmailOptIn(user);
       const region = userCountry(user);
       const fromBookings = serviceInterestByUser.get(String(user._id)) || [];
       const fromPro =
@@ -183,7 +188,7 @@ export async function syncSubscribersFromUsers(): Promise<{
         locale,
         localeSource: resolvedLocale.source,
         lastEngagedAt,
-        consentVerifiedAt: user.marketingConsentAt,
+        consentVerifiedAt,
       };
       if (typeof user.name === 'string' && user.name.trim()) metadata.name = user.name.trim();
       if (typeof user.name === 'string' && user.name.trim()) metadata.firstName = user.name.trim().split(/\s+/)[0];

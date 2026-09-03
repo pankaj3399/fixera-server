@@ -160,6 +160,7 @@ import {
   adminStartSupportChat,
   adminReplySupportChat,
   adminCloseSupportChat,
+  adminGetConversationParticipant,
   adminGetBookingConversation,
   adminGetSupportUnreadCount,
   adminListSupportConversations,
@@ -376,6 +377,7 @@ adminRouter.route('/conversations/:id').get(adminGetConversation);
 adminRouter.route('/conversations/:id/messages').get(adminGetConversationMessages);
 adminRouter.route('/conversations/:id/reply').post(adminReplySupportChat);
 adminRouter.route('/conversations/:id/close').post(adminCloseSupportChat);
+adminRouter.route('/conversations/:id/participant').get(adminGetConversationParticipant);
 adminRouter.route('/bookings/:bookingId/conversation').get(adminGetBookingConversation);
 adminRouter.route('/chat/start-support').post(adminStartSupportChat);
 

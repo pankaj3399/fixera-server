@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import ServiceConfiguration from '../../models/serviceConfiguration';
-import { withArticle47ProfessionalQuestion } from '../../utils/vatManagement';
+import { withArticle47ProfessionalQuestion, resolveArticle47Classification } from '../../utils/vatManagement';
 
 /**
  * Get service configuration for professional based on category, service, and area of work
@@ -45,8 +45,11 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
             const vatManagement = configObj.vatManagement;
             configObj.vatManagement = {
                 enabled: vatManagement.enabled,
-                article47Classification: vatManagement.article47Classification,
-                professionalVatQuestions: withArticle47ProfessionalQuestion(vatManagement),
+                article47Classification: resolveArticle47Classification(vatManagement.article47Classification),
+                professionalVatQuestions: withArticle47ProfessionalQuestion({
+                    ...vatManagement,
+                    article47Classification: resolveArticle47Classification(vatManagement.article47Classification),
+                }),
             };
         }
         let pricingModels: string[] = [];

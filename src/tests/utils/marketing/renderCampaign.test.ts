@@ -51,4 +51,54 @@ describe('marketing template contract', () => {
 
     expect(result.htmlContent).toContain('Hallo {{ contact.FIRSTNAME }},');
   });
+
+  it('replaces {{ .PreviewText }} and hides the preview as a preheader', () => {
+    const result = renderMarketingEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      content: {
+        subject: 'Why Equinix?',
+        previewText: 'Why Equinix?',
+        htmlContent: '<div style="display:none">{{ .PreviewText }}</div><p>Body</p>',
+      },
+    });
+
+    expect(result.previewText).toBe('Why Equinix?');
+    expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
+    expect(result.htmlContent).toContain('Why Equinix?');
+    expect(result.htmlContent).toContain('data-fixera-preview-text="true"');
+  });
+
+  it('does not treat preview text containing $& as a replacement pattern', () => {
+    const result = renderMarketingEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      content: {
+        subject: 'Sale',
+        previewText: 'Save $& more today',
+        htmlContent: '<div>{{ .PreviewText }}</div><p>Body</p>',
+      },
+    });
+
+    expect(result.previewText).toBe('Save $& more today');
+    expect(result.htmlContent).toContain('Save $&amp; more today');
+    expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
+  });
+
+  it('replaces preview placeholders in remote templates', () => {
+    const result = renderMarketingTemplateEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      templateHtml: '<p>Hi {{ contact.FIRSTNAME }},</p><div>{{ .PreviewText }}</div><p>Body</p>',
+      content: {
+        subject: 'Template',
+        previewText: 'Preview line',
+        htmlContent: '',
+      },
+    });
+
+    expect(result.previewText).toBe('Preview line');
+    expect(result.htmlContent).toContain('Preview line');
+    expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
+  });
 });

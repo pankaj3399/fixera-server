@@ -569,6 +569,8 @@ export const createPaymentIntent = async (
           customerVatVerified: customer.isVatVerified === true,
           professionalCountry: professional.businessInfo?.country,
           customerType: customer.customerType || 'individual',
+          propertyNature: configuredVatDecision?.propertyNature === 'immovable' ? 'immovable' : 'movable',
+          exemptFromBelgianReverseCharge: Boolean(configuredVatDecision?.exemptFromBelgianReverseCharge),
         });
 
     // Calculate amounts

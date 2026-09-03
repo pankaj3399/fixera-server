@@ -9,6 +9,7 @@ import {
   isAllowedOrigin,
 } from '../../utils/fcmTokenUtils';
 import { MARKETING_LOCALES, isMarketingLocale } from '../../utils/marketing/marketingCatalog';
+import { isPromotionalEmailEnabled } from '../../utils/marketing/promotionalConsent';
 
 // ------------------------------------------------------------------
 // Register / Unregister FCM tokens
@@ -168,10 +169,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
     const preferences = { ...(user.notificationPreferences || {}) };
     preferences.promotions = {
       ...(preferences.promotions || {}),
-      email: Boolean(
-        preferences.promotions?.email === true &&
-          user.marketingConsentAt instanceof Date,
-      ),
+      email: isPromotionalEmailEnabled(preferences),
     };
 
     res.status(200).json({
@@ -270,34 +268,65 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       const consentUpdatedAt = new Date();
       if (enabled) {
         await MarketingSuppression.deleteOne({ emailNormalized: normalizedEmail, reason: 'unsubscribe' });
-        await MarketingSubscriber.updateOne(
-          {
-            $or: [
-              { userId: updatedUser._id },
-              { email: normalizedEmail },
-              { emailNormalized: normalizedEmail },
-            ],
-          },
-          {
-            $set: {
+        const existingSubscriber = await MarketingSubscriber.findOne({
+          $or: [
+            { userId: updatedUser._id },
+            { email: normalizedEmail },
+            { emailNormalized: normalizedEmail },
+          ],
+        }).select('_id');
+        if (existingSubscriber) {
+          await MarketingSubscriber.updateOne(
+            { _id: existingSubscriber._id },
+            {
+              $set: {
+                userId: updatedUser._id,
+                email: normalizedEmail,
+                emailNormalized: normalizedEmail,
+                unsubscribedAt: null,
+                subscribedAt: consentUpdatedAt,
+                consentVerifiedAt: consentUpdatedAt,
+              },
+            },
+          );
+        } else {
+          try {
+            await MarketingSubscriber.create({
               userId: updatedUser._id,
+              email: normalizedEmail,
               emailNormalized: normalizedEmail,
               unsubscribedAt: null,
               subscribedAt: consentUpdatedAt,
               consentVerifiedAt: consentUpdatedAt,
-            },
-            $setOnInsert: {
-              email: normalizedEmail,
-              emailNormalized: normalizedEmail,
               interestedServices: [],
               serviceKeys: [],
               locale: 'en',
               unsubscribeToken: generateUnsubscribeToken(),
               source: 'user_sync',
-            },
-          },
-          { upsert: true },
-        );
+            });
+          } catch (error) {
+            if ((error as { code?: unknown })?.code !== 11000) throw error;
+            await MarketingSubscriber.updateOne(
+              {
+                $or: [
+                  { userId: updatedUser._id },
+                  { email: normalizedEmail },
+                  { emailNormalized: normalizedEmail },
+                ],
+              },
+              {
+                $set: {
+                  userId: updatedUser._id,
+                  email: normalizedEmail,
+                  emailNormalized: normalizedEmail,
+                  unsubscribedAt: null,
+                  subscribedAt: consentUpdatedAt,
+                  consentVerifiedAt: consentUpdatedAt,
+                },
+              },
+            );
+          }
+        }
         // Local consent is authoritative immediately, while a previously
         // blacklisted Brevo contact remains outside campaign audiences until
         // this provider reconciliation succeeds (or the daily retry does).

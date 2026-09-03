@@ -5,8 +5,16 @@ import User, { type IUser } from '../../models/user';
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
 type Day = (typeof DAYS)[number];
 
-function isValidTime(value: unknown): value is string {
-  return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+/** Accept HH:mm, H:mm, and browser time values that include seconds. */
+export function parseClockTime(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = value.trim().match(/^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d{1,3})?)?$/);
+  if (!match) return undefined;
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+}
+
+function dayLabel(day: Day): string {
+  return `${day.charAt(0).toUpperCase()}${day.slice(1)}`;
 }
 
 function isValidTimeZone(value: unknown): value is string {
@@ -19,22 +27,33 @@ function isValidTimeZone(value: unknown): value is string {
   }
 }
 
-function normalizeAvailability(input: unknown): IUser['availability'] | null {
-  if (!input || typeof input !== 'object') return null;
+export function normalizeAvailability(
+  input: unknown,
+): { availability: IUser['availability'] } | { error: string } {
+  if (!input || typeof input !== 'object') {
+    return { error: 'Availability and blocked dates/ranges are invalid' };
+  }
   const result: NonNullable<IUser['availability']> = {};
   for (const day of DAYS) {
     const raw = (input as Record<string, any>)[day] || {};
     const available = raw.available === true;
-    if (available && (!isValidTime(raw.startTime) || !isValidTime(raw.endTime) || raw.endTime <= raw.startTime)) {
-      return null;
+    const startTime = parseClockTime(raw.startTime);
+    const endTime = parseClockTime(raw.endTime);
+    if (available) {
+      if (!startTime || !endTime) {
+        return { error: `${dayLabel(day)} needs a start and end time` };
+      }
+      if (endTime <= startTime) {
+        return { error: `${dayLabel(day)} end time must be after start time` };
+      }
     }
     result[day] = {
       available,
-      startTime: available ? raw.startTime : undefined,
-      endTime: available ? raw.endTime : undefined,
+      startTime: available ? startTime : undefined,
+      endTime: available ? endTime : undefined,
     };
   }
-  return result;
+  return { availability: result };
 }
 
 const DATE_INPUT_PATTERN = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
@@ -81,8 +100,9 @@ function normalizeBlockedRanges(input: unknown, timeZone: string) {
 }
 
 function minutesSinceMidnight(value: string | undefined): number | null {
-  if (!value || !isValidTime(value)) return null;
-  const [hours, minutes] = value.split(':').map(Number);
+  const clock = parseClockTime(value);
+  if (!clock) return null;
+  const [hours, minutes] = clock.split(':').map(Number);
   return hours * 60 + minutes;
 }
 
@@ -164,11 +184,14 @@ export const updateAdminAvailability = async (req: Request, res: Response) => {
   const availability = normalizeAvailability(req.body?.availability);
   const blockedDates = normalizeBlockedDates(req.body?.blockedDates, timeZone);
   const blockedRanges = normalizeBlockedRanges(req.body?.blockedRanges, timeZone);
-  if (!availability || !blockedDates || !blockedRanges) {
+  if ('error' in availability) {
+    return res.status(400).json({ success: false, msg: availability.error });
+  }
+  if (!blockedDates || !blockedRanges) {
     return res.status(400).json({ success: false, msg: 'Availability and blocked dates/ranges are invalid' });
   }
 
-  user.availability = availability;
+  user.availability = availability.availability;
   user.blockedDates = blockedDates;
   user.blockedRanges = blockedRanges;
   user.timeZone = timeZone.trim();

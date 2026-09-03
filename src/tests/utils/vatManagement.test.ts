@@ -11,6 +11,7 @@ import {
   parseFlexibleNumber,
   parseVatCountryCode,
   requiresVatRfqReview,
+  resolveArticle47Classification,
   resolvePlaceOfSupplyCountry,
   resolvePropertyNature,
   resolveSupplierB2BInvoiceDecision,
@@ -378,6 +379,14 @@ describe("resolvePropertyNature", () => {
         professionalAnswers: {},
       })
     ).toBeUndefined();
+  });
+
+  it("defaults missing classification to immovable when explicitly resolved", () => {
+    expect(resolveArticle47Classification(undefined)).toBe("immovable");
+    expect(resolveArticle47Classification(null)).toBe("immovable");
+    expect(resolvePropertyNature({ classification: "immovable" })).toBe("immovable");
+    expect(resolvePropertyNature({ classification: null })).toBeUndefined();
+    expect(resolvePropertyNature({})).toBeUndefined();
   });
 });
 

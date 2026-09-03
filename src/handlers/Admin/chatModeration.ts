@@ -5,7 +5,14 @@ import ChatMessage from "../../models/chatMessage";
 import Conversation from "../../models/conversation";
 import Booking from "../../models/booking";
 import User from "../../models/user";
+import Project from "../../models/project";
 import { params } from "../../utils/requestParams";
+import {
+  buildSupportParticipantKpis,
+  escapeRegex,
+  formatChatClosedMessage,
+  normalizeInboxSearch,
+} from "../../utils/adminSupportChat";
 
 const VALID_STATUSES = ["pending", "reviewed", "dismissed"] as const;
 
@@ -228,10 +235,10 @@ export const adminGetConversation = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
     const conversation = await Conversation.findById(id)
-      .populate("customerId", "name email")
-      .populate("professionalId", "name email")
+      .populate("customerId", "name email phone username")
+      .populate("professionalId", "name email phone username professionalLevel")
       .populate("supportAdminId", "name email")
-      .populate("supportTargetUserId", "name email")
+      .populate("supportTargetUserId", "name email phone username role professionalLevel")
       .lean();
     if (!conversation) {
       return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -462,12 +469,196 @@ export const adminCloseSupportChat = async (req: Request, res: Response) => {
     if (!conversation || conversation.type !== "support") {
       return res.status(404).json({ success: false, msg: "Support conversation not found" });
     }
-    conversation.status = "archived";
-    await conversation.save();
+    if (conversation.status === "archived") {
+      return res.json({ success: true, data: { conversationId: conversation._id, status: "archived" } });
+    }
+
+    const closedAt = new Date();
+    const closeText = formatChatClosedMessage(closedAt);
+    const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const [message] = await ChatMessage.create(
+          [
+            {
+              conversationId: conversation._id,
+              senderId: adminObjectId,
+              senderRole: "system",
+              text: closeText,
+              messageType: "text",
+              readBy: [{ userId: adminObjectId, readAt: closedAt }],
+            },
+          ],
+          { session },
+        );
+        const updated = await Conversation.findOneAndUpdate(
+          { _id: conversation._id, type: "support", status: "active" },
+          {
+            $set: {
+              status: "archived",
+              lastMessageAt: message?.createdAt || closedAt,
+              lastMessagePreview: closeText.slice(0, 200),
+              lastMessageSenderId: adminObjectId,
+            },
+          },
+          { session, new: true },
+        );
+        if (!updated) {
+          throw new Error("SUPPORT_CHAT_ALREADY_CLOSED");
+        }
+      });
+    } catch (innerErr: any) {
+      if (innerErr?.message === "SUPPORT_CHAT_ALREADY_CLOSED") {
+        return res.json({ success: true, data: { conversationId: conversation._id, status: "archived" } });
+      }
+      throw innerErr;
+    } finally {
+      session.endSession();
+    }
+
     return res.json({ success: true, data: { conversationId: conversation._id, status: "archived" } });
   } catch (error: any) {
     console.error("Admin close support chat error:", error);
     return res.status(500).json({ success: false, msg: "Failed to close support chat" });
+  }
+};
+
+export const adminGetConversationParticipant = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: "Invalid conversation id" });
+    }
+
+    const conversation = await Conversation.findById(id)
+      .select("type supportTargetUserId professionalId customerId")
+      .lean();
+    if (!conversation) {
+      return res.status(404).json({ success: false, msg: "Conversation not found" });
+    }
+
+    const targetId =
+      conversation.type === "support"
+        ? conversation.supportTargetUserId
+        : conversation.professionalId;
+    if (!targetId) {
+      return res.status(404).json({ success: false, msg: "No participant found for this conversation" });
+    }
+
+    const user = await User.findById(targetId)
+      .select("name email phone username role professionalLevel")
+      .lean();
+    if (!user) {
+      return res.status(404).json({ success: false, msg: "Participant not found" });
+    }
+
+    const bookingMatch =
+      user.role === "professional" ? { professional: user._id } : { customer: user._id };
+
+    const [agg, projectCount] = await Promise.all([
+      Booking.aggregate([
+        { $match: bookingMatch },
+        {
+          $group: {
+            _id: null,
+            bookingCount: { $sum: 1 },
+            completedCount: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+            quotedCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $or: [
+                      { $ifNull: ["$quote.submittedAt", false] },
+                      {
+                        $gt: [
+                          {
+                            $size: {
+                              $cond: [
+                                { $isArray: "$quoteVersions" },
+                                "$quoteVersions",
+                                [],
+                              ],
+                            },
+                          },
+                          0,
+                        ],
+                      },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            disputeCount: { $sum: { $cond: [{ $ifNull: ["$dispute.raisedAt", false] }, 1, 0] } },
+            refundCount: {
+              $sum: {
+                $cond: [{ $in: ["$payment.status", ["refunded", "partially_refunded"]] }, 1, 0],
+              },
+            },
+            reviewCount: { $sum: { $cond: [{ $ifNull: ["$customerReview.reviewedAt", false] }, 1, 0] } },
+            avgRating: {
+              $avg: {
+                $cond: [
+                  { $ifNull: ["$customerReview.reviewedAt", false] },
+                  {
+                    $avg: [
+                      { $ifNull: ["$customerReview.communicationLevel", null] },
+                      { $ifNull: ["$customerReview.valueOfDelivery", null] },
+                      { $ifNull: ["$customerReview.qualityOfService", null] },
+                    ],
+                  },
+                  null,
+                ],
+              },
+            },
+            grossEur: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$status", "completed"] },
+                  { $ifNull: ["$payment.totalWithVat", { $ifNull: ["$payment.amount", 0] }] },
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+      user.role === "professional"
+        ? Project.countDocuments({ professionalId: user._id })
+        : Promise.resolve(0),
+    ]);
+
+    const row = agg[0] || {};
+    return res.json({
+      success: true,
+      data: {
+        user: {
+          _id: user._id,
+          name: user.name || null,
+          email: user.email || null,
+          phone: user.phone || null,
+          username: user.username || null,
+          role: user.role,
+        },
+        kpis: buildSupportParticipantKpis({
+          professionalLevel: user.professionalLevel,
+          reviewCount: Number(row.reviewCount) || 0,
+          avgRating: typeof row.avgRating === "number" ? row.avgRating : null,
+          projectCount,
+          bookingCount: Number(row.bookingCount) || 0,
+          completedCount: Number(row.completedCount) || 0,
+          quotedCount: Number(row.quotedCount) || 0,
+          disputeCount: Number(row.disputeCount) || 0,
+          grossEur: Number(row.grossEur) || 0,
+          refundCount: Number(row.refundCount) || 0,
+        }),
+      },
+    });
+  } catch (error: any) {
+    console.error("Admin get conversation participant error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load participant info" });
   }
 };
 
@@ -511,6 +702,7 @@ export const adminListSupportConversations = async (req: Request, res: Response)
     const { page, limit, skip } = parsePagination(req.query);
     const assigneeRaw = typeof req.query.assigneeId === "string" ? req.query.assigneeId.trim() : "";
     const mineOnly = String(req.query.mine || "").toLowerCase() === "true" || req.query.mine === "1";
+    const search = normalizeInboxSearch(req.query.q);
 
     const filter: Record<string, unknown> = {
       type: "support",
@@ -521,13 +713,91 @@ export const adminListSupportConversations = async (req: Request, res: Response)
     } else if (assigneeRaw && mongoose.Types.ObjectId.isValid(assigneeRaw)) {
       filter.supportAdminId = new mongoose.Types.ObjectId(assigneeRaw);
     }
+    if (search) {
+      const rx = new RegExp(escapeRegex(search), "i");
+      const [facet] = await Conversation.aggregate([
+        { $match: filter },
+        {
+          $lookup: {
+            from: "users",
+            localField: "supportTargetUserId",
+            foreignField: "_id",
+            as: "supportTargetUserId",
+          },
+        },
+        { $unwind: { path: "$supportTargetUserId", preserveNullAndEmptyArrays: false } },
+        {
+          $match: {
+            $or: [
+              { "supportTargetUserId.name": rx },
+              { "supportTargetUserId.email": rx },
+              { "supportTargetUserId.username": rx },
+              { "supportTargetUserId.phone": rx },
+            ],
+          },
+        },
+        { $sort: { lastMessageAt: -1 } },
+        {
+          $facet: {
+            items: [
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $lookup: {
+                  from: "users",
+                  localField: "supportAdminId",
+                  foreignField: "_id",
+                  as: "supportAdminId",
+                },
+              },
+              { $unwind: { path: "$supportAdminId", preserveNullAndEmptyArrays: true } },
+              {
+                $project: {
+                  _id: 1,
+                  lastMessagePreview: 1,
+                  lastMessageAt: 1,
+                  lastMessageSenderId: 1,
+                  supportAdminId: {
+                    _id: "$supportAdminId._id",
+                    name: "$supportAdminId.name",
+                    email: "$supportAdminId.email",
+                  },
+                  supportTargetUserId: {
+                    _id: "$supportTargetUserId._id",
+                    name: "$supportTargetUserId.name",
+                    email: "$supportTargetUserId.email",
+                    username: "$supportTargetUserId.username",
+                  },
+                },
+              },
+            ],
+            total: [{ $count: "count" }],
+          },
+        },
+      ]);
+      const conversations = Array.isArray(facet?.items) ? facet.items : [];
+      const total = Number(facet?.total?.[0]?.count) || 0;
+      const items = conversations.map((c: any) => {
+        const targetId = c.supportTargetUserId?._id?.toString();
+        const senderId = c.lastMessageSenderId?.toString();
+        return {
+          _id: c._id,
+          supportAdminId: c.supportAdminId || null,
+          supportTargetUserId: c.supportTargetUserId,
+          lastMessagePreview: c.lastMessagePreview || "",
+          lastMessageAt: c.lastMessageAt || null,
+          awaitingReply: Boolean(targetId && senderId && targetId === senderId),
+        };
+      });
+      return res.json({ success: true, data: { items, total, page, limit } });
+    }
 
     const [conversations, total] = await Promise.all([
       Conversation.find(filter)
         .sort({ lastMessageAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate("supportTargetUserId", "name email")
+        .populate("supportTargetUserId", "name email username")
         .populate("supportAdminId", "name email")
         .select("_id supportAdminId supportTargetUserId lastMessagePreview lastMessageAt lastMessageSenderId")
         .lean(),

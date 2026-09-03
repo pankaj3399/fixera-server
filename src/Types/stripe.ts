@@ -164,6 +164,8 @@ export interface VATCalculationParams {
   customerVatVerified?: boolean;
   professionalCountry: string;
   customerType: 'individual' | 'business';
+  propertyNature?: 'movable' | 'immovable';
+  exemptFromBelgianReverseCharge?: boolean;
 }
 
 // ==================== Idempotency Key Generator ====================

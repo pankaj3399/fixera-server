@@ -27,6 +27,12 @@ import {
   applyCoverImageAltUpdate,
   coverImageAltForCreate,
 } from "../../utils/cmsCoverImageAlt";
+import {
+  applyCoverImageUpdate,
+  canonicalizeCmsHtmlImages,
+  canonicalizeCmsMediaUrl,
+  coverImageForCreate,
+} from "../../utils/cmsCoverImage";
 import { sanitizeCmsActiveCountries } from "../../utils/cms/activeCountries";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
@@ -61,7 +67,7 @@ const pickSeo = (input: any) => {
   if (typeof input.metaDescription === "string")
     seo.metaDescription = input.metaDescription.trim().slice(0, 300);
   if (typeof input.ogTitle === "string") seo.ogTitle = input.ogTitle.trim().slice(0, 120);
-  if (typeof input.ogImage === "string") seo.ogImage = input.ogImage.trim();
+  if (typeof input.ogImage === "string") seo.ogImage = canonicalizeCmsMediaUrl(input.ogImage);
   if (typeof input.canonical === "string") seo.canonical = input.canonical.trim();
   if (typeof input.noindex === "boolean") seo.noindex = input.noindex;
   return seo;
@@ -339,7 +345,7 @@ export const createCmsContent = async (req: Request, res: Response) => {
       ? body.status
       : "draft";
 
-    const coverImage = typeof body.coverImage === "string" ? body.coverImage.trim() : "";
+    const coverImage = coverImageForCreate(body.coverImage) || "";
     if ((type === "blog" || type === "news") && !coverImage) {
       return res.status(400).json({ success: false, msg: "Cover image is required for blog and news" });
     }
@@ -384,7 +390,7 @@ export const createCmsContent = async (req: Request, res: Response) => {
       title,
       slug,
       locale,
-      body: typeof body.body === "string" ? body.body : "",
+      body: typeof body.body === "string" ? canonicalizeCmsHtmlImages(body.body) : "",
       excerpt: typeof body.excerpt === "string" ? body.excerpt.trim().slice(0, 500) : undefined,
       coverImage: coverImage || undefined,
       coverImageAlt,
@@ -461,20 +467,18 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       doc.locale = finalLocale;
     }
 
-    if (typeof body.body === "string") doc.body = body.body;
+    if (typeof body.body === "string") doc.body = canonicalizeCmsHtmlImages(body.body);
     if (typeof body.excerpt === "string") doc.excerpt = body.excerpt.trim().slice(0, 500);
 
     let previousCoverToCleanup: string | undefined;
     if (typeof body.coverImage === "string") {
-      const cover = body.coverImage.trim();
+      const cover = canonicalizeCmsMediaUrl(body.coverImage);
       if ((doc.type === "blog" || doc.type === "news") && !cover) {
         return res.status(400).json({ success: false, msg: "Cover image is required for blog and news" });
       }
-      const nextCover = cover || undefined;
-      if (doc.coverImage && doc.coverImage !== nextCover) {
-        previousCoverToCleanup = doc.coverImage;
-      }
-      doc.coverImage = nextCover;
+      const coverUpdate = applyCoverImageUpdate(doc.coverImage, body.coverImage);
+      doc.coverImage = coverUpdate.coverImage;
+      previousCoverToCleanup = coverUpdate.previousToCleanup;
       if (
         previousCoverToCleanup &&
         typeof body.coverImageAlt !== "string" &&

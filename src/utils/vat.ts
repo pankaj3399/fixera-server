@@ -8,8 +8,8 @@ import { VATCalculation, VATCalculationParams } from '../Types/stripe';
 import { EU_COUNTRIES } from './viesApi';
 import {
   REVERSE_CHARGE_LABEL,
+  applyB2BInvoiceRule,
   getStandardVatRate,
-  isB2BSameAsB2CCountry,
   normalizeVatCountry,
 } from './vatManagement';
 import { validateVATNumberFormat } from './vatValidation';
@@ -72,19 +72,33 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
     customerVATNumber,
     customerVatVerified,
     customerType,
+    propertyNature,
+    exemptFromBelgianReverseCharge,
   } = params;
 
   const customerCountryUpper = normalizeVatCountry(customerCountry);
   const roundAmount = (value: number): number => Math.round(value * 100) / 100;
   const localRate = getVATRate(customerCountryUpper);
+  const decision = applyB2BInvoiceRule(
+    {
+      action: 'standard_rate',
+      country: customerCountryUpper,
+      standardRate: localRate,
+      appliedRate: localRate,
+      reverseCharge: false,
+      propertyNature: propertyNature || 'movable',
+      exemptFromBelgianReverseCharge,
+    },
+    customerType,
+    customerVATNumber,
+    customerVatVerified === true,
+    {
+      propertyNature: propertyNature || 'movable',
+      exemptFromBelgianReverseCharge,
+    },
+  );
 
-  if (
-    customerType === 'business' &&
-    !isB2BSameAsB2CCountry(customerCountryUpper) &&
-    customerVatVerified === true &&
-    customerVATNumber &&
-    validateVATNumberFormat(customerVATNumber)
-  ) {
+  if (decision.reverseCharge) {
     return {
       vatRate: 0,
       vatAmount: 0,
@@ -94,9 +108,8 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
     };
   }
 
-  const vatRate = localRate;
-  const vatAmountRaw = (amount * vatRate) / 100;
-  const vatAmount = roundAmount(vatAmountRaw);
+  const vatRate = Number(decision.appliedRate) || 0;
+  const vatAmount = roundAmount((amount * vatRate) / 100);
   const total = roundAmount(amount + vatAmount);
   return {
     vatRate,

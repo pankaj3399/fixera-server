@@ -38,6 +38,18 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#x27;');
 }
 
+const PREVIEW_PLACEHOLDER_RE = /\{\{\s*\.PreviewText\s*\}\}/gi;
+
+function applyPreviewText(html: string, previewText?: string): string {
+  const text = typeof previewText === 'string' ? previewText.trim() : '';
+  const replaced = html.replace(PREVIEW_PLACEHOLDER_RE, () => escapeHtml(text));
+  if (!text) return replaced;
+  if (/data-fixera-preview-text\s*=/i.test(replaced)) return replaced;
+  const preheader =
+    `<div data-fixera-preview-text="true" style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(text)}</div>`;
+  return `${preheader}${replaced}`;
+}
+
 function appendMarketingFooter(htmlContent: string, footer: string): string {
   return /data-fixera-marketing-footer\s*=\s*["']true["']/i.test(htmlContent)
     ? htmlContent
@@ -79,7 +91,10 @@ export function renderMarketingEmail(input: {
   return {
     subject: input.content.subject,
     previewText: input.content.previewText,
-    htmlContent: appendMarketingFooter(`${greeting}${body}`, renderMarketingFooter(locale, input.unsubscribeToken)),
+    htmlContent: applyPreviewText(
+      appendMarketingFooter(`${greeting}${body}`, renderMarketingFooter(locale, input.unsubscribeToken)),
+      input.content.previewText,
+    ),
   };
 }
 
@@ -105,7 +120,10 @@ export function renderMarketingTemplateEmail(input: {
   return {
     subject: input.content.subject,
     previewText: input.content.previewText,
-    htmlContent: appendMarketingFooter(body, renderMarketingFooter(input.locale, input.unsubscribeToken)),
+    htmlContent: applyPreviewText(
+      appendMarketingFooter(body, renderMarketingFooter(input.locale, input.unsubscribeToken)),
+      input.content.previewText,
+    ),
   };
 }
 
