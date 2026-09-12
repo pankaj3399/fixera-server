@@ -225,6 +225,13 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       }
     }
 
+    // Explicit marketing opt-in (unchecked by default on every signup form).
+    // Enrollment is deferred until the address owner verifies their email
+    // (see verifyEmailOTP) so a third party cannot subscribe an address.
+    if (marketingOptIn === true) {
+      userData.marketingOptInPending = true;
+    }
+
     // Create user with all fields
     const user = await User.create(userData);
 
@@ -255,18 +262,6 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
         await createReferral(referralValidation.referrer._id, user._id, referralCode, ipAddress);
       } catch (e) {
         console.error('Error creating referral record during signup:', e);
-      }
-    }
-
-    // Explicit marketing opt-in (unchecked by default on every signup form).
-    // Enrollment is deferred until the address owner verifies their email
-    // (see verifyEmailOTP) so a third party cannot subscribe an address.
-    if (marketingOptIn === true) {
-      try {
-        user.set('marketingOptInPending', true);
-        await user.save();
-      } catch (e) {
-        console.error('Error recording pending marketing opt-in during signup:', e);
       }
     }
 

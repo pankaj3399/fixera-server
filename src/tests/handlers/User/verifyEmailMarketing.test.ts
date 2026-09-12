@@ -24,8 +24,6 @@ vi.mock('../../../utils/emailService', () => ({
 
 import { verifyEmailOTP } from '../../../handlers/User/verify/email';
 
-const expiry = new Date(Date.now() + 10 * 60 * 1000);
-
 function resMock() {
   const res: Record<string, unknown> = {};
   res.status = vi.fn().mockReturnValue(res);
@@ -40,7 +38,7 @@ function mockUser(overrides: Record<string, unknown> = {}) {
       email: 'buyer@example.com',
       isEmailVerified: false,
       verificationCode: '123456',
-      verificationCodeExpires: expiry,
+      verificationCodeExpires: new Date(Date.now() + 10 * 60 * 1000),
       marketingOptInPending: false,
       ...overrides,
     }),
@@ -65,12 +63,15 @@ describe('verifyEmailOTP pending marketing opt-in', () => {
 
     expect(userFindByIdAndUpdate).toHaveBeenCalledWith(
       'user-1',
-      expect.objectContaining({
-        isEmailVerified: true,
-        'notificationPreferences.promotions.email': true,
-        marketingOptInPending: false,
-        marketingConsentAt: expect.any(Date),
-      }),
+      {
+        $set: expect.objectContaining({
+          isEmailVerified: true,
+          'notificationPreferences.promotions.email': true,
+          marketingOptInPending: false,
+          marketingConsentAt: expect.any(Date),
+        }),
+        $unset: { verificationCode: 1, verificationCodeExpires: 1 },
+      },
       { new: true },
     );
     expect(enablePromotionalEmail).toHaveBeenCalledWith(
@@ -89,9 +90,11 @@ describe('verifyEmailOTP pending marketing opt-in', () => {
       vi.fn(),
     );
 
-    const update = userFindByIdAndUpdate.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(update.marketingConsentAt).toBeUndefined();
-    expect(update['notificationPreferences.promotions.email']).toBeUndefined();
+    const update = userFindByIdAndUpdate.mock.calls[0]?.[1] as {
+      $set: Record<string, unknown>;
+    };
+    expect(update.$set.marketingConsentAt).toBeUndefined();
+    expect(update.$set['notificationPreferences.promotions.email']).toBeUndefined();
     expect(enablePromotionalEmail).not.toHaveBeenCalled();
   });
 });

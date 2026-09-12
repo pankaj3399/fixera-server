@@ -121,8 +121,6 @@ export const verifyEmailOTP = async (req: Request, res: Response, next: NextFunc
     const activateMarketing = user.marketingOptInPending === true;
     const updates: Record<string, unknown> = {
       isEmailVerified: true,
-      verificationCode: undefined,
-      verificationCodeExpires: undefined,
     };
     if (activateMarketing) {
       updates['notificationPreferences.promotions.email'] = true;
@@ -130,7 +128,15 @@ export const verifyEmailOTP = async (req: Request, res: Response, next: NextFunc
       updates.marketingOptInPending = false;
     }
 
-    const verifiedUser = await User.findByIdAndUpdate(user._id, updates, { new: true });
+    const verifiedUser = await User.findByIdAndUpdate(
+      user._id,
+      {
+        $set: updates,
+        // Mongoose strips undefined in updates, so clear the OTP explicitly.
+        $unset: { verificationCode: 1, verificationCodeExpires: 1 },
+      },
+      { new: true },
+    );
 
     if (activateMarketing && verifiedUser) {
       try {
