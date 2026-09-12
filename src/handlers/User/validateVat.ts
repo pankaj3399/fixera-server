@@ -58,6 +58,7 @@ export const validateVAT = async (req: Request, res: Response, next: NextFunctio
       data: {
         vatNumber: formattedVAT,
         valid: validationResult.valid,
+        viesUnavailable: validationResult.transient === true,
         companyName: validationResult.companyName,
         companyAddress: validationResult.companyAddress,
         parsedAddress: cleanedAddress,
@@ -123,10 +124,14 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
     // Validate with VIES API
     const validationResult = await validateVATNumber(formattedVAT);
-    
-    // Update VAT information
+
+    // Update VAT information. A transient VIES outage must not silently
+    // downgrade a previously verified, unchanged VAT number.
+    const sameNumber = user.vatNumber === formattedVAT;
     user.vatNumber = formattedVAT;
-    user.isVatVerified = validationResult.valid;
+    if (!(validationResult.transient && sameNumber)) {
+      user.isVatVerified = validationResult.valid;
+    }
 
     // Auto-populate company information if requested and available
     if (autoPopulate && validationResult.valid && user.role === 'professional') {
@@ -232,7 +237,8 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
       msg: "VAT validated and information updated successfully",
       data: {
         vatNumber: formattedVAT,
-        isVatVerified: validationResult.valid,
+        isVatVerified: user.isVatVerified === true,
+        viesUnavailable: validationResult.transient === true,
         companyName: validationResult.companyName,
         companyAddress: validationResult.companyAddress,
         autoPopulated: autoPopulate && validationResult.valid,
@@ -283,6 +289,7 @@ export const updateUserVAT = async (req: Request, res: Response, next: NextFunct
 
     let isVatVerified = false;
     let formattedVAT = '';
+    let viesUnavailable = false;
 
     if (vatNumber) {
       formattedVAT = formatVATNumber(vatNumber);
@@ -298,8 +305,15 @@ export const updateUserVAT = async (req: Request, res: Response, next: NextFunct
       // Validate with VIES API (but don't prevent saving if it fails)
       const validationResult = await validateVATNumber(formattedVAT);
       isVatVerified = validationResult.valid;
+      viesUnavailable = validationResult.transient === true;
 
-      console.log(`💾 VAT Save: VAT ${formattedVAT} - Format valid, VIES verified: ${isVatVerified}`);
+      console.log(`💾 VAT Save: VAT ${formattedVAT} - Format valid, VIES verified: ${isVatVerified}, unavailable: ${viesUnavailable}`);
+    }
+
+    // A transient outage must not downgrade an unchanged, previously verified number.
+    const sameNumber = user.vatNumber === formattedVAT;
+    if (viesUnavailable && sameNumber && user.isVatVerified) {
+      isVatVerified = true;
     }
 
     // Update user
@@ -327,6 +341,7 @@ export const updateUserVAT = async (req: Request, res: Response, next: NextFunct
     return res.status(200).json({
       success: true,
       msg: vatNumber ? "VAT number updated successfully" : "VAT number removed successfully",
+      viesUnavailable,
       user: userResponse
     });
 

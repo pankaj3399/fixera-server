@@ -24,6 +24,17 @@ export type AudienceMember = {
   subscriberId?: string;
 };
 
+export type SubscriberProfile = {
+  role?: 'customer' | 'professional';
+  name?: string;
+  firstName?: string;
+  region?: string;
+  interestedServices: string[];
+  serviceKeys: string[];
+  locale: MarketingLocale;
+  localeSource: 'explicit' | 'country_default' | 'fallback';
+};
+
 export const MARKETING_AUDIENCE_LIMIT = 5000;
 
 function normalizeCountry(value: unknown): string | undefined {
@@ -38,6 +49,79 @@ function userCountry(user: any): string | undefined {
     normalizeCountry(user?.companyAddress?.country) ||
     normalizeCountry(user?.businessInfo?.country)
   );
+}
+
+/**
+ * Canonical subscriber metadata for every opt-in path (profile toggle, signup,
+ * and the user sync). Keeping this in one place prevents role/locale drift
+ * between paths — the original bug that classified professionals as customers.
+ */
+export function subscriberProfileForUser(
+  user: any,
+  extraServiceKeys: string[] = [],
+): SubscriberProfile {
+  const region = userCountry(user);
+  const fromUser = Array.isArray(user?.serviceCategories) ? user.serviceCategories : [];
+  const interestedServices = Array.from(
+    new Set([...extraServiceKeys, ...fromUser].map(String)),
+  );
+  const resolvedLocale = resolveSubscriberLocale(user, region);
+  const name = typeof user?.name === 'string' && user.name.trim() ? user.name.trim() : undefined;
+
+  const profile: SubscriberProfile = {
+    interestedServices,
+    serviceKeys: interestedServices,
+    locale: resolvedLocale.locale,
+    localeSource: resolvedLocale.source,
+  };
+  if (user?.role === 'customer' || user?.role === 'professional') profile.role = user.role;
+  if (name) {
+    profile.name = name;
+    profile.firstName = name.split(/\s+/)[0];
+  }
+  if (region) profile.region = region;
+  return profile;
+}
+
+/**
+ * Record consent and upsert the subscriber row with full profile metadata.
+ * Local consent is authoritative immediately, while a previously blacklisted
+ * Brevo contact remains outside campaign audiences until provider
+ * reconciliation succeeds (or the daily retry does).
+ */
+export async function enablePromotionalEmail(
+  user: any,
+  source: 'user_sync' | 'signup' = 'user_sync',
+): Promise<void> {
+  const email = normalizeEmail(user?.email);
+  if (!email) return;
+  const now = new Date();
+  const profile = subscriberProfileForUser(user);
+  const consentFields: Record<string, unknown> = {
+    userId: user._id,
+    email,
+    emailNormalized: email,
+    unsubscribedAt: null,
+    subscribedAt: now,
+    consentVerifiedAt: now,
+    ...profile,
+  };
+  try {
+    await MarketingSubscriber.updateOne(
+      { $or: [{ userId: user._id }, { email }, { emailNormalized: email }] },
+      {
+        $set: consentFields,
+        $setOnInsert: { unsubscribeToken: generateUnsubscribeToken(), source },
+      },
+      { upsert: true },
+    );
+  } catch (error) {
+    if ((error as { code?: unknown })?.code !== 11000) throw error;
+    await MarketingSubscriber.updateOne(
+      { $or: [{ userId: user._id }, { email }, { emailNormalized: email }] },
+      { $set: consentFields },
+    );
+  }
 }
 
 function normalizeLocale(value: unknown): MarketingLocale {
@@ -143,14 +227,8 @@ export async function syncSubscribersFromUsers(): Promise<{
       }
 
       const { optedIn, consentVerifiedAt } = promotionalEmailOptIn(user);
-      const region = userCountry(user);
       const fromBookings = serviceInterestByUser.get(String(user._id)) || [];
-      const fromPro =
-        Array.isArray((user as any).serviceCategories) ? (user as any).serviceCategories : [];
-      const interestedServices = Array.from(new Set([...fromBookings, ...fromPro].map(String)));
-      // Seed locale from explicit user preference, then country default, then English.
-      const resolvedLocale = resolveSubscriberLocale(user, region);
-      const locale = resolvedLocale.locale;
+      const profile = subscriberProfileForUser(user, fromBookings);
       const existingByCurrentEmail = existingByEmail.get(email);
       const existingByUser = existingByUserId.get(String(user._id));
       const existing = existingByCurrentEmail || existingByUser;
@@ -182,20 +260,14 @@ export async function syncSubscribersFromUsers(): Promise<{
       const metadata: Record<string, unknown> = {
         userId: user._id,
         emailNormalized: email,
-        role: user.role,
-        interestedServices,
-        serviceKeys: interestedServices,
-        locale,
-        localeSource: resolvedLocale.source,
+        ...profile,
         lastEngagedAt,
         consentVerifiedAt,
       };
-      if (typeof user.name === 'string' && user.name.trim()) metadata.name = user.name.trim();
-      if (typeof user.name === 'string' && user.name.trim()) metadata.firstName = user.name.trim().split(/\s+/)[0];
-      if (region) metadata.region = region;
       const unset: Record<string, 1> = {};
-      if (!metadata.name) unset.name = 1;
-      if (!region) unset.region = 1;
+      if (!profile.name) unset.name = 1;
+      if (!profile.firstName) unset.firstName = 1;
+      if (!profile.region) unset.region = 1;
 
       if (existing) {
         operations.push({

@@ -5,6 +5,12 @@ export interface ViesValidationResult {
   companyName?: string;
   companyAddress?: string;
   error?: string;
+  /**
+   * True when VIES could not be reached, was throttled, or returned a fault.
+   * `valid: false` is then inconclusive rather than a rejection and callers
+   * must not treat the VAT number as invalid.
+   */
+  transient?: boolean;
 }
 
 // EU country codes that support VIES validation
@@ -20,30 +26,41 @@ export const isEUVatNumber = (vatNumber: string): boolean => {
   return EU_COUNTRIES.includes(countryCode);
 };
 
-export const validateVATNumber = async (vatNumber: string): Promise<ViesValidationResult> => {
-  console.log(`🔍 VIES: Starting validation for VAT number: ${vatNumber}`);
-  
-  if (!vatNumber || vatNumber.length < 4) {
-    console.log(`❌ VIES: Invalid VAT number format - too short`);
-    return { valid: false, error: 'Invalid VAT number format' };
-  }
+const SOAP_ENDPOINT = 'https://ec.europa.eu/taxation_customs/vies/services/checkVatService';
+const REST_ENDPOINT = 'https://ec.europa.eu/taxation_customs/vies/rest-api/ms';
+const VIES_TIMEOUT_MS = 10_000;
 
-  const countryCode = vatNumber.substring(0, 2).toUpperCase();
-  const vatId = vatNumber.substring(2);
-  
-  console.log(`🔍 VIES: Parsed - Country: ${countryCode}, VAT ID: ${vatId}`);
+/** VIES `userError` codes that mean "try later", not "this VAT is invalid". */
+const UNAVAILABLE_USER_ERRORS = new Set([
+  'MS_MAX_CONCURRENT_REQ',
+  'GLOBAL_MAX_CONCURRENT_REQ',
+  'MS_UNAVAILABLE',
+  'SERVICE_UNAVAILABLE',
+  'TIMEOUT',
+  'NETWORK_ERROR',
+]);
 
-  // Check if it's an EU VAT number
-  if (!isEUVatNumber(vatNumber)) {
-    console.log(`❌ VIES: ${countryCode} is not an EU country`);
-    return { valid: false, error: 'VAT number is not from an EU country' };
-  }
+// Local/test fixtures used to keep flows deterministic without hitting VIES.
+const MOCK_VALIDATIONS: Record<string, { companyName: string; companyAddress: string }> = {
+  DE811569869: {
+    companyName: 'SAP SE',
+    companyAddress: 'Dietmar-Hopp-Allee 16\n69190 Walldorf\nGermany',
+  },
+  BE0429259426: {
+    companyName: 'Microsoft Belgium BVBA',
+    companyAddress: 'Boulevard du Roi Albert II 4\n1000 Brussels\nBelgium',
+  },
+};
 
-  console.log(`✅ VIES: ${countryCode} is valid EU country, proceeding with VIES API call`);
+function cleanViesField(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '---' || trimmed === '&nbsp;') return undefined;
+  return trimmed;
+}
 
-  try {
-    // Using the public VIES SOAP service via HTTP
-    const soapRequest = `<?xml version="1.0" encoding="UTF-8"?>
+function buildSoapEnvelope(countryCode: string, vatId: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
                xmlns:tns1="urn:ec.europa.eu:taxud:vies:services:checkVat:types"
                xmlns:impl="urn:ec.europa.eu:taxud:vies:services:checkVat">
@@ -57,141 +74,112 @@ export const validateVATNumber = async (vatNumber: string): Promise<ViesValidati
     </tns1:checkVat>
   </soap:Body>
 </soap:Envelope>`;
+}
 
-    console.log(`🌐 VIES: Sending SOAP request to VIES service...`);
-    console.log(`📤 VIES: Request payload - Country: ${countryCode}, VAT ID: ${vatId}`);
+function parseTag(xml: string, tag: string): string | undefined {
+  const cdata = xml.match(new RegExp(`<[a-zA-Z0-9:]*${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/[a-zA-Z0-9:]*${tag}>`));
+  if (cdata) return cleanViesField(cdata[1]);
+  const plain = xml.match(new RegExp(`<[a-zA-Z0-9:]*${tag}[^>]*>([\\s\\S]*?)<\\/[a-zA-Z0-9:]*${tag}>`));
+  return plain ? cleanViesField(plain[1]) : undefined;
+}
 
-    const response = await axios.post(
-      'https://ec.europa.eu/taxation_customs/vies/services/checkVatService',
-      soapRequest,
-      {
-        headers: {
-          'Content-Type': 'text/xml; charset=utf-8',
-          'SOAPAction': 'urn:ec.europa.eu:taxud:vies:services:checkVat/checkVat',
-        },
-        timeout: 10000, // 10 seconds timeout
-      }
-    );
-
-    console.log(`📥 VIES: Response status: ${response.status}`);
-    console.log(`📥 VIES: Response received, parsing...`);
-
-    const responseData = response.data;
-
-    // Check what sections exist
-    const nameSection = responseData.match(/<ns2:name[^>]*>([\s\S]*?)<\/ns2:name>/);
-    const addressSection = responseData.match(/<ns2:address[^>]*>([\s\S]*?)<\/ns2:address>/);
-
-
-    // Also check for alternative namespace patterns
-    const altNameSection = responseData.match(/<name[^>]*>([\s\S]*?)<\/name>/);
-    const altAddressSection = responseData.match(/<address[^>]*>([\s\S]*?)<\/address>/);
-
-    // Check for any other XML elements that might contain address info
-    const allElements = responseData.match(/<[^\/][^>]*>([^<]*)<\/[^>]*>/g);
-    if (allElements) {
-      allElements.forEach((element: string, index: number) => {
-        if (index < 20) { // Limit to first 20 to avoid spam
-          console.log(`  ${index + 1}: ${element}`);
-        }
-      });
-      if (allElements.length > 20) {
-        console.log(`  ... and ${allElements.length - 20} more elements`);
-      }
-    }
-
-    // TEST MODE: If testing with specific VAT numbers, provide mock data
-    if (vatNumber === 'DE811569869' || vatNumber === 'BE0429259426') {
+/** Returns null when the response is inconclusive (fault, timeout, bad parse). */
+async function validateViaSoap(countryCode: string, vatId: string): Promise<ViesValidationResult | null> {
+  try {
+    const response = await axios.post(SOAP_ENDPOINT, buildSoapEnvelope(countryCode, vatId), {
+      headers: {
+        'Content-Type': 'text/xml; charset=utf-8',
+        SOAPAction: 'urn:ec.europa.eu:taxud:vies:services:checkVat/checkVat',
+      },
+      timeout: VIES_TIMEOUT_MS,
+    });
+    const xml = String(response.data ?? '');
+    if (/<[a-zA-Z0-9:]*valid>true<\//.test(xml)) {
       return {
         valid: true,
-        companyName: vatNumber.startsWith('DE') ? 'SAP SE' : 'Microsoft Belgium BVBA',
-        companyAddress: vatNumber.startsWith('DE') ? 
-          'Dietmar-Hopp-Allee 16\n69190 Walldorf\nGermany' : 
-          'Boulevard du Roi Albert II 4\n1000 Brussels\nBelgium'
+        companyName: parseTag(xml, 'name'),
+        companyAddress: parseTag(xml, 'address'),
       };
     }
-
-    // Parse the SOAP response
-    if (responseData.includes('<ns2:valid>true</ns2:valid>')) {
-      console.log(`✅ VIES: VAT number is VALID according to VIES`);
-      
-      // Extract company name and address if available - handle multiple formats
-      let companyName, companyAddress;
-
-      // Try CDATA format first (with multiline support)
-      let nameMatch = responseData.match(/<ns2:name><!\[CDATA\[([\s\S]*?)\]\]><\/ns2:name>/);
-      let addressMatch = responseData.match(/<ns2:address><!\[CDATA\[([\s\S]*?)\]\]><\/ns2:address>/);
-
-      // If CDATA not found, try regular text format (with multiline support)
-      if (!nameMatch) {
-        nameMatch = responseData.match(/<ns2:name>([\s\S]*?)<\/ns2:name>/);
-      }
-      if (!addressMatch) {
-        addressMatch = responseData.match(/<ns2:address>([\s\S]*?)<\/ns2:address>/);
-      }
-
-      // Also try without namespace prefix for some VIES responses (with multiline support)
-      if (!nameMatch) {
-        nameMatch = responseData.match(/<name><!\[CDATA\[([\s\S]*?)\]\]><\/name>/) || 
-                   responseData.match(/<name>([\s\S]*?)<\/name>/);
-      }
-      if (!addressMatch) {
-        addressMatch = responseData.match(/<address><!\[CDATA\[([\s\S]*?)\]\]><\/address>/) || 
-                     responseData.match(/<address>([\s\S]*?)<\/address>/);
-      }
-
-      console.log(`🔧 VIES PARSING: nameMatch found:`, !!nameMatch);
-      console.log(`🔧 VIES PARSING: addressMatch found:`, !!addressMatch);
-      if (nameMatch) console.log(`🔧 VIES PARSING: nameMatch[1]:`, JSON.stringify(nameMatch[1]));
-      if (addressMatch) console.log(`🔧 VIES PARSING: addressMatch[1]:`, JSON.stringify(addressMatch[1]));
-
-      companyName = nameMatch ? nameMatch[1].trim() : undefined;
-      companyAddress = addressMatch ? addressMatch[1].trim() : undefined;
-
-      // Clean up any remaining XML entities or empty strings
-      if (companyName === '---' || companyName === '' || companyName === '&nbsp;') {
-        companyName = undefined;
-      }
-      if (companyAddress === '---' || companyAddress === '' || companyAddress === '&nbsp;') {
-        companyAddress = undefined;
-      }
-
-      console.log(`📊 VIES: Company Name: ${companyName || 'Not provided'}`);
-      console.log(`📊 VIES: Company Address: ${companyAddress || 'Not provided'}`);
-
-      return {
-        valid: true,
-        companyName,
-        companyAddress,
-      };
-    } else if (responseData.includes('<ns2:valid>false</ns2:valid>')) {
-      console.log(`❌ VIES: VAT number is INVALID according to VIES`);
+    if (/<[a-zA-Z0-9:]*valid>false<\//.test(xml)) {
       return { valid: false, error: 'VAT number is not valid according to VIES' };
-    } else {
-      console.log(`⚠️ VIES: Unexpected response format, unable to parse validation result`);
-      console.log(`📄 VIES: Full response for debugging: ${responseData}`);
-      return { valid: false, error: 'Unable to validate VAT number' };
     }
+    console.warn('[VIES] Unexpected SOAP response, falling back to REST');
+    return null;
   } catch (error: any) {
-    console.log(`💥 VIES: Error occurred during validation`);
-    console.error('VIES validation error:', error.message || error);
-    
-    if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
-      console.log(`🚫 VIES: Service unavailable (${error.code})`);
-      return { valid: false, error: 'VIES service is temporarily unavailable' };
-    } else if (error.code === 'ECONNABORTED') {
-      console.log(`⏰ VIES: Request timed out after 10 seconds`);
-      return { valid: false, error: 'VAT validation request timed out' };
-    } else if (error.response?.status === 500) {
-      console.log(`🔴 VIES: Service returned HTTP 500 error`);
-      return { valid: false, error: 'VIES service returned an error' };
-    } else if (error.response) {
-      console.log(`🔴 VIES: HTTP ${error.response.status} - ${error.response.statusText}`);
-    }
-    
-    console.log(`❌ VIES: Validation failed with generic error`);
-    return { valid: false, error: 'Failed to validate VAT number' };
+    console.warn('[VIES] SOAP request failed, falling back to REST:', error?.message || error);
+    return null;
   }
+}
+
+/** Returns null when the response is inconclusive (throttled, timeout, bad payload). */
+async function validateViaRest(countryCode: string, vatId: string): Promise<ViesValidationResult | null> {
+  try {
+    const response = await axios.get(`${REST_ENDPOINT}/${countryCode}/vat/${vatId}`, {
+      timeout: VIES_TIMEOUT_MS,
+    });
+    const data = response.data as {
+      isValid?: boolean;
+      userError?: string;
+      name?: string;
+      address?: string;
+    } | null;
+
+    if (!data || typeof data.isValid !== 'boolean') return null;
+
+    if (!data.isValid) {
+      const userError = typeof data.userError === 'string' ? data.userError.trim() : '';
+      if (userError && UNAVAILABLE_USER_ERRORS.has(userError)) return null;
+      return {
+        valid: false,
+        error: userError && userError !== 'VALID'
+          ? `VIES rejected the number (${userError})`
+          : 'VAT number is not valid according to VIES',
+      };
+    }
+
+    return {
+      valid: true,
+      companyName: cleanViesField(data.name),
+      companyAddress: cleanViesField(data.address),
+    };
+  } catch (error: any) {
+    console.warn('[VIES] REST request failed:', error?.message || error);
+    return null;
+  }
+}
+
+export const validateVATNumber = async (vatNumber: string): Promise<ViesValidationResult> => {
+  if (!vatNumber || vatNumber.length < 4) {
+    return { valid: false, error: 'Invalid VAT number format' };
+  }
+
+  const countryCode = vatNumber.substring(0, 2).toUpperCase();
+  const vatId = vatNumber.substring(2);
+
+  if (!isEUVatNumber(vatNumber)) {
+    return { valid: false, error: 'VAT number is not from an EU country' };
+  }
+
+  const mock = MOCK_VALIDATIONS[vatNumber];
+  if (mock) {
+    return { valid: true, ...mock };
+  }
+
+  console.log(`[VIES] Validating ${countryCode} ${vatId}`);
+
+  const soapResult = await validateViaSoap(countryCode, vatId);
+  if (soapResult) return soapResult;
+
+  const restResult = await validateViaRest(countryCode, vatId);
+  if (restResult) return restResult;
+
+  console.warn('[VIES] SOAP and REST both unavailable');
+  return {
+    valid: false,
+    transient: true,
+    error: 'VIES is temporarily unavailable. Please try again in a few minutes.',
+  };
 };
 
 // Format VAT number for display
@@ -203,9 +191,9 @@ export const formatVATNumber = (vatNumber: string): string => {
 // Validate VAT number format without VIES check
 export const isValidVATFormat = (vatNumber: string): boolean => {
   if (!vatNumber) return false;
-  
+
   const formatted = formatVATNumber(vatNumber);
-  
+
   // Basic format: 2 letters + 4-15 alphanumeric characters
   return /^[A-Z]{2}[A-Z0-9]{4,15}$/.test(formatted);
 };

@@ -265,6 +265,12 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
 
         const validationResult = await validateVATNumber(formattedVAT);
         isVatVerified = validationResult.valid;
+
+        // A transient VIES outage must not downgrade an unchanged,
+        // previously verified VAT number.
+        if (validationResult.transient && user.vatNumber === formattedVAT) {
+          isVatVerified = user.isVatVerified === true;
+        }
       }
 
       user.vatNumber = formattedVAT || undefined;

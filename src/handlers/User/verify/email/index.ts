@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import User from "../../../../models/user";
 import { generateOTP, sendOTPEmail } from "../../../../utils/emailService";
+import { enablePromotionalEmail } from "../../../../utils/marketing/audience";
 
 // Send OTP to user's email
 export const sendEmailOTP = async (req: Request, res: Response, next: NextFunction) => {
@@ -115,12 +116,35 @@ export const verifyEmailOTP = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    // Mark email as verified and clear verification code
-    await User.findByIdAndUpdate(user._id, {
+    // Mark email as verified, clear the verification code, and activate a
+    // pending signup marketing opt-in now that the address owner confirmed.
+    const activateMarketing = user.marketingOptInPending === true;
+    const updates: Record<string, unknown> = {
       isEmailVerified: true,
-      verificationCode: undefined,
-      verificationCodeExpires: undefined
-    });
+    };
+    if (activateMarketing) {
+      updates['notificationPreferences.promotions.email'] = true;
+      updates.marketingConsentAt = new Date();
+      updates.marketingOptInPending = false;
+    }
+
+    const verifiedUser = await User.findByIdAndUpdate(
+      user._id,
+      {
+        $set: updates,
+        // Mongoose strips undefined in updates, so clear the OTP explicitly.
+        $unset: { verificationCode: 1, verificationCodeExpires: 1 },
+      },
+      { new: true },
+    );
+
+    if (activateMarketing && verifiedUser) {
+      try {
+        await enablePromotionalEmail(verifiedUser, 'signup');
+      } catch (error) {
+        console.error('Error activating pending marketing opt-in:', error);
+      }
+    }
 
     return res.status(200).json({
       success: true,

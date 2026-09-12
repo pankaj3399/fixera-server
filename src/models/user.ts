@@ -188,6 +188,8 @@ export interface IUser extends Document {
         system?: { push?: boolean; email?: boolean };
     };
     marketingConsentAt?: Date;
+    /** Explicit signup opt-in waiting for email verification before enrollment. */
+    marketingOptInPending?: boolean;
     marketingLocale?: string;
     marketingLocaleSource?: 'explicit' | 'country_default' | 'fallback';
     // Stripe Connect fields (for professionals)
@@ -700,6 +702,7 @@ const UserSchema = new Schema({
         }
     },
     marketingConsentAt: { type: Date, default: null },
+    marketingOptInPending: { type: Boolean, default: false },
     marketingLocale: { type: String, lowercase: true, trim: true, maxlength: 10 },
     marketingLocaleSource: {
         type: String,

@@ -55,7 +55,9 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       companyName,
       vatNumber,
       // Referral
-      referralCode
+      referralCode,
+      // Marketing
+      marketingOptIn
     } = req.body;
 
     // Comprehensive validation
@@ -221,6 +223,13 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
         console.warn('Referral validation failed due to transient error, skipping referral:', e);
         referralValidation = null;
       }
+    }
+
+    // Explicit marketing opt-in (unchecked by default on every signup form).
+    // Enrollment is deferred until the address owner verifies their email
+    // (see verifyEmailOTP) so a third party cannot subscribe an address.
+    if (marketingOptIn === true) {
+      userData.marketingOptInPending = true;
     }
 
     // Create user with all fields
