@@ -15,7 +15,7 @@ import Project from '../../models/project';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
-import { getQuotationTierRateOptionsFromConfig, getVatRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
+import { firstVatCountry, getQuotationTierRateOptionsFromConfig, getVatRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
 import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
@@ -107,7 +107,7 @@ const getAllowedVatOptionsForBooking = async (booking: any, serviceCountryOverri
     areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
     country,
     bookingCountry: serviceCountryOverride || booking.location?.country || customer?.location?.country,
-    businessCountry: customer?.companyAddress?.country,
+    businessCountry: firstVatCountry(customer?.companyAddress?.country, customer?.location?.country),
     customerType: customer?.customerType || 'individual',
     vatNumber: customer?.vatNumber,
     isVatVerified: customer?.isVatVerified,
@@ -184,7 +184,7 @@ const syncQuotationVatDecision = async (
     areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
     country: booking.location?.country,
     bookingCountry: booking.location?.country,
-    businessCountry: customer?.companyAddress?.country,
+    businessCountry: firstVatCountry(customer?.companyAddress?.country, customer?.location?.country),
     customerType: customer?.customerType || 'individual',
     vatNumber: customer?.vatNumber,
     isVatVerified: customer?.isVatVerified,
@@ -1208,7 +1208,7 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       areaOfWork: linkedProjectService?.areaOfWork || linkedProject?.areaOfWork,
       country: customer.location?.country || linkedProject?.distance?.countryCode,
       bookingCountry: linkedProject?.distance?.countryCode || customer.location?.country,
-      businessCountry: customer.companyAddress?.country,
+      businessCountry: firstVatCountry(customer.companyAddress?.country, customer.location?.country),
       answers: {},
       professionalAnswers: getProfessionalAnswersFromProject(linkedProject),
       customerType: customer.customerType || 'individual',

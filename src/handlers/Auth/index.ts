@@ -23,6 +23,75 @@ function adminAccessFields(user: { role?: string; adminRole?: string; adminPermi
   };
 }
 
+/**
+ * Single source of truth for the authenticated user shape returned to the
+ * frontend. LogIn and getMe MUST both use this: when LogIn returned a partial
+ * object the client had no companyAddress/location until a hard refresh, which
+ * broke VAT country resolution and Peppol recipient discovery for the whole
+ * session.
+ */
+export function buildUserResponse(user: any) {
+  return {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+    ...adminAccessFields(user),
+    isEmailVerified: user.isEmailVerified || false,
+    isPhoneVerified: user.isPhoneVerified || false,
+    vatNumber: user.vatNumber,
+    isVatVerified: user.isVatVerified || false,
+    idProofUrl: user.idProofUrl,
+    idProofFileName: user.idProofFileName,
+    idProofUploadedAt: user.idProofUploadedAt,
+    isIdVerified: user.isIdVerified || false,
+    idCountryOfIssue: user.idCountryOfIssue,
+    idExpirationDate: user.idExpirationDate,
+    professionalStatus: user.professionalStatus,
+    approvedBy: user.approvedBy,
+    approvedAt: user.approvedAt,
+    rejectionReason: user.rejectionReason,
+    suspensionReason: user.suspensionReason,
+    username: user.username,
+    businessInfo: user.businessInfo,
+    hourlyRate: user.hourlyRate,
+    currency: user.currency,
+    serviceCategories: user.serviceCategories,
+    blockedDates: user.blockedDates,
+    blockedRanges: user.blockedRanges,
+    companyAvailability: user.companyAvailability,
+    companyBlockedDates: user.companyBlockedDates,
+    companyBlockedRanges: user.companyBlockedRanges,
+    profileCompletedAt: user.profileCompletedAt,
+    professionalOnboardingCompletedAt: user.professionalOnboardingCompletedAt,
+    onboardingAgreements: user.onboardingAgreements,
+    stripe: user.stripe,
+    // Customer-specific fields
+    customerType: user.customerType,
+    businessName: user.businessName,
+    companyAddress: user.companyAddress,
+    location: user.location,
+    // Referral fields
+    referralCode: user.referralCode,
+    referredBy: user.referredBy,
+    points: user.points || 0,
+    pointsExpiry: user.pointsExpiry,
+    loyaltyLevel: user.loyaltyLevel,
+    manualCustomerLevelOverride: user.manualCustomerLevelOverride,
+    totalSpent: user.totalSpent || 0,
+    totalBookings: user.totalBookings || 0,
+    professionalLevel: user.professionalLevel,
+    manualProfessionalLevelOverride: user.manualProfessionalLevelOverride,
+    adminTags: user.adminTags || [],
+    accountStatus: user.accountStatus || 'active',
+    totalReferrals: user.totalReferrals || 0,
+    completedReferrals: user.completedReferrals || 0,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+  };
+}
+
 // Helper function to set secure cookie
 const setTokenCookie = (res: Response, token: string) => {
   const isProduction = process.env.NODE_ENV === 'production';
@@ -435,33 +504,9 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
     // Set httpOnly cookie
     setTokenCookie(res, token);
 
-    // Prepare user response (remove password)
-    const userResponse = {
-      _id: userExists._id,
-      name: userExists.name,
-      email: userExists.email,
-      phone: userExists.phone,
-      role: userExists.role,
-      ...adminAccessFields(userExists),
-      isEmailVerified: userExists.isEmailVerified || false,
-      isPhoneVerified: userExists.isPhoneVerified || false,
-      vatNumber: userExists.vatNumber,
-      isVatVerified: userExists.isVatVerified || false,
-      idProofUrl: userExists.idProofUrl,
-      idProofFileName: userExists.idProofFileName,
-      idProofUploadedAt: userExists.idProofUploadedAt,
-      isIdVerified: userExists.isIdVerified || false,
-      idCountryOfIssue: userExists.idCountryOfIssue,
-      idExpirationDate: userExists.idExpirationDate,
-      professionalStatus: userExists.professionalStatus,
-      username: userExists.username,
-      businessInfo: userExists.businessInfo,
-      professionalOnboardingCompletedAt: userExists.professionalOnboardingCompletedAt,
-      onboardingAgreements: userExists.onboardingAgreements,
-      stripe: userExists.stripe,
-      createdAt: userExists.createdAt,
-      updatedAt: userExists.updatedAt
-    };
+    // Prepare user response (same shape as /auth/me so login hydrates the full
+    // customer/professional profile, including address fields).
+    const userResponse = buildUserResponse(userExists);
 
     return res.status(200).json({
       success: true,
@@ -569,64 +614,8 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
     }
 
     const userResponse = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      ...adminAccessFields(user),
-      isEmailVerified: user.isEmailVerified || false,
-      isPhoneVerified: user.isPhoneVerified || false,
-      vatNumber: user.vatNumber,
-      isVatVerified: user.isVatVerified || false,
-      idProofUrl: user.idProofUrl,
-      idProofFileName: user.idProofFileName,
-      idProofUploadedAt: user.idProofUploadedAt,
-      isIdVerified: user.isIdVerified || false,
-      idCountryOfIssue: user.idCountryOfIssue,
-      idExpirationDate: user.idExpirationDate,
-      professionalStatus: user.professionalStatus,
-      approvedBy: user.approvedBy,
-      approvedAt: user.approvedAt,
-      rejectionReason: user.rejectionReason,
-      suspensionReason: user.suspensionReason,
-      username: user.username,
-      businessInfo: user.businessInfo,
-      hourlyRate: user.hourlyRate,
-      currency: user.currency,
-      serviceCategories: user.serviceCategories,
-      blockedDates: user.blockedDates,
-      blockedRanges: user.blockedRanges,
-      companyAvailability: user.companyAvailability,
-      companyBlockedDates: user.companyBlockedDates,
-      companyBlockedRanges: user.companyBlockedRanges,
+      ...buildUserResponse(user),
       bookingBlockedRanges,
-      profileCompletedAt: user.profileCompletedAt,
-      professionalOnboardingCompletedAt: user.professionalOnboardingCompletedAt,
-      onboardingAgreements: user.onboardingAgreements,
-      stripe: user.stripe,
-      // Customer-specific fields
-      customerType: user.customerType,
-      businessName: user.businessName,
-      companyAddress: user.companyAddress,
-      location: user.location,
-      // Referral fields
-      referralCode: user.referralCode,
-      referredBy: user.referredBy,
-      points: user.points || 0,
-      pointsExpiry: user.pointsExpiry,
-      loyaltyLevel: user.loyaltyLevel,
-      manualCustomerLevelOverride: user.manualCustomerLevelOverride,
-      totalSpent: user.totalSpent || 0,
-      totalBookings: user.totalBookings || 0,
-      professionalLevel: user.professionalLevel,
-      manualProfessionalLevelOverride: user.manualProfessionalLevelOverride,
-      adminTags: user.adminTags || [],
-      accountStatus: user.accountStatus || 'active',
-      totalReferrals: user.totalReferrals || 0,
-      completedReferrals: user.completedReferrals || 0,
-      createdAt: user.createdAt,
-      updatedAt: user.updatedAt
     };
 
     return res.status(200).json({ success: true, authenticated: true, user: userResponse });

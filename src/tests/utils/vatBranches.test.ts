@@ -8,6 +8,7 @@ vi.mock("../../models/serviceConfiguration", () => ({
 import {
   resolveVatDecisionFromConfig,
   resolveSupplierB2BInvoiceDecision,
+  resolveSupplierInvoiceVatDecision,
 } from "../../utils/vatManagement";
 
 const mockConfig = (config: unknown) => {
@@ -113,4 +114,123 @@ describe("VAT SSOT branch table — supplier leg", () => {
       expect(Array.isArray(decision.trace)).toBe(true);
     });
   }
+});
+
+describe("supplier self-bill honors the service configuration rate", () => {
+  beforeEach(() => findOneMock.mockReset());
+
+  const reducedConfig = {
+    category: "Cleaning",
+    service: "Moving",
+    vatManagement: {
+      enabled: true,
+      article47Classification: "movable",
+      rateRuleGroup: "renovation",
+      reducedVatQuestions: [],
+      professionalVatQuestions: [],
+      logicRules: [
+        {
+          country: "BE",
+          standardRate: 21,
+          reducedRate: 6,
+          conditions: [
+            { fieldName: "building_age", operator: "greater_than_or_equal", value: 10 },
+            { fieldName: "private_housing", operator: "equals", value: true, connector: "AND" },
+          ],
+          action: "reduced_rate",
+          priority: 1,
+          isActive: true,
+        },
+      ],
+    },
+  };
+
+  const baseParams = {
+    serviceConfigurationId: "507f1f77bcf86cd799439011",
+    supplierCountry: "BE",
+    buyerCountry: "BE",
+    supplierVatNumber: "BE0123456789",
+    buyerVatNumber: "BE1002103337",
+    buyerVatVerified: true,
+    professionalAnswers: { building_age: 12, private_housing: true },
+  };
+
+  it("applies the configured 6% reduced rate instead of the 21% standard rate", async () => {
+    mockConfig(reducedConfig);
+    const decision = await resolveSupplierInvoiceVatDecision(baseParams);
+    expect(decision.country).toBe("BE");
+    expect(decision.reverseCharge).toBe(false);
+    expect(decision.action).toBe("reduced_rate");
+    expect(decision.appliedRate).toBe(6);
+    expect(decision.standardRate).toBe(21);
+  });
+
+  it("falls back to the standard rate when the rule conditions do not match", async () => {
+    mockConfig(reducedConfig);
+    const decision = await resolveSupplierInvoiceVatDecision({
+      ...baseParams,
+      professionalAnswers: { building_age: 4, private_housing: true },
+    });
+    expect(decision.action).toBe("standard_rate");
+    expect(decision.appliedRate).toBe(21);
+  });
+
+  it("uses the configured standard rate when no reduced-rate rule matches", async () => {
+    mockConfig({
+      ...reducedConfig,
+      vatManagement: {
+        ...reducedConfig.vatManagement,
+        logicRules: [
+          {
+            country: "BE",
+            standardRate: 20,
+            reducedRate: 6,
+            conditions: [{ fieldName: "building_age", operator: "greater_than_or_equal", value: 100 }],
+            action: "reduced_rate",
+            priority: 1,
+            isActive: true,
+          },
+        ],
+      },
+    });
+    const decision = await resolveSupplierInvoiceVatDecision({
+      ...baseParams,
+      professionalAnswers: { building_age: 12, private_housing: true },
+    });
+    expect(decision.action).toBe("standard_rate");
+    expect(decision.standardRate).toBe(20);
+    expect(decision.appliedRate).toBe(20);
+  });
+
+  it("still applies reverse charge for immovable work regardless of the configured rate", async () => {
+    mockConfig({
+      ...reducedConfig,
+      vatManagement: { ...reducedConfig.vatManagement, article47Classification: "immovable" },
+    });
+    const decision = await resolveSupplierInvoiceVatDecision({
+      ...baseParams,
+      propertyNature: "immovable",
+    });
+    expect(decision.reverseCharge).toBe(true);
+    expect(decision.appliedRate).toBe(0);
+    expect(decision.vatLabel).toBe("Reverse Charge");
+  });
+
+  it("does not resolve a config from a partial natural key", async () => {
+    mockConfig(reducedConfig);
+    findOneMock.mockClear();
+    const decision = await resolveSupplierInvoiceVatDecision({
+      // category without service and no serviceConfigurationId
+      category: "Cleaning",
+      supplierCountry: "BE",
+      buyerCountry: "BE",
+      supplierVatNumber: "BE0123456789",
+      buyerVatNumber: "BE1002103337",
+      buyerVatVerified: true,
+      professionalAnswers: { building_age: 12, private_housing: true },
+    });
+    expect(findOneMock).not.toHaveBeenCalled();
+    expect(decision.action).toBe("standard_rate");
+    expect(decision.appliedRate).toBe(21);
+  });
 });

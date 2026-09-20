@@ -8,61 +8,164 @@ export const ARTICLE_47_FIELD_NAME = "article47_immovable";
 
 export const B2B_SAME_AS_B2C_COUNTRIES = new Set(["CH", "LI", "NO", "GR"]);
 
+/**
+ * Country names in every language our users can enter them. Lookups are done
+ * on an upper-cased, accent-stripped form so "België", "BELGIE" and "Belgium"
+ * all resolve. Name-in-text fallbacks (Google Places long_name, free-text
+ * profile fields) frequently return localised names, so this table is part of
+ * the correctness boundary for VAT, not just a nicety.
+ */
 const COUNTRY_ALIASES: Record<string, string> = {
   AUSTRIA: "AT",
+  OOSTENRIJK: "AT",
+  AUTRICHE: "AT",
+  OSTERREICH: "AT",
   BELGIUM: "BE",
+  BELGIE: "BE",
+  BELGIQUE: "BE",
+  BELGIEN: "BE",
   BULGARIA: "BG",
+  BULGARIJE: "BG",
+  BULGARIE: "BG",
+  BULGARIEN: "BG",
   CROATIA: "HR",
+  KROATIE: "HR",
+  CROATIE: "HR",
+  KROATIEN: "HR",
+  HRVATSKA: "HR",
   CYPRUS: "CY",
+  ZYPERN: "CY",
+  CHYPRE: "CY",
   CZECHIA: "CZ",
   "CZECH REPUBLIC": "CZ",
+  TSJECHIE: "CZ",
+  TCHEQUIE: "CZ",
+  TSCHECHIEN: "CZ",
+  CESKO: "CZ",
   DENMARK: "DK",
+  DENEMARKEN: "DK",
+  DANEMARK: "DK",
   ESTONIA: "EE",
+  ESTLAND: "EE",
+  ESTONIE: "EE",
+  EESTI: "EE",
   FINLAND: "FI",
+  SUOMI: "FI",
   FRANCE: "FR",
+  FRANKRIJK: "FR",
   MONACO: "MC",
   GERMANY: "DE",
+  DUITSLAND: "DE",
+  ALLEMAGNE: "DE",
+  DEUTSCHLAND: "DE",
   GREECE: "GR",
+  GRIEKENLAND: "GR",
+  GRECE: "GR",
+  GRIECHENLAND: "GR",
+  HELLAS: "GR",
   HUNGARY: "HU",
+  HONGARIJE: "HU",
+  HONGRIE: "HU",
+  UNGARN: "HU",
   IRELAND: "IE",
+  IERLAND: "IE",
+  IRLANDE: "IE",
+  IRLAND: "IE",
   ITALY: "IT",
+  ITALIE: "IT",
+  ITALIEN: "IT",
+  ITALIA: "IT",
   LATVIA: "LV",
+  LETLAND: "LV",
+  LETTONIE: "LV",
+  LETTLAND: "LV",
+  LATVIJA: "LV",
   LITHUANIA: "LT",
+  LITOUWEN: "LT",
+  LITUANIE: "LT",
+  LITAUEN: "LT",
+  LIETUVA: "LT",
   LUXEMBOURG: "LU",
+  LUXEMBURG: "LU",
   MALTA: "MT",
   NETHERLANDS: "NL",
   "THE NETHERLANDS": "NL",
   NEDERLAND: "NL",
   HOLLAND: "NL",
+  "PAYS-BAS": "NL",
+  NIEDERLANDE: "NL",
   POLAND: "PL",
+  POLEN: "PL",
+  POLOGNE: "PL",
+  POLSKA: "PL",
   PORTUGAL: "PT",
   ROMANIA: "RO",
+  ROEMENIE: "RO",
+  ROUMANIE: "RO",
+  RUMANIEN: "RO",
   SLOVAKIA: "SK",
+  SLOWAKIJE: "SK",
+  SLOVAQUIE: "SK",
+  SLOWAKEI: "SK",
   SLOVENIA: "SI",
+  SLOVENIE: "SI",
+  SLOWENIEN: "SI",
   SPAIN: "ES",
+  SPANJE: "ES",
+  ESPAGNE: "ES",
+  SPANIEN: "ES",
+  ESPANA: "ES",
   SWEDEN: "SE",
+  ZWEDEN: "SE",
+  SUEDE: "SE",
+  SCHWEDEN: "SE",
+  SVERIGE: "SE",
   SWITZERLAND: "CH",
+  ZWITSERLAND: "CH",
+  SUISSE: "CH",
+  SCHWEIZ: "CH",
   LIECHTENSTEIN: "LI",
   NORWAY: "NO",
+  NOORWEGEN: "NO",
+  NORVEGE: "NO",
+  NORWEGEN: "NO",
+  NORGE: "NO",
   "UNITED KINGDOM": "GB",
   UK: "GB",
   "GREAT BRITAIN": "GB",
   ENGLAND: "GB",
   SCOTLAND: "GB",
   WALES: "GB",
+  "VERENIGD KONINKRIJK": "GB",
+  "ROYAUME-UNI": "GB",
+  "VEREINIGTES KONIGREICH": "GB",
   "UNITED STATES": "US",
   USA: "US",
   "UNITED STATES OF AMERICA": "US",
+  "VERENIGDE STATEN": "US",
+  "ETATS-UNIS": "US",
+  "VEREINIGTE STAATEN": "US",
   CANADA: "CA",
   AUSTRALIA: "AU",
+  AUSTRALIE: "AU",
+  AUSTRALIEN: "AU",
   "NEW ZEALAND": "NZ",
+  "NIEUW-ZEELAND": "NZ",
+  "NOUVELLE-ZELANDE": "NZ",
+  NEUSEELAND: "NZ",
   INDIA: "IN",
+  INDIE: "IN",
   UKRAINE: "UA",
+  OEKRAINE: "UA",
+  UKRAINA: "UA",
   MOLDOVA: "MD",
+  MOLDAVIE: "MD",
   ANDORRA: "AD",
   "SAN MARINO": "SM",
   TURKEY: "TR",
-  TÜRKIYE: "TR",
+  TURKIJE: "TR",
+  TURQUIE: "TR",
+  TURKEI: "TR",
   TURKIYE: "TR",
 };
 
@@ -90,15 +193,43 @@ export const normalizeArticle47Classification = (
   return undefined;
 };
 
+/** Upper-case, strip accents and collapse punctuation so localised names match. */
+const canonicalCountryName = (value: string): string =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[.,'’]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Pull a leading ISO-2 code from strings like "BE", "be-1000", "BE 1000", "BE1234567". */
+const leadingCountryCode = (value: string): string => {
+  const match = /^([A-Z]{2})(?=$|[^A-Z])/i.exec(value.trim());
+  if (!match) return "";
+  const code = match[1].toUpperCase();
+  return KNOWN_COUNTRY_CODES.has(code) ? code : "";
+};
+
 export const parseVatCountryCode = (country?: string | null): string => {
   if (country == null || String(country).trim() === "") return "";
   const raw = String(country).trim();
   const upper = raw.toUpperCase();
   if (upper === "EL") return "GR";
   if (/^[A-Z]{2}$/.test(upper)) return KNOWN_COUNTRY_CODES.has(upper) ? upper : "";
-  if (COUNTRY_ALIASES[upper]) return COUNTRY_ALIASES[upper];
-  const normalizedName = upper.replace(/[.,']/g, "").replace(/\s+/g, " ");
-  if (COUNTRY_ALIASES[normalizedName]) return COUNTRY_ALIASES[normalizedName];
+
+  const canonical = canonicalCountryName(raw);
+  if (COUNTRY_ALIASES[canonical]) return COUNTRY_ALIASES[canonical];
+
+  // Country fields are free text in places: "Belgium (BE)", "BE - 1000",
+  // "BE123456789". Accept an explicit code before falling through.
+  const parenthesised = /\(([A-Z]{2})\)/i.exec(raw);
+  if (parenthesised && KNOWN_COUNTRY_CODES.has(parenthesised[1].toUpperCase())) {
+    return parenthesised[1].toUpperCase();
+  }
+  const leading = leadingCountryCode(raw);
+  if (leading) return leading;
+
   return "";
 };
 

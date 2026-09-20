@@ -366,3 +366,31 @@ export const presignS3Url = async (url: string, expiresIn = 7 * 24 * 60 * 60): P
     return null;
   }
 };
+
+/**
+ * Download an S3 object (by stored URL) into memory. Used to re-attach an
+ * invoice PDF to a retried notification email without trusting the provider to
+ * fetch a private URL.
+ */
+export const downloadBufferFromS3 = async (url: string): Promise<Buffer | null> => {
+  if (!isAllowedS3Url(url)) return null;
+  const key = parseS3KeyFromUrl(url);
+  if (!key) return null;
+  try {
+    const response = await s3Client.send(
+      new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key }),
+    );
+    const body = response.Body as any;
+    if (!body) return null;
+    if (typeof body.transformToByteArray === "function") {
+      return Buffer.from(await body.transformToByteArray());
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) {
+      chunks.push(Buffer.from(chunk as Uint8Array));
+    }
+    return Buffer.concat(chunks);
+  } catch {
+    return null;
+  }
+};

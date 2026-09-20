@@ -330,6 +330,160 @@ export const resolveSupplierB2BInvoiceDecision = (params: {
   };
 };
 
+/**
+ * Supplier self-bill VAT decision that also honours the service configuration.
+ *
+ * `resolveSupplierB2BInvoiceDecision` deliberately only resolves the place of
+ * supply and the country's *standard* rate. That is wrong for reduced-VAT
+ * services: a BE renovation configured as 6% (building age + private housing)
+ * was self-billed at 21%. This wrapper keeps the supplier-leg place of supply
+ * (movable -> professional country, immovable -> booking country) and the
+ * reverse-charge branches, but evaluates the config's logic rules with the
+ * professional's answers to pick the configured rate.
+ */
+export const resolveSupplierInvoiceVatDecision = async (params: {
+  serviceConfigurationId?: string;
+  category?: string;
+  service?: string;
+  areaOfWork?: string;
+  supplierCountry?: string | null;
+  buyerCountry?: string | null;
+  supplierVatNumber?: string | null;
+  buyerVatNumber?: string | null;
+  buyerVatVerified?: boolean;
+  bookingCountry?: string | null;
+  propertyNature?: PropertyNature;
+  exemptFromBelgianReverseCharge?: boolean;
+  answers?: Record<string, unknown>;
+  professionalAnswers?: Record<string, unknown>;
+}): Promise<VatDecision> => {
+  const hasValidConfigId = Boolean(
+    params.serviceConfigurationId && /^[a-f\d]{24}$/i.test(params.serviceConfigurationId),
+  );
+  // Only key by the natural identity when the full minimum key is present;
+  // a partial key (e.g. category alone) could match an unrelated config and
+  // apply the wrong VAT rate.
+  const hasNaturalKey = Boolean(params.category && params.service);
+  const query: Record<string, unknown> = hasValidConfigId
+    ? { _id: params.serviceConfigurationId }
+    : hasNaturalKey
+      ? {
+          category: params.category,
+          service: params.service,
+          ...(params.areaOfWork ? { areaOfWork: params.areaOfWork } : {}),
+        }
+      : {};
+  const config = Object.keys(query).length > 0
+    ? await ServiceConfiguration.findOne(query).select("category service vatManagement")
+    : null;
+  const vat = config?.vatManagement;
+
+  const article47Classification = vat?.enabled
+    ? resolveArticle47Classification(vat.article47Classification)
+    : normalizeArticle47Classification(vat?.article47Classification);
+  const propertyNature =
+    params.propertyNature ??
+    resolvePropertyNature({
+      classification: article47Classification,
+      professionalAnswers: params.professionalAnswers,
+    }) ?? "movable";
+  const exemptFromBelgianReverseCharge =
+    params.exemptFromBelgianReverseCharge ?? Boolean(vat?.exemptFromBelgianReverseCharge);
+
+  const place = flowchartPlaceOfSupplyCountry({
+    leg: "supplier",
+    propertyNature,
+    bookingCountry: params.bookingCountry ?? params.buyerCountry,
+    supplierBusinessCountry: params.supplierCountry,
+  });
+  const supplierCountry = parseVatCountryCode(params.supplierCountry);
+  const country =
+    place.country ||
+    parseVatCountryCode(params.buyerCountry) ||
+    supplierCountry;
+
+  let standardRate = getStandardVatRate(country);
+  let reducedRate: number | undefined;
+  let appliedRate = standardRate;
+  let action: VatRoutingAction = "standard_rate";
+  let matchedRuleText: string | undefined;
+  let ruleGroup: string | undefined;
+
+  if (vat?.enabled && country) {
+    const combinedAnswers = {
+      ...(params.answers || {}),
+      ...(params.professionalAnswers || {}),
+    };
+    const rules = [...(vat.logicRules || [])]
+      .filter((rule) => rule.isActive !== false && normalizeVatCountry(rule.country) === country)
+      .sort((a, b) => (a.priority || 0) - (b.priority || 0));
+    // The configuration's standard rate overrides the static country rate even
+    // when no reduced-rate rule matches.
+    if (Number.isFinite(rules[0]?.standardRate)) {
+      standardRate = Number(rules[0].standardRate);
+      appliedRate = standardRate;
+    }
+    for (const rule of rules) {
+      if (!evaluateVatRule(rule, combinedAnswers)) continue;
+      if (Number.isFinite(rule.standardRate)) standardRate = Number(rule.standardRate);
+      ruleGroup = vat.rateRuleGroup;
+      matchedRuleText = rule.customText;
+      if (rule.action === "rfq") {
+        // A self-bill cannot be raised before the rule is resolved; keep the
+        // standard rate rather than silently granting the reduced rate.
+        action = "standard_rate";
+        appliedRate = standardRate;
+        break;
+      }
+      reducedRate = Number.isFinite(rule.reducedRate) ? Number(rule.reducedRate) : standardRate;
+      action = "reduced_rate";
+      appliedRate = reducedRate;
+      break;
+    }
+  }
+
+  const decision: VatDecision = {
+    action,
+    country,
+    standardRate,
+    reducedRate,
+    appliedRate,
+    reverseCharge: false,
+    propertyNature,
+    exemptFromBelgianReverseCharge,
+    matchedRuleText,
+    ruleGroup,
+    explanation: action === "reduced_rate"
+      ? matchedRuleText || `Reduced VAT rate ${appliedRate}% applied to the supplier invoice.`
+      : `Standard VAT rate ${appliedRate}% applied to the supplier invoice.`,
+  };
+
+  const buyerVatValid = params.buyerVatVerified ?? Boolean(
+    params.buyerVatNumber && validateVATNumberFormat(params.buyerVatNumber),
+  );
+  const rc = flowchartReverseCharge({
+    buyerType: "business",
+    buyerVatNumber: params.buyerVatNumber,
+    buyerVatVerified: buyerVatValid,
+    supplierCountry,
+    supplierVatNumber: params.supplierVatNumber,
+    buyerCountry: country,
+    propertyNature,
+    exemptFromBelgianReverseCharge,
+  });
+  if (!rc.reverseCharge) {
+    return { ...decision, trace: [...place.trace, ...rc.trace, { step: "rate", detail: `supplier ${action} ${appliedRate}%` }] };
+  }
+  return {
+    ...decision,
+    appliedRate: 0,
+    reverseCharge: true,
+    vatLabel: REVERSE_CHARGE_LABEL,
+    explanation: REVERSE_CHARGE_LABEL,
+    trace: [...place.trace, ...rc.trace, { step: "rate", detail: "supplier reverse-charge 0%" }],
+  };
+};
+
 const pushUniqueRate = (options: VatRateOption[], option: VatRateOption) => {
   if (!options.some((existing) => existing.rate === option.rate && existing.reverseCharge === option.reverseCharge)) {
     options.push(option);

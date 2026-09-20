@@ -10,10 +10,13 @@ export type OdooAccountingConfig = {
   incomeAccountId: number;
   expenseAccountId: number;
   salesJournalId?: number;
+  selfBillingJournalId?: number;
   defaultTaxId: number;
   reverseChargeTaxId?: number;
   autoPost: boolean;
   taxIdsByRate: Record<string, number>;
+  purchaseTaxIdsByRate?: Record<string, number>;
+  purchaseReverseChargeTaxId?: number;
 };
 
 type OdooCredentials = {
@@ -349,6 +352,34 @@ const discoverSaleTaxes = async (
   };
 };
 
+const discoverPurchaseTaxes = async (
+  credentials: OdooCredentials,
+  companyId: number
+): Promise<{ purchaseTaxIdsByRate: Record<string, number>; purchaseReverseChargeTaxId?: number }> => {
+  const taxes = await odooJson2CallWithRetries<Array<{
+    id: number; name: string; amount: number; amount_type: string; price_include: boolean;
+  }>>(credentials, "account.tax", "search_read", {
+    domain: [["type_tax_use", "=", "purchase"], ["company_id", "=", companyId], ["active", "=", true]],
+    fields: ["id", "name", "amount", "amount_type", "price_include"],
+    order: "id asc",
+  }, companyId);
+  // Prices supplied by Fixtract exclude VAT. Prefer the Belgian service tax
+  // over merchandise, tax-inclusive, and reverse-charge variants of a rate.
+  const regularTaxes = taxes.filter((tax) =>
+    tax.amount_type === "percent" && !tax.price_include && !matchesReverseChargeTaxName(tax.name)
+  );
+  const purchaseTaxIdsByRate: Record<string, number> = {};
+  for (const tax of regularTaxes) {
+    if (tax.amount > 0) {
+      purchaseTaxIdsByRate[String(tax.amount)] = pickSaleTax(regularTaxes, tax.amount, [`${tax.amount}% S`])!;
+    }
+  }
+  const reverseTaxes = taxes.filter((tax) => tax.amount === 0 && matchesReverseChargeTaxName(tax.name));
+  const purchaseReverseChargeTaxId = reverseTaxes.find((tax) => /^0% S\.Cocont$/i.test(tax.name))?.id
+    ?? reverseTaxes[0]?.id;
+  return { purchaseTaxIdsByRate, purchaseReverseChargeTaxId };
+};
+
 const discoverSalesJournal = async (
   credentials: OdooCredentials,
   companyId: number
@@ -358,11 +389,37 @@ const discoverSalesJournal = async (
     "account.journal",
     "search_read",
     {
-      domain: [["type", "=", "sale"]],
+      domain: [["type", "=", "sale"], ["company_id", "=", companyId], ["active", "=", true]],
       fields: ["id", "name", "code"],
+      order: "id asc",
       limit: 5,
     },
     companyId
+  );
+  return journals[0]?.id;
+};
+
+const discoverSelfBillingJournal = async (
+  credentials: OdooCredentials,
+  companyId: number
+): Promise<number | undefined> => {
+  const fields = await odooJson2CallWithRetries<Record<string, unknown>>(
+    credentials, "account.journal", "fields_get", { attributes: ["type"] }, companyId
+  );
+  // Older installations can still send customer invoices without self-billing.
+  if (!fields.is_self_billing) return undefined;
+  const journals = await odooJson2CallWithRetries<Array<{ id: number }>>(
+    credentials, "account.journal", "search_read", {
+      domain: [
+        ["type", "=", "purchase"],
+        ["is_self_billing", "=", true],
+        ["company_id", "=", companyId],
+        ["active", "=", true],
+      ],
+      fields: ["id"],
+      order: "id asc",
+      limit: 1,
+    }, companyId
   );
   return journals[0]?.id;
 };
@@ -373,7 +430,7 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
     throw new Error("ODOO_API_URL and ODOO_API_KEY must be set");
   }
 
-  const cacheKey = `${credentials.baseUrl}:${credentials.apiKey.slice(0, 12)}`;
+  const cacheKey = `${credentials.baseUrl}:${credentials.apiKey}:${process.env.ODOO_COMPANY_ID || ""}`;
   if (discoveryCache && discoveryCache.key === cacheKey && discoveryCache.expiresAt > Date.now()) {
     return discoveryCache.config;
   }
@@ -382,6 +439,8 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
   const expenseAccountId = await discoverExpenseAccount(credentials, companyId);
   const { taxIdsByRate, defaultTaxId, reverseChargeTaxId } = await discoverSaleTaxes(credentials, companyId);
   const salesJournalId = await discoverSalesJournal(credentials, companyId);
+  const selfBillingJournalId = await discoverSelfBillingJournal(credentials, companyId);
+  const purchaseTaxes = selfBillingJournalId ? await discoverPurchaseTaxes(credentials, companyId) : {};
 
   const config: OdooAccountingConfig = {
     baseUrl: credentials.baseUrl,
@@ -390,10 +449,12 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
     incomeAccountId,
     expenseAccountId,
     salesJournalId,
+    selfBillingJournalId,
     defaultTaxId,
     reverseChargeTaxId,
     autoPost: process.env.ODOO_AUTO_POST === "true",
     taxIdsByRate,
+    ...purchaseTaxes,
   };
 
   discoveryCache = {

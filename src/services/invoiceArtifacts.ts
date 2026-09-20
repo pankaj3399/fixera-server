@@ -4,11 +4,13 @@ import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
 import ServiceConfiguration from "../models/serviceConfiguration";
-import { presignS3Url, uploadBufferToS3 } from "../utils/s3Upload";
+import { presignS3Url, uploadBufferToS3, downloadBufferFromS3 } from "../utils/s3Upload";
 import {
   REVERSE_CHARGE_LABEL,
   normalizeVatCountry,
   resolveSupplierB2BInvoiceDecision,
+  resolveSupplierInvoiceVatDecision,
+  type VatDecision,
 } from "../utils/vatManagement";
 import { mapUnitToUneceCode, resolveInvoiceServiceUnit, tryNormalizeInvoiceUnit } from "../utils/invoiceUnits";
 import {
@@ -427,7 +429,10 @@ const getExtraCostLinesForUbl = (
   });
 };
 
-const getSupplierVatContext = (booking: any, platform: UblPlatformParty) => {
+const getSupplierVatContext = (booking: any, platform: UblPlatformParty): VatDecision => {
+  // Prefer the decision resolved from the service configuration (reduced rates),
+  // cached by loadBookingForInvoice so PDF and UBL stay in lockstep.
+  if (booking?.__supplierVatDecision) return booking.__supplierVatDecision as VatDecision;
   return resolveSupplierB2BInvoiceDecision({
     supplierCountry: booking.professional?.businessInfo?.country || booking.professional?.location?.country,
     buyerCountry: platform.country,
@@ -914,8 +919,59 @@ const loadBookingForInvoice = async (bookingId: string) => {
   const booking = await Booking.findById(bookingId)
     .populate("customer")
     .populate("professional")
-    .populate("project", "title extraOptions subprojects category service serviceConfigurationId");
-  return hydrateServiceConfigPricingOptions(booking);
+    .populate(
+      "project",
+      "title extraOptions subprojects category service areaOfWork serviceConfigurationId vatProfessionalAnswers",
+    );
+  await hydrateServiceConfigPricingOptions(booking);
+  await hydrateSupplierVatDecision(booking);
+  return booking;
+};
+
+/**
+ * Resolve the supplier self-bill VAT once per loaded booking using the service
+ * configuration's reduced-rate rules, and cache it for the sync UBL builder.
+ * Falls back silently to the country standard rate when the config/platform
+ * context is unavailable (never blocks invoice generation).
+ */
+const hydrateSupplierVatDecision = async (booking: any) => {
+  if (!booking || booking.__supplierVatDecision) return booking;
+  try {
+    const settings = await PlatformSettings.getCurrentConfig();
+    const professionalAnswers = (booking.project?.vatProfessionalAnswers || []).reduce(
+      (acc: Record<string, unknown>, answer: { fieldName?: string; value?: unknown }) => {
+        if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+        return acc;
+      },
+      {},
+    );
+    const customerAnswers = (booking.vatDecision?.answers || []).reduce(
+      (acc: Record<string, unknown>, answer: { fieldName?: string; value?: unknown }) => {
+        if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+        return acc;
+      },
+      {},
+    );
+    booking.__supplierVatDecision = await resolveSupplierInvoiceVatDecision({
+      serviceConfigurationId: booking.project?.serviceConfigurationId || booking.serviceConfigurationId,
+      category: booking.project?.category,
+      service: booking.project?.service,
+      areaOfWork: booking.project?.areaOfWork,
+      supplierCountry: booking.professional?.businessInfo?.country || booking.professional?.location?.country,
+      buyerCountry: settings.companyAddress?.country,
+      supplierVatNumber: booking.professional?.businessInfo?.vatNumber || booking.professional?.vatNumber,
+      buyerVatNumber: settings.companyVatNumber,
+      buyerVatVerified: true,
+      bookingCountry: booking.vatDecision?.country || booking.location?.country,
+      propertyNature: booking.vatDecision?.propertyNature,
+      exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
+      answers: customerAnswers,
+      professionalAnswers,
+    });
+  } catch {
+    // best-effort; getSupplierVatContext falls back to the standard-rate path
+  }
+  return booking;
 };
 
 const getPlatformParty = async (): Promise<UblPlatformParty> => {
@@ -942,35 +998,41 @@ const notifyInvoiceReady = async (
   try {
     if (customerId && update.invoiceUrl) {
       const invoiceUrl = (await presignS3Url(update.invoiceUrl)) || update.invoiceUrl;
+      const attachmentContent = attachments?.customerInvoicePdf
+        ? attachments.customerInvoicePdf.toString("base64")
+        : await inlineInvoiceAttachment(update.invoiceUrl);
       await notify({
         userId: customerId,
         eventKey: "customer.invoice_ready",
         entityType: "booking",
         entityId: bookingId,
+        // Stable key so retries only re-send when the previous attempt failed
+        // (DeliveryClaim marks the inbox row emailSent once delivered).
+        idempotencyKey: `invoice-ready:${bookingId}:customer`,
         context: {
           bookingId,
           invoiceNumber: update.invoiceNumber,
           invoiceUrl,
-          ...(attachments?.customerInvoicePdf
-            ? { invoiceAttachmentContent: attachments.customerInvoicePdf.toString("base64") }
-            : {}),
+          ...(attachmentContent ? { invoiceAttachmentContent: attachmentContent } : {}),
         },
       });
     }
     if (professionalId && update.supplierInvoiceUrl) {
       const supplierInvoiceUrl = (await presignS3Url(update.supplierInvoiceUrl)) || update.supplierInvoiceUrl;
+      const attachmentContent = attachments?.supplierInvoicePdf
+        ? attachments.supplierInvoicePdf.toString("base64")
+        : await inlineInvoiceAttachment(update.supplierInvoiceUrl);
       await notify({
         userId: professionalId,
         eventKey: "professional.invoice_ready",
         entityType: "booking",
         entityId: bookingId,
+        idempotencyKey: `invoice-ready:${bookingId}:supplier`,
         context: {
           bookingId,
           invoiceNumber: update.supplierInvoiceNumber,
           invoiceUrl: supplierInvoiceUrl,
-          ...(attachments?.supplierInvoicePdf
-            ? { invoiceAttachmentContent: attachments.supplierInvoicePdf.toString("base64") }
-            : {}),
+          ...(attachmentContent ? { invoiceAttachmentContent: attachmentContent } : {}),
         },
       });
     }
@@ -979,6 +1041,19 @@ const notifyInvoiceReady = async (
       `[INVOICE] Failed to email invoice links for booking ${bookingId}:`,
       error instanceof Error ? error.message : error
     );
+  }
+};
+
+/**
+ * Re-read an already-issued PDF from S3 so a notification retry can attach the
+ * bytes directly instead of asking the email provider to fetch a private URL.
+ */
+const inlineInvoiceAttachment = async (s3Url: string): Promise<string | undefined> => {
+  try {
+    const buffer = await downloadBufferFromS3(s3Url);
+    return buffer ? buffer.toString("base64") : undefined;
+  } catch {
+    return undefined;
   }
 };
 
@@ -1103,6 +1178,10 @@ const retryPeppolForExistingArtifacts = async (
     supplierPeppolDispatchReason: update.supplierPeppolDispatchReason,
     supplierPeppolDispatchReference: update.supplierPeppolDispatchReference,
   });
+  // Re-attempt invoice-ready emails for already-issued artifacts. The stable
+  // idempotency key makes this a no-op once delivery succeeded, but recovers
+  // bookings whose original notification failed after the PDF was stored.
+  await notifyInvoiceReady(booking, update);
   return update;
 };
 
@@ -1237,6 +1316,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
     });
   }
 
+  await notifyInvoiceReady(booking, update);
   return update;
 };
 

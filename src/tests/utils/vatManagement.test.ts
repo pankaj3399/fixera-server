@@ -62,6 +62,23 @@ describe("parseVatCountryCode / firstVatCountry", () => {
   it("reads a country name from a formatted service address", () => {
     expect(countryFromAddressText("Keizersgracht 1, Amsterdam, Nederland")).toBe("NL");
   });
+
+  it("parses localised country names and unambiguous codes", () => {
+    // Local-language names (Google Places long_name / free-text profile fields)
+    expect(parseVatCountryCode("België")).toBe("BE");
+    expect(parseVatCountryCode("Belgique")).toBe("BE");
+    expect(parseVatCountryCode("Nederland")).toBe("NL");
+    expect(parseVatCountryCode("Deutschland")).toBe("DE");
+    expect(parseVatCountryCode("Frankrijk")).toBe("FR");
+    // Codes embedded with whitespace/punctuation or a VAT-like suffix
+    expect(parseVatCountryCode("be")).toBe("BE");
+    expect(parseVatCountryCode("BE - 1000")).toBe("BE");
+    expect(parseVatCountryCode("Belgium (BE)")).toBe("BE");
+    // Real country names must never be mistaken for a leading code.
+    expect(parseVatCountryCode("Belgium")).toBe("BE");
+    expect(parseVatCountryCode("Denmark")).toBe("DK");
+    expect(parseVatCountryCode("India")).toBe("IN");
+  });
 });
 
 describe("getStandardVatRate", () => {

@@ -559,6 +559,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.customerBlocks = customerBlocks;
     }
 
+    // Persist the resolved config so the invoice layer can re-evaluate the
+    // configured VAT rules at billing time (professional bookings have no
+    // project to read it from).
+    if (configIdForVat) {
+      bookingData.serviceConfigurationId = configIdForVat;
+    }
+
     // Validate professional or project exists
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
@@ -590,7 +597,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         serviceConfigurationId,
         country: bookingData.location.country,
         bookingCountry: bookingData.location.country,
-        businessCountry: customer.companyAddress?.country,
+        businessCountry: firstVatCountry(customer.companyAddress?.country, customer.location?.country),
         answers: normalizedVatAnswers,
         customerType: customer.customerType || "individual",
         vatNumber: customer.vatNumber,
@@ -675,7 +682,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         areaOfWork: projectService?.areaOfWork || project.areaOfWork,
         country: bookingData.location.country,
         bookingCountry: bookingData.location.country,
-        businessCountry: customer.companyAddress?.country,
+        businessCountry: firstVatCountry(customer.companyAddress?.country, customer.location?.country),
         answers: normalizedVatAnswers,
         professionalAnswers: professionalAnswersFromProject(project),
         customerType: customer.customerType || "individual",
@@ -1964,7 +1971,7 @@ export const previewVatDecision = async (req: Request, res: Response) => {
       areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
       country: previewCountry,
       bookingCountry: previewCountry,
-      businessCountry: customer.companyAddress?.country,
+      businessCountry: firstVatCountry(customer.companyAddress?.country, customer.location?.country),
       answers: normalizedVatAnswers,
       professionalAnswers: professionalAnswersFromProject(project),
       customerType: customer.customerType || "individual",

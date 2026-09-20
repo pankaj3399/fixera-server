@@ -145,6 +145,12 @@ export interface IBooking extends Document {
   bookingType: BookingType; // 'professional' or 'project'
   professional?: Types.ObjectId; // Reference to User (professional) - for direct bookings
   project?: Types.ObjectId; // Reference to Project - for project bookings
+  /**
+   * Service configuration resolved at booking time. Professional (direct)
+   * bookings have no project, so this is the only way the invoice layer can
+   * re-evaluate the configured VAT rules (e.g. reduced rates) at billing time.
+   */
+  serviceConfigurationId?: string;
 
   // Status and lifecycle
   status: BookingStatus;
@@ -806,6 +812,7 @@ const BookingSchema = new Schema({
     extraOptionId: { type: String, required: true },
     bookedPrice: { type: Number, required: true, min: 0 },
   }],
+  serviceConfigurationId: { type: String, maxlength: 64 },
   // Nested fields are not required: legacy RFQ bookings may only store currency.
   // Handlers sanitize incomplete snapshots before save when totals are missing.
   checkoutSnapshot: {
