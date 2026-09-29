@@ -182,48 +182,30 @@ export const resolvePeppolRecipient = (
 };
 
 /**
- * Odoo tax coverage: the engine can produce any standard rate in
- * STANDARD_RATES for active countries, any reduced rate configured in service
- * logic rules, plus 0% reverse charge. All must have Odoo tax mappings or
- * dispatch fails fast with the missing rates (instead of posting then failing).
+ * VAT rates that must map to an Odoo tax for this specific invoice. Checking
+ * the invoice's own lines — instead of every rate any active service
+ * configuration could ever produce — keeps a Belgian 21% invoice sendable even
+ * when the platform also offers Swiss 8.1% or Greek 24% work the active Odoo
+ * company chart does not carry. The reverse-charge tax is only required when
+ * the invoice actually uses reverse charge.
  */
-export const getRequiredOdooVatRates = async (): Promise<{ rates: number[]; reverseChargeRequired: boolean }> => {
-  const { getStandardVatRate } = await import("../utils/vatManagement");
-  void getStandardVatRate;
-  const { default: ServiceConfiguration } = await import("../models/serviceConfiguration");
-  const configs = await ServiceConfiguration.find({ isActive: { $ne: false } })
-    .select("activeCountries vatManagement.logicRules")
-    .lean();
+export const getInvoiceVatRates = (lines: Array<{ vatRate?: number }>): number[] => {
   const rates = new Set<number>();
-  const countries = new Set<string>();
-  for (const config of configs as any[]) {
-    for (const country of config.activeCountries || []) {
-      const parsed = parseVatCountryCode(country);
-      if (parsed) countries.add(parsed);
-    }
-    for (const rule of config.vatManagement?.logicRules || []) {
-      if (rule.isActive === false) continue;
-      if (Number.isFinite(Number(rule.standardRate))) rates.add(Number(rule.standardRate));
-      if (Number.isFinite(Number(rule.reducedRate))) rates.add(Number(rule.reducedRate));
-    }
+  for (const line of lines) {
+    const rate = Number(line.vatRate);
+    if (Number.isFinite(rate) && rate > 0) rates.add(rate);
   }
-  // Always cover BE/NL standard + reduced outcomes the engine can produce.
-  for (const country of ["BE", "NL", ...countries]) {
-    const { getStandardVatRate: std } = await import("../utils/vatCountries");
-    const rate = std(country);
-    if (rate > 0) rates.add(rate);
-  }
-  rates.add(6);
-  rates.add(21);
-  return { rates: [...rates].sort((a, b) => a - b), reverseChargeRequired: true };
+  return [...rates].sort((a, b) => a - b);
 };
 
 export const validateOdooTaxCoverage = (
   config: { taxIdsByRate: Record<string, number>; reverseChargeTaxId?: number },
   requiredRates: number[],
+  reverseChargeRequired = true,
 ): { ok: boolean; missingRates: number[]; missingReverseCharge: boolean } => {
   const missingRates = requiredRates.filter((rate) => rate > 0 && !config.taxIdsByRate[String(rate)]);
-  return { ok: missingRates.length === 0 && Boolean(config.reverseChargeTaxId), missingRates, missingReverseCharge: !config.reverseChargeTaxId };
+  const missingReverseCharge = reverseChargeRequired && !config.reverseChargeTaxId;
+  return { ok: missingRates.length === 0 && !missingReverseCharge, missingRates, missingReverseCharge };
 };
 
 const normalizeOdooId = (value: unknown, label: string): number => {
@@ -365,16 +347,6 @@ const getTaxIdsForLine = (
   const taxId = config.taxIdsByRate[String(vatRate)];
   return taxId ? [taxId] : [];
 };
-
-const findMissingTaxMapping = (
-  config: OdooTaxConfig,
-  lines: OdooInvoiceLine[],
-  reverseCharge: boolean
-): OdooInvoiceLine | undefined =>
-  lines.find((line) => {
-    const needsTaxMapping = reverseCharge || Number(line.vatRate || 0) > 0;
-    return needsTaxMapping && getTaxIdsForLine(config, line, reverseCharge).length === 0;
-  });
 
 const findExistingOdooMove = async (
   config: OdooAccountingConfig,
@@ -713,33 +685,17 @@ const dispatchToOdoo = async (
 
   const reverseCharge = Boolean(payload.reverseCharge ?? booking.payment?.reverseCharge);
   const taxConfig = getTaxConfigForSide(config, payload.side);
-  try {
-    const required = await getRequiredOdooVatRates();
-    const coverage = validateOdooTaxCoverage(taxConfig, required.rates);
-    if (!coverage.ok) {
-      const parts: string[] = [];
-      if (coverage.missingRates.length) parts.push(`Missing Odoo tax mapping for VAT rates ${coverage.missingRates.join(", ")}`);
-      if (coverage.missingReverseCharge) parts.push("Odoo reverse-charge tax could not be resolved from the Odoo company chart");
-      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: FAIL ${parts.join("; ")}`);
-      return { status: "failed", provider: "odoo", reference, reason: parts.join("; "), attempts: 0 };
-    }
-    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: OK rates [${required.rates.join(", ")}]`);
-  } catch (coverageError: any) {
-    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage check skipped: ${coverageError?.message || coverageError}`);
-  }
   const lines = getOdooInvoiceLinesForPayload(booking, payload);
-  const lineWithoutTax = findMissingTaxMapping(taxConfig, lines, reverseCharge);
-  if (lineWithoutTax) {
-    return {
-      status: "failed",
-      provider: "odoo",
-      reference,
-      reason: reverseCharge
-        ? "Odoo reverse-charge tax could not be resolved from the Odoo company chart"
-        : `Missing Odoo tax mapping for VAT rate ${lineWithoutTax.vatRate ?? 0}`,
-      attempts: 0,
-    };
+  const requiredRates = getInvoiceVatRates(lines);
+  const coverage = validateOdooTaxCoverage(taxConfig, requiredRates, reverseCharge);
+  if (!coverage.ok) {
+    const parts: string[] = [];
+    if (coverage.missingRates.length) parts.push(`Missing Odoo tax mapping for VAT rates ${coverage.missingRates.join(", ")}`);
+    if (coverage.missingReverseCharge) parts.push("Odoo reverse-charge tax could not be resolved from the Odoo company chart");
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: FAIL ${parts.join("; ")}`);
+    return { status: "failed", provider: "odoo", reference, reason: parts.join("; "), attempts: 0 };
   }
+  console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: OK rates [${requiredRates.join(", ")}]`);
 
   try {
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: creating/finding Odoo move`);

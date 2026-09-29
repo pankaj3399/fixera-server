@@ -484,11 +484,31 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     const existingExtraCostPiId = booking.payment?.extraCostStripePaymentIntentId;
     const existingExtraCostSecret = booking.payment?.extraCostClientSecret;
     if (existingExtraCostPiId && existingExtraCostSecret) {
+      const storedCustomerCharge = booking.payment?.extraCostAmount;
+      const storedCustomerNet = booking.payment?.extraCostCustomerNetAmount;
+      const storedVat = booking.payment?.extraCostVatAmount;
+      const storedDiscount = booking.payment?.extraCostCustomerDiscount;
+      // Amounts are stored VAT-inclusive so the checkout UI can show the same
+      // breakdown and amount that the PaymentIntent will actually charge.
       return res.json({
         success: true,
         data: {
           clientSecret: existingExtraCostSecret,
           extraCostTotal,
+          customerChargeAmount: storedCustomerCharge,
+          customerNetChargeAmount: storedCustomerNet,
+          vatAmount: storedVat,
+          vatRate: booking.payment?.vatRate ?? 0,
+          loyaltyDiscount: {
+            level: booking.payment?.extraCostLoyaltyTier || (booking.customer as any)?.loyaltyLevel || 'Bronze',
+            percentage: booking.payment?.extraCostLoyaltyPercentage ?? 0,
+            amount: storedDiscount ?? 0,
+          },
+          subtotalInclCommission: roundToTwo(
+            (booking.payment?.extraCostNetAmount ?? extraCostTotal)
+            + (booking.payment?.extraCostPlatformCommission ?? 0)
+            + (storedDiscount ?? 0),
+          ),
         }
       });
     }
@@ -552,6 +572,10 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostPlatformFee', platformFeeAmount);
     booking.set('payment.extraCostNetAmount', extraCostTotal);
     booking.set('payment.extraCostCustomerDiscount', cappedLoyalty);
+    // Persist the terms actually applied so a reused PaymentIntent keeps
+    // reporting the same tier and percentage even if the customer levels up.
+    booking.set('payment.extraCostLoyaltyTier', loyalty.tier);
+    booking.set('payment.extraCostLoyaltyPercentage', loyalty.percentage);
     booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
     booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
     booking.set('payment.extraCostStatus', 'pending');
@@ -570,6 +594,8 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
               extraCostPlatformFee: platformFeeAmount,
               extraCostNetAmount: extraCostTotal,
               extraCostCustomerDiscount: cappedLoyalty,
+              extraCostLoyaltyTier: loyalty.tier,
+              extraCostLoyaltyPercentage: loyalty.percentage,
               extraCostPlatformCommission: platformCommissionAmount,
               extraCostProfessionalPayout: extraCostTotal,
               extraCostStatus: 'pending',
@@ -610,6 +636,9 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
         clientSecret: paymentIntent.client_secret,
         extraCostTotal,
         customerChargeAmount,
+        customerNetChargeAmount,
+        vatAmount,
+        vatRate: booking.payment?.vatRate ?? 0,
         subtotalInclCommission,
         loyaltyDiscount: loyalty,
       }

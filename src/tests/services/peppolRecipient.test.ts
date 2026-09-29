@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { resolvePeppolRecipient, toPeppolParticipantId, validateOdooTaxCoverage } from "../../services/peppolDispatch";
+import {
+  getInvoiceVatRates,
+  resolvePeppolRecipient,
+  toPeppolParticipantId,
+  validateOdooTaxCoverage,
+} from "../../services/peppolDispatch";
 
 describe("resolvePeppolRecipient (per actual recipient, not both-BE)", () => {
   it("customer eligible with business VAT in any country (NL, not BE)", () => {
@@ -38,9 +43,18 @@ describe("resolvePeppolRecipient (per actual recipient, not both-BE)", () => {
     expect(toPeppolParticipantId("XX123", "XX")).toHaveProperty("error");
   });
 
-  it("Odoo tax coverage must include all engine rates + RC", () => {
+  it("Odoo tax coverage requires every invoice rate and, only for reverse charge, the RC tax", () => {
     expect(validateOdooTaxCoverage({ taxIdsByRate: { "21": 1 }, reverseChargeTaxId: 2 }, [21, 6]).ok).toBe(false);
     expect(validateOdooTaxCoverage({ taxIdsByRate: { "21": 1, "6": 3 }, reverseChargeTaxId: 2 }, [21, 6]).ok).toBe(true);
     expect(validateOdooTaxCoverage({ taxIdsByRate: { "21": 1, "6": 3 } }, [21, 6]).ok).toBe(false);
+    // A domestic invoice must not fail because the chart has no 0% RC tax.
+    expect(validateOdooTaxCoverage({ taxIdsByRate: { "21": 1 } }, [21], false).ok).toBe(true);
+    expect(validateOdooTaxCoverage({ taxIdsByRate: { "21": 1 } }, [21], true).ok).toBe(false);
+  });
+
+  it("scopes required Odoo rates to the invoice lines, not every configured service", () => {
+    expect(getInvoiceVatRates([{ vatRate: 21 }, { vatRate: 21 }, { vatRate: 0 }, {}])).toEqual([21]);
+    expect(getInvoiceVatRates([{ vatRate: 21 }, { vatRate: 6 }])).toEqual([6, 21]);
+    expect(getInvoiceVatRates([{}])).toEqual([]);
   });
 });

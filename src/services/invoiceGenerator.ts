@@ -211,6 +211,7 @@ export interface InvoiceBooking {
     extraCostCustomerNetAmount?: number;
     extraCostVatAmount?: number;
     extraCostPlatformFee?: number;
+    extraCostCustomerDiscount?: number;
     vatBreakdown?: { description: string; netAmount: number; vatRate: number; vatAmount: number }[];
     discount?: {
       loyaltyAmount?: number;
@@ -297,6 +298,51 @@ export const applyManualInvoicePartyOverrides = <T extends InvoiceBooking>(
         }
       : baseBooking.professional,
   } as T;
+};
+
+const roundInvoiceMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * Scales rendered line amounts (and their unit prices) so the line sum equals
+ * `target`. Customer invoices display the full service price and show the
+ * loyalty/points/code discounts on separate discount lines; the printed total
+ * then equals the sum of every line instead of mixing discounted line amounts
+ * with a discount line that was already applied.
+ */
+export const scaleLineItemsToTotal = <T extends { amount: number; unitPrice?: number }>(
+  lines: T[],
+  target: number,
+): T[] => {
+  if (lines.length === 0) return lines;
+  const currentTotal = lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0);
+  if (!Number.isFinite(currentTotal) || Math.abs(currentTotal) < 0.005) return lines;
+  const factor = target / currentTotal;
+  const scaled = lines.map((line) => ({
+    ...line,
+    amount: roundInvoiceMoney(Number(line.amount) * factor),
+    ...(line.unitPrice != null ? { unitPrice: roundInvoiceMoney(Number(line.unitPrice) * factor) } : {}),
+  }));
+  const drift = roundInvoiceMoney(target - scaled.reduce((sum, line) => sum + line.amount, 0));
+  if (Math.abs(drift) >= 0.01) {
+    const lastIndex = scaled.length - 1;
+    scaled[lastIndex] = { ...scaled[lastIndex], amount: roundInvoiceMoney(scaled[lastIndex].amount + drift) };
+  }
+  return scaled;
+};
+
+/**
+ * One-line service address for the invoice service description. The booking
+ * location is the address entered in the final booking-wizard step; company
+ * and profile addresses are only used as a fallback for legacy bookings.
+ */
+export const formatInvoiceServiceAddress = (booking: InvoiceBooking): string | undefined => {
+  const location = booking.location
+    || (booking.customer?.companyAddress ? { ...booking.customer.companyAddress } : undefined)
+    || (booking.customer?.location ? { ...booking.customer.location } : undefined);
+  if (!location) return undefined;
+  const cityLine = [location.postalCode, location.city].filter(Boolean).join(" ");
+  const parts = [location.address, cityLine, location.country].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : undefined;
 };
 
 /**
@@ -765,7 +811,14 @@ export async function generateBookingInvoice(
 
   const rawExtraCostTotal = (booking.extraCosts || []).reduce((sum, cost) => sum + (Number(cost.amount) || 0), 0);
   const customerExtraCostNet = getCustomerExtraCostNet(booking.payment, rawExtraCostTotal);
-  const extraCostScale = rawExtraCostTotal > 0 ? customerExtraCostNet / rawExtraCostTotal : 1;
+  // Display extra costs at their price before the customer's loyalty discount;
+  // the loyalty discount line carries that reduction so the total still
+  // reconciles with the amount actually charged.
+  const extraCostLoyaltyDiscount = Math.max(0, Number(booking.payment.extraCostCustomerDiscount) || 0);
+  const extraCostDisplayNet = roundInvoiceMoney(
+    customerExtraCostNet + (customerExtraCostNet < 0 ? -extraCostLoyaltyDiscount : extraCostLoyaltyDiscount),
+  );
+  const extraCostScale = rawExtraCostTotal !== 0 ? extraCostDisplayNet / rawExtraCostTotal : 1;
   const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
     const costUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
     const unitDetail =
@@ -785,22 +838,35 @@ export async function generateBookingInvoice(
       ...(Number.isFinite(Number(cost.actualUnits)) && costUnit ? { unit: costUnit } : {}),
     };
   });
-  const extraCostNet = extraCostLines.reduce((sum, line) => sum + line.amount, 0);
+  // VAT is always charged on the discounted amount, matching the charged
+  // payment, while the line items render full prices and the discount lines
+  // carry the reduction. Manual overrides replace every line, including the
+  // extra costs, so they never contribute an extra-cost net.
+  const extraCostNet = manualLines?.length ? 0 : customerExtraCostNet;
   const extraCostVatRate = reverseCharge ? 0 : booking.payment.vatRate ?? 0;
-  const extraCostVat = Math.round(extraCostNet * extraCostVatRate) / 100;
+  const extraCostVat = roundInvoiceMoney(extraCostNet * extraCostVatRate / 100);
   const extraCostGross = booking.payment.extraCostAmount != null
     ? booking.payment.extraCostAmount * sign
     : extraCostNet + extraCostVat;
   const discount = booking.payment.discount;
-  const usingDiscountedVatBreakdown = Boolean(booking.payment.vatBreakdown?.length);
-  const discounts = usingDiscountedVatBreakdown ? [] : selfBilling
+  const serviceLoyaltyDiscount = Math.max(0, Number(discount?.loyaltyAmount) || 0);
+  // Manual invoice overrides replace the lines wholesale and never render
+  // discount lines, so their lines must not be grossed up.
+  const customerServiceDiscountTotal = manualLines?.length ? 0 : roundInvoiceMoney(
+    serviceLoyaltyDiscount
+    + (Number(discount?.repeatBuyerAmount) || 0)
+    + (Number(discount?.pointsDiscountAmount) || 0)
+    + (Number(discount?.codeDiscountAmount) || 0),
+  );
+  const customerLoyaltyDiscountTotal = roundInvoiceMoney(serviceLoyaltyDiscount + extraCostLoyaltyDiscount);
+  const discounts = manualLines?.length ? [] : selfBilling
     ? [
         discount?.repeatBuyerAmount
           ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign }
           : undefined,
       ].filter(Boolean) as { label: string; amount: number }[]
     : [
-        discount?.loyaltyAmount ? { label: "Loyalty discount", amount: discount.loyaltyAmount * sign } : undefined,
+        customerLoyaltyDiscountTotal > 0 ? { label: "Loyalty discount", amount: customerLoyaltyDiscountTotal * sign } : undefined,
         discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign } : undefined,
         discount?.pointsDiscountAmount ? { label: "Points discount", amount: discount.pointsDiscountAmount * sign } : undefined,
         discount?.codeDiscountAmount ? { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: discount.codeDiscountAmount * sign } : undefined,
@@ -958,6 +1024,7 @@ export async function generateBookingInvoice(
         country: customer.companyAddress?.country || customer.location?.country,
         vatNumber: customer.vatNumber,
       };
+  const serviceAddress = formatInvoiceServiceAddress(booking);
 
   const invoiceData: InvoiceData = {
     invoiceNumber,
@@ -998,6 +1065,7 @@ export async function generateBookingInvoice(
           : undefined,
         selectedSubproject?.description ? `Package details: ${selectedSubproject.description}` : undefined,
         booking.rfqData?.serviceType ? `Service: ${booking.rfqData.serviceType}` : undefined,
+        serviceAddress ? `Service address: ${serviceAddress}` : undefined,
         currentQuote?.scope ? `Scope: ${currentQuote.scope}` : undefined,
         manualOverride?.serviceDescription || currentQuote?.description || booking.quote?.description || booking.rfqData?.description || "Property service",
         (selectedSubproject?.materialsIncluded && selectedSubproject.materials?.length
@@ -1060,7 +1128,10 @@ export async function generateBookingInvoice(
               vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
             });
           }
-          return [...serviceLinesWithOptions, ...extraCostLines];
+          // Show the pre-discount service price and let the discount lines above
+          // carry the reduction, so the printed total is the sum of all lines.
+          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
+          return [...scaleLineItemsToTotal(serviceLinesWithOptions, displayTarget), ...extraCostLines];
         })(),
     discounts,
     actualStartDate: booking.actualStartDate,

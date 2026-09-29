@@ -1,6 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { inflateSync } from "node:zlib";
-import { applyManualInvoicePartyOverrides, generateInvoicePDF } from "../../services/invoiceGenerator";
+
+const mocks = vi.hoisted(() => ({
+  platformSettings: vi.fn(),
+  invoiceSequence: vi.fn(),
+}));
+
+vi.mock("../../models/platformSettings", () => ({
+  default: { getCurrentConfig: mocks.platformSettings },
+}));
+vi.mock("../../models/invoiceSequence", () => ({
+  default: { findOneAndUpdate: mocks.invoiceSequence },
+}));
+
+import {
+  applyManualInvoicePartyOverrides,
+  formatInvoiceServiceAddress,
+  generateBookingInvoice,
+  generateInvoicePDF,
+  scaleLineItemsToTotal,
+} from "../../services/invoiceGenerator";
 
 const extractPdfStreamText = (pdf: Buffer): string => {
   const marker = Buffer.from("stream");
@@ -82,6 +101,101 @@ const extractTextPositions = (pageStream: string): Array<{ yFromBottom: number; 
     yFromBottom: Number(match[2]),
     text: concatenatePdfHexText(match[3]),
   }));
+
+describe("customer invoice pre-discount display", () => {
+  it("scales lines so full prices minus the discount lines equal the charged net", () => {
+    const lines = [
+      { description: "Service", amount: 273.79, unitPrice: 10.95 },
+      { description: "Option", amount: 54.76 },
+    ];
+    const scaled = scaleLineItemsToTotal(lines, 335.26);
+    expect(scaled.reduce((sum, line) => sum + line.amount, 0)).toBeCloseTo(335.26, 2);
+    expect(scaled[0].unitPrice).toBeCloseTo(10.95 * (335.26 / 328.55), 2);
+    expect(scaled[1]).toMatchObject({ description: "Option" });
+  });
+
+  it("keeps lines untouched without a discount and never invents lines", () => {
+    const lines = [{ description: "Service", amount: 100 }];
+    expect(scaleLineItemsToTotal(lines, 100)).toEqual(lines);
+    expect(scaleLineItemsToTotal([], 100)).toEqual([]);
+  });
+
+  it("builds a one-line service address from the booking location", () => {
+    expect(formatInvoiceServiceAddress({
+      location: { address: "Rue de la Loi 1", postalCode: "1000", city: "Brussels", country: "BE" },
+    } as any)).toBe("Rue de la Loi 1, 1000 Brussels, BE");
+  });
+
+  it("falls back to the customer address for legacy bookings without a service location", () => {
+    expect(formatInvoiceServiceAddress({
+      customer: { companyAddress: { address: "Main Street 2", postalCode: "2000", city: "Antwerp", country: "BE" } },
+    } as any)).toBe("Main Street 2, 2000 Antwerp, BE");
+    expect(formatInvoiceServiceAddress({ customer: {} } as any)).toBeUndefined();
+  });
+});
+
+describe("customer invoice composition", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.platformSettings.mockResolvedValue({
+      companyAddress: { name: "Fixtract", street: "Main 1", city: "Brussels", postalCode: "1000", country: "BE" },
+      companyVatNumber: "BE0123456789",
+    });
+    mocks.invoiceSequence.mockResolvedValue({ value: 1 });
+  });
+
+  it("renders full pre-discount prices, the combined loyalty discount and the service address", async () => {
+    const booking = {
+      _id: "booking-1",
+      bookingNumber: "BK-DISCOUNT",
+      location: { address: "Rue de la Loi 1", postalCode: "1000", city: "Brussels", country: "BE" },
+      customer: { name: "Customer", email: "customer@example.com", location: { country: "BE" } },
+      professional: { name: "Professional", businessInfo: { country: "BE" } },
+      payment: {
+        netAmount: 328.55,
+        vatAmount: 69,
+        vatRate: 21,
+        totalWithVat: 397.55,
+        currency: "EUR",
+        reverseCharge: false,
+        vatBreakdown: [
+          { description: "Paint walls", netAmount: 273.79, vatRate: 21, vatAmount: 57.5 },
+          { description: "Option: Special Effects", netAmount: 54.76, vatRate: 21, vatAmount: 11.5 },
+        ],
+        discount: { loyaltyAmount: 6.71, totalDiscount: 6.71 },
+        extraCostCustomerNetAmount: 21.9,
+        extraCostVatAmount: 4.6,
+        extraCostAmount: 26.5,
+        extraCostCustomerDiscount: 0.45,
+      },
+      extraCosts: [{
+        name: "Unit-based adjustment",
+        amount: 20,
+        justification: "extra",
+        type: "unit_adjustment",
+        estimatedUnits: 25,
+        actualUnits: 27,
+        unitPrice: 10,
+      }],
+      __supplierVatDecision: { reverseCharge: false, appliedRate: 21 },
+    } as any;
+
+    const { pdfBuffer } = await generateBookingInvoice(booking, { kind: "customer" });
+    const encodedText = concatenatePdfHexText(extractPdfStreamText(pdfBuffer));
+
+    // Full service prices (grossed back up from the discounted net).
+    expect(encodedText).toContain(Buffer.from("279.38").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("55.88").toString("latin1"));
+    // Extra costs shown before loyalty, and loyalty including the extra-cost part.
+    expect(encodedText).toContain(Buffer.from("22.35").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("Loyalty discount").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("7.16").toString("latin1"));
+    // VAT stays on the discounted amounts and the total is the sum of the lines.
+    expect(encodedText).toContain(Buffer.from("73.60").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("424.05").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("Service address: Rue de la Loi 1, 1000 Brussels, BE").toString("latin1"));
+  });
+});
 
 describe("invoice PDF artifacts", () => {
   it("renders a valid PDF with units, VAT, and page metadata inputs", async () => {

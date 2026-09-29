@@ -67,6 +67,19 @@ describe("Peppol Odoo dispatch", () => {
     expect(result.reason).toMatch(/self.billing.*journal/i);
     expect(mocks.call).not.toHaveBeenCalled();
   });
+  it("sends a domestic invoice even when the chart has no reverse-charge tax", async () => {
+    mocks.discover.mockResolvedValue({ ...config, reverseChargeTaxId: undefined });
+    expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+  });
+
+  it("fails before creating records when the chart lacks the invoice VAT rate", async () => {
+    mocks.discover.mockResolvedValue({ ...config, taxIdsByRate: { "6": 52 } });
+    const result = await dispatch("customer");
+    expect(result).toMatchObject({ status: "failed", attempts: 0 });
+    expect(result.reason).toMatch(/21/);
+    expect(mocks.call).not.toHaveBeenCalled();
+  });
+
   it("reports send rejection as failed with the actual Odoo error", async () => {
     const normal = mocks.call.getMockImplementation()!;
     mocks.call.mockImplementation(async (...args) => {

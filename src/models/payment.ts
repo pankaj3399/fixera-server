@@ -61,6 +61,8 @@ export interface IPayment extends Document {
   extraCostPlatformFee?: number;
   extraCostNetAmount?: number;
   extraCostCustomerDiscount?: number;
+  extraCostLoyaltyTier?: string;
+  extraCostLoyaltyPercentage?: number;
   extraCostPlatformCommission?: number;
   extraCostProfessionalPayout?: number;
   extraCostStatus?: "pending" | "succeeded" | "failed" | "refunded";
@@ -227,6 +229,8 @@ const PaymentSchema = new Schema<IPayment>(
     extraCostPlatformFee: { type: Number },
     extraCostNetAmount: { type: Number },
     extraCostCustomerDiscount: { type: Number },
+    extraCostLoyaltyTier: { type: String },
+    extraCostLoyaltyPercentage: { type: Number },
     extraCostPlatformCommission: { type: Number },
     extraCostProfessionalPayout: { type: Number },
     extraCostStatus: { type: String, enum: ["pending", "succeeded", "failed", "refunded"] },
