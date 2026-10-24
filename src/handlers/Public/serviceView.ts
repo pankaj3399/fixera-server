@@ -5,6 +5,10 @@ import ServiceView from '../../models/serviceView';
 import User from '../../models/user';
 import CmsContent from '../../models/cmsContent';
 import { param } from '../../utils/requestParams';
+import {
+  filterCmsDocsWithPublishedSource,
+  type CmsVisibilityDoc,
+} from '../../utils/cms/publicVisibility';
 
 const hashVisitor = (ip: string, userAgent: string): string =>
   crypto.createHash('sha256').update(`${ip}|${userAgent}`).digest('hex').slice(0, 32);
@@ -26,8 +30,20 @@ export const recordServiceView = async (req: Request, res: Response) => {
     }
     const serviceId = rawServiceId.toLowerCase();
 
-    const knownLanding = await CmsContent.exists({ type: 'landing', slug: serviceId, status: 'published' });
-    if (!knownLanding) {
+    const knownLandings = (await CmsContent.find({
+      type: 'landing',
+      slug: serviceId,
+      status: 'published',
+    })
+      .select('type status activeCountries translatedFrom')
+      .lean()) as CmsVisibilityDoc[];
+
+    // Landings are country-agnostic, so only publication matters here: a
+    // translation whose source is draft/missing must not record a view for a
+    // page the public detail endpoint would not serve. Any visible locale for
+    // the slug is enough (public reads fall back to English).
+    const visibleLandings = await filterCmsDocsWithPublishedSource(knownLandings);
+    if (visibleLandings.length === 0) {
       return res.json({ success: true, data: { recorded: false, reason: 'unknown_service' } });
     }
 

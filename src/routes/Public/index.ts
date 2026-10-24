@@ -24,6 +24,7 @@ import {
   listPublicPolicyLinks,
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
+import { getPublicExchangeRates } from "../../handlers/Public/exchangeRates";
 import {
   listPublicSiteAnnouncements,
   recordSiteAnnouncementEvent,
@@ -112,6 +113,9 @@ publicRouter
 
 // Public site settings (social links etc)
 publicRouter.route("/site-settings").get(getPublicSiteSettings);
+
+// ECB EUR-based daily exchange rates (cached in memory + Mongo snapshot)
+publicRouter.route("/exchange-rates").get(getPublicExchangeRates);
 
 // Marketing site announcements (top bar / modal / exit-intent)
 publicRouter.route("/site-announcements").get(schedulingRateLimiter, listPublicSiteAnnouncements);
