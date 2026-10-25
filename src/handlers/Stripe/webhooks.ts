@@ -19,9 +19,16 @@ import { deductPoints } from '../../utils/pointsSystem';
 import { notify } from '../../utils/notifications/notify';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
+import {
+  loadBasePaymentRows,
+  recordBasePaymentRefund,
+} from '../../utils/paymentRefundLedger';
+import { refundCountsAsCash } from '../../utils/paymentRefunds';
+import { SYSTEM_USER_ID } from '../../constants/system';
 import { safeErrorSummary } from '../../utils/safeErrorLog';
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
+const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
@@ -290,7 +297,19 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
 
     if (Object.keys(updateFields).length === 0) return;
 
-    const updated = await Booking.findOneAndUpdate(filter, { $set: updateFields }, { new: true });
+    const statusChangedToBooked = updateFields.status === 'booked';
+    const updateOperation: Record<string, any> = { $set: updateFields };
+    if (statusChangedToBooked) {
+      updateOperation.$push = {
+        statusHistory: {
+          status: 'booked',
+          timestamp: now,
+          note: 'Payment confirmed — booking confirmed',
+        },
+      };
+    }
+
+    const updated = await Booking.findOneAndUpdate(filter, updateOperation, { new: true });
     if (!updated) {
       // Lost the race with confirmPayment (or a duplicate delivery): the booking
       // is already authorized. Ensure post-payment notifications still go out
@@ -500,6 +519,7 @@ async function handlePaymentIntentFailed(
   }
 
   const isMilestone = typeof currentBooking.payment.milestoneIndex === 'number';
+  const failedAt = new Date();
   const booking = await Booking.findOneAndUpdate(
     {
       _id: currentBooking._id,
@@ -512,6 +532,7 @@ async function handlePaymentIntentFailed(
     {
       $set: {
         'payment.status': 'failed',
+        'payment.failedAt': failedAt,
         ...(!isMilestone ? { status: 'payment_pending' } : {}),
       },
     },
@@ -525,7 +546,7 @@ async function handlePaymentIntentFailed(
       stripePaymentIntentId: paymentIntent.id,
       status: { $in: ['pending', 'failed'] },
     },
-    { status: 'failed' },
+    { status: 'failed', failedAt },
     { new: true },
   );
   if (!payment) {
@@ -583,6 +604,7 @@ async function handleExtraCostPaymentFailed(paymentIntent: Stripe.PaymentIntent)
       $set: {
         'payment.extraCostStatus': 'failed',
         'payment.extraCostPaymentSucceeded': false,
+        'payment.extraCostFailedAt': now,
       },
     },
   );
@@ -611,14 +633,23 @@ async function handlePaymentIntentCanceled(paymentIntent: Stripe.PaymentIntent) 
   if (!booking || !booking.payment) return;
 
   if (booking.payment.status === 'authorized') {
+    const now = new Date();
     booking.payment.status = 'refunded';
-    booking.payment.refundedAt = new Date();
+    booking.payment.refundedAt = now;
+    booking.payment.canceledAt = now;
     booking.status = 'cancelled';
+    booking.statusHistory = booking.statusHistory || [];
+    booking.statusHistory.push({
+      status: 'cancelled',
+      timestamp: now,
+      updatedBy: SYSTEM_USER_ID,
+      note: 'Payment intent canceled — booking cancelled',
+    });
     await booking.save();
 
     await Payment.findOneAndUpdate(
       { booking: booking._id },
-      { status: 'refunded', refundedAt: new Date(), canceledAt: new Date() }
+      { status: 'refunded', refundedAt: now, canceledAt: now }
     );
 
     console.log(`Payment cancelled via webhook for booking ${bookingId}`);
@@ -660,28 +691,159 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
 
   const refundAmount = convertFromStripeAmount(charge.amount_refunded, charge.currency);
   const totalAmount = convertFromStripeAmount(charge.amount, charge.currency);
+  // Only the booking-level Payment row is this charge's ledger. A milestone
+  // row belongs to a different PaymentIntent and must not absorb the base
+  // refund or contribute its refunds to the base total.
+  const basePaymentRows = await loadBasePaymentRows(booking as any, paymentIntentId);
+  const existingRefunds = basePaymentRows.flatMap((row) =>
+    Array.isArray((row as any)?.refunds) ? ((row as any).refunds as any[]) : [],
+  );
+  const existingRefundById = new Map(
+    existingRefunds
+      .filter((refund) => refund?.refundId)
+      .map((refund) => [String(refund.refundId), refund]),
+  );
 
-  if (refundAmount >= totalAmount) {
-    booking.payment.status = 'refunded';
-    booking.status = 'refunded';
-  } else {
-    booking.payment.status = 'partially_refunded';
-    // Keep booking.status unchanged for partial refunds.
+  const providerRefunds = Array.isArray((charge as any).refunds?.data)
+    ? (charge as any).refunds.data as any[]
+    : [];
+  const refundIsExtraCost = (providerRefund: any): boolean => {
+    const metadataKind =
+      providerRefund?.metadata?.refundKind
+      || providerRefund?.metadata?.kind
+      || providerRefund?.metadata?.type;
+    if (metadataKind === 'extra_cost') return true;
+    if (metadataKind === 'booking') return false;
+    const recorded = providerRefund?.id ? existingRefundById.get(String(providerRefund.id)) : null;
+    return recorded?.kind === 'extra_cost';
+  };
+
+  let providerBookingRefundTotal = 0;
+  let providerExtraCostRefundTotal = 0;
+  let providerRefundTotal = 0;
+  const providerRefundAmounts = new Map<string, number>();
+  for (const providerRefund of providerRefunds) {
+    if (!providerRefund?.id) continue;
+    if (!refundCountsAsCash(providerRefund)) continue;
+    const amount = convertFromStripeAmount(providerRefund.amount, charge.currency);
+    if (!(amount > 0)) continue;
+    providerRefundAmounts.set(String(providerRefund.id), amount);
+    providerRefundTotal = roundMoney(providerRefundTotal + amount);
+    if (refundIsExtraCost(providerRefund)) {
+      providerExtraCostRefundTotal = roundMoney(providerExtraCostRefundTotal + amount);
+    } else {
+      providerBookingRefundTotal = roundMoney(providerBookingRefundTotal + amount);
+    }
   }
 
-  booking.payment.refundedAt = new Date();
-  booking.payment.refundAmount = refundAmount;
-  await booking.save();
-
-  await Payment.findOneAndUpdate(
-    { booking: booking._id },
-    { status: booking.payment.status, refundedAt: booking.payment.refundedAt }
+  // Negative extra-cost refunds are created against the base PaymentIntent but
+  // are not booking-price refunds. Keep them out of booking/payment refund
+  // totals and status. Recorded Payment rows remain the fallback when Stripe's
+  // refund list is truncated or absent.
+  const recordedBookingRefundTotal = roundMoney(
+    existingRefunds
+      .filter((refund) => refundCountsAsCash(refund))
+      .filter((refund) => refund?.kind !== 'extra_cost')
+      .reduce((sum, refund) => sum + (Number(refund.amount) || 0), 0),
   );
+  const recordedExtraCostRefundTotal = roundMoney(
+    existingRefunds
+      .filter((refund) => refundCountsAsCash(refund))
+      .filter((refund) => refund?.kind === 'extra_cost')
+      .reduce((sum, refund) => sum + (Number(refund.amount) || 0), 0),
+  );
+  const completeProviderList = providerRefunds.length > 0
+    && Math.abs(providerRefundTotal - refundAmount) <= 0.01;
+  const knownExtraCostTotal = Math.max(providerExtraCostRefundTotal, recordedExtraCostRefundTotal);
+  const bookingRefundAmount = roundMoney(Math.min(
+    refundAmount,
+    Math.max(
+      recordedBookingRefundTotal,
+      completeProviderList ? providerBookingRefundTotal : refundAmount - knownExtraCostTotal,
+    ),
+  ));
+
+  const hasBookingRefund = bookingRefundAmount > 0;
+  const currentBookingRefundAmount = Number(booking.payment.refundAmount) || 0;
+  const bookingRefundChanged = Math.abs(bookingRefundAmount - currentBookingRefundAmount) > 0.01;
+  if (hasBookingRefund) {
+    if (bookingRefundAmount >= totalAmount - 0.01) {
+      booking.payment.status = 'refunded';
+      booking.status = 'refunded';
+    } else {
+      booking.payment.status = 'partially_refunded';
+      // Keep booking.status unchanged for partial refunds.
+    }
+    if (bookingRefundChanged || !booking.payment.refundedAt) {
+      booking.payment.refundedAt = new Date();
+    }
+    booking.payment.refundAmount = bookingRefundAmount;
+    await booking.save();
+
+    // The authoritative aggregate refund lives in `booking.payment.refundAmount`
+    // (historical + current). Payment rows hold the per-refund ledger only; a
+    // top-level `refundAmount` is not part of the Payment schema and would be
+    // silently stripped by strict Mongoose.
+    await Payment.updateMany(
+      { booking: booking._id, milestoneIndex: null },
+      { $set: { status: booking.payment.status, refundedAt: booking.payment.refundedAt } },
+    );
+  }
+
+  // Provider-dashboard refunds bypass executeRefund. Record each actual Stripe
+  // refund row (amount/id/date only; no invented VAT split) idempotently by
+  // provider refund id, creating the base Payment row from the recorded booking
+  // payment facts when none exists (otherwise an extra-cost refund on a
+  // legacy/no-row booking would be invisible in the ledger).
+  const bookingRowSet = hasBookingRefund
+    ? {
+        status: booking.payment.status,
+        ...(booking.payment.refundedAt ? { refundedAt: booking.payment.refundedAt } : {}),
+      }
+    : undefined;
+  for (const providerRefund of providerRefunds) {
+    if (!providerRefund?.id) continue;
+    if (!refundCountsAsCash(providerRefund)) continue;
+    // A provider refund without its own creation timestamp cannot be placed
+    // truthfully on the timeline. Skip the row rather than stamping read time.
+    if (typeof providerRefund.created !== 'number') continue;
+    const amount = providerRefundAmounts.get(String(providerRefund.id));
+    if (!(amount && amount > 0)) continue;
+    const kind = refundIsExtraCost(providerRefund) ? 'extra_cost' : 'booking';
+    const obligationId = kind === 'extra_cost'
+      ? (typeof providerRefund?.metadata?.obligationId === 'string'
+        ? providerRefund.metadata.obligationId
+        : undefined)
+      : undefined;
+    const written = await recordBasePaymentRefund({
+      booking,
+      ...(bookingRowSet ? { set: bookingRowSet } : {}),
+      refund: {
+        amount,
+        ...(typeof providerRefund.reason === 'string' && providerRefund.reason
+          ? { reason: providerRefund.reason }
+          : {}),
+        refundId: providerRefund.id,
+        refundedAt: new Date(providerRefund.created * 1000),
+        source: booking.payment.refundSource || 'platform',
+        notes: kind === 'extra_cost'
+          ? `Provider extra-cost refund ${providerRefund.id}`
+          : `Provider refund ${providerRefund.id}`,
+        kind,
+        ...(obligationId ? { obligationId } : {}),
+        status: providerRefund.status || 'succeeded',
+      },
+    });
+    if (written) existingRefundById.set(String(providerRefund.id), { refundId: providerRefund.id, kind });
+  }
 
   console.log(`Charge refunded via webhook for booking ${booking._id}`);
 
+  const shouldNotifyBookingRefund = hasBookingRefund
+    && (providerBookingRefundTotal > 0 || bookingRefundChanged);
+
   try {
-    if (booking.customer) {
+    if (shouldNotifyBookingRefund && booking.customer) {
       const customerUser = await User.findById(booking.customer).select('_id').lean();
       const isPartial = booking.payment.status === 'partially_refunded';
       if (customerUser?._id) {
@@ -692,7 +854,7 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
           entityId: String(booking._id),
           context: {
             bookingId: String(booking._id),
-            refundAmount,
+            refundAmount: bookingRefundAmount,
             currency: (charge.currency || 'EUR').toUpperCase(),
             isPartialRefund: isPartial,
           },
@@ -703,7 +865,7 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
     console.error('Failed to notify refund-processed:', emailError?.message || emailError);
   }
 
-  if (booking.payment.status === 'refunded' || booking.payment.status === 'partially_refunded') {
+  if (shouldNotifyBookingRefund && (booking.payment.status === 'refunded' || booking.payment.status === 'partially_refunded')) {
     try {
       if (booking.customer) {
         await notify({
@@ -819,7 +981,16 @@ async function handleDisputeClosed(dispute: Stripe.Dispute) {
     booking.payment.refundSource = 'platform';
     booking.payment.refundNotes = `Dispute ${dispute.id} lost. Status: ${dispute.status}`;
     booking.payment.disputeStatus = dispute.status;
+    const previousStatus = booking.status;
     booking.status = 'refunded';
+    if (previousStatus !== 'refunded') {
+      booking.statusHistory = booking.statusHistory || [];
+      booking.statusHistory.push({
+        status: 'refunded',
+        timestamp: new Date(),
+        note: `Dispute lost (${dispute.reason || 'unknown'}) — booking refunded`,
+      });
+    }
     await booking.save();
 
     const existingPayment = await Payment.findOne({ booking: booking._id }).select("_id");
@@ -843,6 +1014,7 @@ async function handleDisputeClosed(dispute: Stripe.Dispute) {
               refundedAt: booking.payment.refundedAt || new Date(),
               source: 'platform',
               notes: `Dispute ${dispute.id} closed with status ${dispute.status}`,
+              kind: 'booking',
             },
           },
         }

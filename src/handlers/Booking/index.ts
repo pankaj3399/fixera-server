@@ -26,8 +26,26 @@ import ServiceConfiguration from "../../models/serviceConfiguration";
 import { sendHandlerError } from '../../utils/handlerErrors';
 import { UserFacingError } from '../../utils/appErrors';
 import { assertValidInvoiceUnit } from '../../utils/invoiceUnits';
+import {
+  attachBookingDetails,
+  buildDetailsForBookingDocument,
+} from './details';
+import {
+  filterRawBookingForAdminArea,
+  isAdminUser,
+  resolveBookingAdminAccess,
+  type BookingAdminAccess,
+} from '../../utils/bookingDetails/adminAccess';
 import { withCalendarTransaction } from '../../utils/support/calendarReservations';
 import { buildBookingCalendarKeys, reserveBookingCalendar } from '../../utils/support/bookingCalendar';
+import {
+  captureBookingSnapshotIfMissing,
+  loadVatQuestionDefinitions,
+  resolveScheduleTimeZone,
+} from '../../utils/bookingDetails/capture';
+import { isQuestionAnswerUploadOwnedByUser, isUploadOwnedByUser } from '../../utils/bookingDetails/attachments';
+import { presignOwnedUrl, presignQuestionAnswerUrl, referenceId } from '../../utils/bookingDetails/attachments';
+import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -309,20 +327,62 @@ const snapshotToQuoteBreakdown = (snapshot: NonNullable<ReturnType<typeof buildC
 
 const presignBookingFiles = async (bookingDoc: any) => {
   const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
+  const customerId = referenceId(booking?.customer);
+  const professionalId = referenceId(booking?.professional);
+  const projectId = referenceId(booking?.project)
+    || (booking?.bookingSnapshot?.project?.id ? String(booking.bookingSnapshot.project.id) : null);
+  const project = booking?.project && typeof booking.project === 'object' ? booking.project : null;
+  const snapshotRfqQuestions = Array.isArray(booking?.bookingSnapshot?.questions?.rfq)
+    ? booking.bookingSnapshot.questions.rfq
+    : [];
+  const snapshotPostBookingQuestions = Array.isArray(booking?.bookingSnapshot?.questions?.postBooking)
+    ? booking.bookingSnapshot.questions.postBooking
+    : [];
+  const rfqDefinitions = snapshotRfqQuestions.length > 0
+    ? snapshotRfqQuestions
+    : Array.isArray(project?.rfqQuestions) ? project.rfqQuestions : [];
+  const postBookingDefinitions = snapshotPostBookingQuestions.length > 0
+    ? snapshotPostBookingQuestions
+    : Array.isArray(project?.postBookingQuestions) ? project.postBookingQuestions : [];
+  const isDeclaredFile = (answer: any, definition?: any) =>
+    answer?.fieldType === 'file'
+    || answer?.type === 'file'
+    || answer?.type === 'attachment'
+    || definition?.type === 'file'
+    || definition?.type === 'attachment';
+  const findDefinition = (definitions: any[], answer: any) =>
+    definitions.find((definition: any) =>
+      (definition.questionId && answer?.questionId
+        && String(definition.questionId) === String(answer.questionId))
+      || (definition._id && answer?.questionId && String(definition._id) === String(answer.questionId))
+      || (definition.question && String(definition.question) === String(answer?.question)),
+    );
 
   if (Array.isArray(booking?.rfqData?.attachments) && booking.rfqData.attachments.length > 0) {
-    booking.rfqData.attachments = await Promise.all(
-      booking.rfqData.attachments.map((url: string) => presignMaybeS3Url(url))
+    const signed = await Promise.all(
+      booking.rfqData.attachments.map(async (url: string) => {
+        const result = await presignOwnedUrl(url, [customerId, professionalId], ['rfq-attachments']);
+        return result.url;
+      })
     );
+    // Never echo an unowned or unsignable private key. The details DTO reports
+    // the unavailable reason separately.
+    booking.rfqData.attachments = signed.filter((url: string | null): url is string => Boolean(url));
   }
 
   if (Array.isArray(booking?.rfqData?.answers) && booking.rfqData.answers.length > 0) {
     booking.rfqData.answers = await Promise.all(
       booking.rfqData.answers.map(async (answer: any) => {
         const val = typeof answer?.answer === 'string' ? answer.answer : '';
-        const isFileType = answer?.fieldType === 'file' || answer?.type === 'file' || answer?.type === 'attachment';
-        if (isFileType) {
-          return { ...answer, answer: await presignMaybeS3Url(val) };
+        const definition = findDefinition(rfqDefinitions, answer);
+        if (isDeclaredFile(answer, definition)) {
+          const result = await presignQuestionAnswerUrl(
+            val,
+            [customerId, professionalId],
+            projectId,
+            ['rfq-attachments', 'dispute-attachments'],
+          );
+          return { ...answer, answer: result.url || '' };
         }
         return answer;
       })
@@ -331,10 +391,17 @@ const presignBookingFiles = async (bookingDoc: any) => {
 
   if (Array.isArray(booking?.postBookingData) && booking.postBookingData.length > 0) {
     booking.postBookingData = await Promise.all(
-      booking.postBookingData.map(async (answer: any) => ({
-        ...answer,
-        answer: await presignMaybeS3Url(answer?.answer),
-      }))
+      booking.postBookingData.map(async (answer: any) => {
+        const definition = findDefinition(postBookingDefinitions, answer);
+        if (!isDeclaredFile(answer, definition)) return answer;
+        const result = await presignQuestionAnswerUrl(
+          answer?.answer,
+          [customerId, professionalId],
+          projectId,
+          ['rfq-attachments', 'dispute-attachments'],
+        );
+        return { ...answer, answer: result.url || '' };
+      })
     );
   }
 
@@ -345,9 +412,28 @@ const presignBookingFiles = async (bookingDoc: any) => {
   }
 
   if (Array.isArray(booking?.completionAttestation?.attachments) && booking.completionAttestation.attachments.length > 0) {
-    booking.completionAttestation.attachments = await Promise.all(
-      booking.completionAttestation.attachments.map((url: string) => presignMaybeS3Url(url))
+    const signed = await Promise.all(
+      booking.completionAttestation.attachments.map(async (url: string) => {
+        const result = await presignOwnedUrl(url, [professionalId, customerId], ['completion-attachments']);
+        return result.url;
+      })
     );
+    booking.completionAttestation.attachments = signed.filter((url: string | null): url is string => Boolean(url));
+  }
+
+  // Dispute evidence is party-owned upload data too. Sign only the actual
+  // owner's keys; never echo another uploader's raw key in the legacy booking.
+  if (booking?.dispute && typeof booking.dispute === 'object') {
+    for (const field of ['attachments', 'resolutionAttachments'] as const) {
+      if (!Array.isArray(booking.dispute[field]) || booking.dispute[field].length === 0) continue;
+      const signed = await Promise.all(
+        booking.dispute[field].map(async (url: string) => {
+          const result = await presignOwnedUrl(url, [customerId, professionalId], ['dispute-attachments']);
+          return result.url;
+        }),
+      );
+      booking.dispute[field] = signed.filter((url: string | null): url is string => Boolean(url));
+    }
   }
 
   if (booking?.payment) {
@@ -413,6 +499,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       proceedAtStandardVat === 1 ||
       proceedAtStandardVat === "1" ||
       proceedAtStandardVat === "true";
+    let projectDocForSnapshot: any = null;
+    let professionalDocForSnapshot: any = null;
 
     // Validate required fields
     if (!bookingType || (bookingType !== 'professional' && bookingType !== 'project')) {
@@ -463,6 +551,34 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       return res.status(403).json({
         success: false,
         msg: "Only customers can create bookings"
+      });
+    }
+
+    // RFQ attachments use the dedicated rfq-attachments upload. File answers may
+    // also use the existing project question uploader
+    // (projects/<projectId>/attachment/<userId>/...), but only for this exact
+    // project and uploader. A caller cannot attach an arbitrary private S3
+    // object or another project's key.
+    const rawRfqAttachments = Array.isArray(rfqData?.attachments) ? rfqData.attachments : [];
+    const invalidRfqAttachments = rawRfqAttachments.filter(
+      (url: unknown) => !isUploadOwnedByUser(url, userId, ['rfq-attachments']),
+    );
+    if (invalidRfqAttachments.length > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "One or more RFQ attachments are not valid uploads for this account",
+      });
+    }
+    const invalidFileAnswers = (Array.isArray(rfqData?.answers) ? rfqData.answers : []).filter((answer: any) => {
+      const fieldType = answer?.fieldType || answer?.type;
+      const value = typeof answer?.answer === 'string' ? answer.answer : '';
+      if (fieldType !== 'file' && fieldType !== 'attachment') return false;
+      return Boolean(value) && !isQuestionAnswerUploadOwnedByUser(value, userId, projectId);
+    });
+    if (invalidFileAnswers.length > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "One or more RFQ file answers are not valid uploads for this account",
       });
     }
 
@@ -563,6 +679,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         description: rfqData.description,
         answers: normalizeRfqAnswers(rfqData.answers),
         preferredStartDate: preferredStartDate || rfqData.preferredStartDate,
+        ...(preferredStartTime || rfqData.preferredStartTime
+          ? { preferredStartTime: preferredStartTime || rfqData.preferredStartTime }
+          : {}),
         urgency: urgency || rfqData.urgency || 'medium',
         budget: rfqData.budget,
         attachments: rfqData.attachments || []
@@ -598,6 +717,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       bookingData.professional = professionalId;
+      professionalDocForSnapshot = professional;
 
       const coverageError = await validateServiceCountryCoverage({
         country: bookingData.location.country,
@@ -629,6 +749,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           msg: "Project not found"
         });
       }
+      projectDocForSnapshot = project;
 
       if (project.status !== 'published') {
         return res.status(400).json({
@@ -645,7 +766,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       const projectProfessional = await User.findById(project.professionalId).select(
-        '_id role professionalStatus',
+        '_id role professionalStatus name username email businessInfo timeZone',
       );
       if (
         !projectProfessional ||
@@ -657,6 +778,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           msg: "Project professional is invalid or no longer available",
         });
       }
+      professionalDocForSnapshot = projectProfessional;
 
       bookingData.project = projectId;
       bookingData.professional = project.professionalId;
@@ -983,6 +1105,35 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       });
     }
 
+    // Freeze the booked package/terms/questions before the first save. This is
+    // an absolute whitelist copy; later project edits never touch it.
+    const vatQuestionsForSnapshot = await loadVatQuestionDefinitions(configIdForVat);
+    const scheduleTimeZone = resolveScheduleTimeZone(
+      req.body?.timeZone || req.body?.scheduleTimeZone,
+    );
+    if (scheduleTimeZone) {
+      bookingData.scheduleTimeZone = scheduleTimeZone;
+    }
+    if (!Array.isArray(bookingData.statusHistory) || bookingData.statusHistory.length === 0) {
+      // Preserve the actor on the first append-only lifecycle fact; the model's
+      // legacy default has no updatedBy and must not be used for new bookings.
+      bookingData.statusHistory = [{
+        status: bookingData.status,
+        timestamp: new Date(),
+        updatedBy: new mongoose.Types.ObjectId(userId),
+        note: 'Booking created',
+      }];
+    }
+    captureBookingSnapshotIfMissing({
+      booking: bookingData,
+      project: projectDocForSnapshot,
+      customer,
+      professional: professionalDocForSnapshot,
+      source: 'booking_creation',
+      vatQuestions: vatQuestionsForSnapshot,
+      scheduleTimeZone,
+    });
+
     let booking: IBooking | null = null;
     bookingData._id = new mongoose.Types.ObjectId();
     const calendarBooking = {
@@ -1260,19 +1411,30 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    const isAdmin = req.user?.role === 'admin';
+    const isAdmin = isAdminUser(req.user);
+    let adminAccess: BookingAdminAccess | undefined;
+    if (isAdmin) {
+      adminAccess = await resolveBookingAdminAccess(req.user);
+      if (!adminAccess.bookings) {
+        return res.status(403).json({
+          success: false,
+          msg: "You do not have permission to view this booking",
+          code: "ADMIN_PERMISSION_DENIED",
+        });
+      }
+    }
     const isViewerCustomer = !isAdmin && req.user?.role === 'customer';
 
     const professionalFields = isAdmin
-      ? 'name email phone username businessInfo hourlyRate stripe role createdAt'
+      ? 'name email phone username businessInfo hourlyRate stripe role createdAt vatNumber timeZone'
       : isViewerCustomer
-        ? '_id name username businessInfo.companyName businessInfo.description businessInfo.website businessInfo.city businessInfo.country businessInfo.timezone'
-        : 'name email username businessInfo';
+        ? '_id name username businessInfo.companyName businessInfo.description businessInfo.website businessInfo.city businessInfo.country businessInfo.timezone businessInfo.postalCode timeZone'
+        : 'name email username businessInfo timeZone';
 
     const bookingQuery = Booking.findById(bookingId)
       .populate('customer', isAdmin
-        ? 'name email phone customerType location vatNumber totalSpent'
-        : 'name email phone customerType location')
+        ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone'
+        : 'name username email phone customerType location businessName timeZone')
       .populate('professional', professionalFields)
       .populate(
         'project',
@@ -1305,12 +1467,19 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
     const bookingWithSignedFiles = await presignBookingFiles(booking);
     const viewerRole = isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional';
-    const visibleBooking = bookingForViewer(bookingWithSignedFiles, viewerRole);
+    // Participants keep the existing raw-booking behavior. An admin gets only
+    // the granular areas resolved above: no dispute internals, cancellation
+    // details or payment provider credentials beyond their permissions.
+    const visibleBooking = isAdmin
+      ? filterRawBookingForAdminArea(bookingWithSignedFiles, adminAccess!)
+      : bookingForViewer(bookingWithSignedFiles, viewerRole);
+    const details = await attachBookingDetails(booking, viewerRole, req.user, adminAccess);
 
     return res.status(200).json({
       success: true,
       booking: visibleBooking,
       viewerRole,
+      ...(details ? { details } : {}),
     });
 
   } catch (error: any) {
@@ -1373,7 +1542,22 @@ export const submitPostBookingAnswers = async (
     }
 
     const project = booking.project as any;
-    const postBookingQuestions = project?.postBookingQuestions || [];
+    const livePostBookingQuestions = project?.postBookingQuestions || [];
+    const snapshotPostBookingQuestions = Array.isArray(booking.bookingSnapshot?.questions?.postBooking)
+      ? booking.bookingSnapshot!.questions!.postBooking!
+      : [];
+    // If the snapshot recorded the questions, those are the questions the
+    // customer was promised at booking time. Later project edits must not
+    // change the wording/options of the post-booking form.
+    const postBookingQuestions = snapshotPostBookingQuestions.length > 0
+      ? snapshotPostBookingQuestions.map((question: any) => ({
+          _id: question.questionId,
+          question: question.question,
+          type: question.type,
+          options: question.options,
+          isRequired: question.isRequired,
+        }))
+      : livePostBookingQuestions;
     if (postBookingQuestions.length === 0) {
       return res.status(400).json({
         success: false,
@@ -1394,15 +1578,36 @@ export const submitPostBookingAnswers = async (
         if (q?.question && clientQuestion === q.question) return true;
         return false;
       });
+      const resolvedQuestionId = matchedQuestion?._id?.toString() || matchedQuestion?.id || clientQuestionId;
       return {
-        questionId: matchedQuestion?._id?.toString() || matchedQuestion?.id || clientQuestionId,
+        matched: Boolean(matchedQuestion),
+        questionId: resolvedQuestionId,
         question: matchedQuestion?.question || clientQuestion,
         answer: trimmedAnswer,
+        ...(matchedQuestion?.type ? { fieldType: matchedQuestion.type === 'attachment' ? 'file' : matchedQuestion.type } : {}),
+        ...(Array.isArray(matchedQuestion?.options) ? { options: matchedQuestion.options.map(String) } : {}),
       };
     });
 
+    const projectIdForAnswers = referenceId(booking.project);
+    const invalidFileAnswers = normalizedAnswers.filter((answer) => {
+      if (answer.fieldType !== 'file' && answer.fieldType !== 'attachment') return false;
+      return Boolean(answer.answer)
+        && !isQuestionAnswerUploadOwnedByUser(answer.answer, userIdString, projectIdForAnswers);
+    });
+    if (invalidFileAnswers.length > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "One or more file answers are not valid uploads for this account",
+      });
+    }
+
+    // Answers are accepted only for the authoritative question set: the
+    // captured booking snapshot when it recorded post-booking questions,
+    // otherwise the definitions used at submission. A made-up question id or
+    // wording cannot be injected into the stored answer set.
     const unresolvedAnswers = normalizedAnswers.filter(
-      (a) => a.answer && (!a.questionId || !a.question)
+      (a) => a.answer && (!a.matched || !a.questionId || !a.question)
     );
     if (unresolvedAnswers.length > 0) {
       return res.status(400).json({
@@ -1437,9 +1642,23 @@ export const submitPostBookingAnswers = async (
       });
     }
 
-    booking.postBookingData = normalizedAnswers.filter(
-      (a) => a.answer && a.question && a.questionId
-    ) as any;
+    const submittedAt = new Date();
+    booking.postBookingData = normalizedAnswers
+      .filter((a) => a.matched && a.answer && a.questionId && a.question)
+      .map(({ matched, ...answer }) => answer) as any;
+    booking.postBookingSubmittedAt = submittedAt;
+    booking.postBookingSubmittedBy = new mongoose.Types.ObjectId(userIdString);
+    // When the original snapshot had no post-booking section, capture the
+    // definitions the customer actually answered in a separate later-
+    // provenance field. Never mutate `bookingSnapshot` with questions that
+    // were created after booking.
+    if (snapshotPostBookingQuestions.length === 0) {
+      booking.postBookingQuestionSnapshot = {
+        capturedAt: submittedAt,
+        source: 'post_booking_submission',
+        questions: snapshotQuestionDefinitions(postBookingQuestions),
+      };
+    }
 
     await booking.save();
 
@@ -1722,6 +1941,15 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
     const sanitizedEvidence = Array.isArray(evidence)
       ? evidence.filter((value: unknown): value is string => typeof value === 'string').slice(0, 10)
       : [];
+    const invalidEvidence = sanitizedEvidence.filter(
+      (url) => !isUploadOwnedByUser(url, userId, ['dispute-attachments', 'rfq-attachments']),
+    );
+    if (invalidEvidence.length > 0) {
+      return res.status(400).json({
+        success: false,
+        msg: "One or more evidence files are not valid uploads for this account"
+      });
+    }
     const shouldMarkNoShow = isCustomer && normalizedCategory === 'no_show' && !booking.noShow?.markedAt;
 
     let cancellationRequest!: InstanceType<typeof CancellationRequest>;

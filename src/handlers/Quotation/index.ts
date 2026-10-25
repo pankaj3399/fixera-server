@@ -20,6 +20,8 @@ import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
+import { buildQuoteCustomerTotals, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
 
 const getSafeCommissionPercent = async (): Promise<number> => {
   try {
@@ -516,22 +518,34 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     const customer = booking.customer as any;
     const professional = booking.professional as any;
 
-    // Legacy/partial RFQ bookings may carry an incomplete checkoutSnapshot that
-    // blocks save() via nested required validators.
-    sanitizeIncompleteCheckoutSnapshot(booking);
+    const professionalObjectId = new mongoose.Types.ObjectId(userId);
 
     if (action === 'accepted') {
-      booking.rfqResponse = { action: 'accepted', respondedAt: now };
-      booking.rfqDeadline = addWorkingDays(now, 4);
-      booking.status = 'rfq_accepted';
-      booking.statusHistory.push({
-        status: 'rfq_accepted',
-        timestamp: now,
-        updatedBy: new mongoose.Types.ObjectId(userId),
-        note: 'Professional accepted the RFQ'
-      });
-
-      await booking.save();
+      const rfqDeadline = addWorkingDays(now, 4);
+      // Conditional update keeps a duplicate/overlapping RFQ response from
+      // appending a second history entry or overwriting a later status.
+      const updatedBooking = await Booking.findOneAndUpdate(
+        { _id: booking._id, status: 'rfq' },
+        {
+          $set: {
+            rfqResponse: { action: 'accepted', respondedAt: now, respondedBy: professionalObjectId },
+            rfqDeadline,
+            status: 'rfq_accepted',
+          },
+          $push: {
+            statusHistory: {
+              status: 'rfq_accepted',
+              timestamp: now,
+              updatedBy: professionalObjectId,
+              note: 'Professional accepted the RFQ',
+            },
+          },
+        },
+        { new: true },
+      );
+      if (!updatedBooking) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'RFQ can only be responded to when status is rfq' } });
+      }
 
       try {
         const customerId = customer._id?.toString?.() || customer.id;
@@ -555,8 +569,8 @@ export const respondToRFQ = async (req: Request, res: Response) => {
         success: true,
         data: {
           message: 'RFQ accepted. You have 4 working days to submit a quotation.',
-          booking: bookingForRequest(booking, (req as any).user),
-          rfqDeadline: booking.rfqDeadline,
+          booking: bookingForRequest(updatedBooking, (req as any).user),
+          rfqDeadline: updatedBooking.rfqDeadline,
         }
       });
     }
@@ -566,16 +580,32 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'Rejection reason is required' } });
     }
 
-    booking.rfqResponse = { action: 'rejected', respondedAt: now, rejectionReason };
-    booking.status = 'cancelled';
-    booking.statusHistory.push({
-      status: 'cancelled',
-      timestamp: now,
-      updatedBy: new mongoose.Types.ObjectId(userId),
-      note: `Professional rejected the RFQ: ${rejectionReason}`
-    });
-
-    await booking.save();
+    const rejectedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: 'rfq' },
+      {
+        $set: {
+          rfqResponse: {
+            action: 'rejected',
+            respondedAt: now,
+            respondedBy: professionalObjectId,
+            rejectionReason,
+          },
+          status: 'cancelled',
+        },
+        $push: {
+          statusHistory: {
+            status: 'cancelled',
+            timestamp: now,
+            updatedBy: professionalObjectId,
+            note: `Professional rejected the RFQ: ${rejectionReason}`,
+          },
+        },
+      },
+      { new: true },
+    );
+    if (!rejectedBooking) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'RFQ can only be responded to when status is rfq' } });
+    }
 
     try {
       const customerId = customer._id?.toString?.() || customer.id;
@@ -598,7 +628,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { message: 'RFQ rejected', booking: bookingForRequest(booking, (req as any).user) }
+      data: { message: 'RFQ rejected', booking: bookingForRequest(rejectedBooking, (req as any).user) }
     });
   } catch (error: any) {
     console.error('Error responding to RFQ:', error);
@@ -710,6 +740,16 @@ export const submitQuotation = async (req: Request, res: Response) => {
 
     const now = new Date();
     const versionNumber = 1;
+    const commissionPercent = await getSafeCommissionPercent();
+    const customerTotals = buildQuoteCustomerTotals({
+      booking,
+      totalAmount: normalizedTotalAmount,
+      pricingLines: canonicalPricingLines,
+      commissionPercent,
+      currency: currency || 'EUR',
+      recordedAt: now,
+    });
+    const serviceLocation = quoteServiceLocationSnapshot(booking);
 
     const quoteVersion: any = {
       version: versionNumber,
@@ -736,6 +776,9 @@ export const submitQuotation = async (req: Request, res: Response) => {
       validUntil: new Date(validUntil),
       createdAt: now,
       changeNote: changeNote || 'Initial quotation',
+      createdBy: new mongoose.Types.ObjectId(userId),
+      ...(customerTotals ? { customerTotals } : {}),
+      ...(serviceLocation ? { serviceLocation } : {}),
     };
 
     booking.quoteVersions = [quoteVersion];
@@ -759,7 +802,6 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const professional = booking.professional as any;
 
     try {
-      const commissionPercent = await getSafeCommissionPercent();
       const customerAmount = +(normalizedTotalAmount * (1 + commissionPercent / 100)).toFixed(2);
       const profDisplayName = getProfessionalDisplayName(professional);
       const isDirect = booking.rfqResponse === undefined || booking.rfqResponse === null;
@@ -891,6 +933,22 @@ export const editQuotation = async (req: Request, res: Response) => {
 
     const now = new Date();
     const newVersionNumber = (booking.quoteVersions?.length || 0) + 1;
+    if (!booking.quotationNumber) {
+      // Stable quotation identity is assigned before the version row is
+      // serialized. Legacy bookings can have versions without the parent
+      // number; the version link must never read "undefined-vN".
+      booking.quotationNumber = await getNextQuotationNumber();
+    }
+    const commissionPercent = await getSafeCommissionPercent();
+    const customerTotals = buildQuoteCustomerTotals({
+      booking,
+      totalAmount: normalizedTotalAmount,
+      pricingLines: canonicalPricingLines,
+      commissionPercent,
+      currency: currency || 'EUR',
+      recordedAt: now,
+    });
+    const serviceLocation = quoteServiceLocationSnapshot(booking);
 
     const quoteVersion: any = {
       version: newVersionNumber,
@@ -918,6 +976,9 @@ export const editQuotation = async (req: Request, res: Response) => {
       validUntil: new Date(validUntil),
       createdAt: now,
       changeNote,
+      createdBy: new mongoose.Types.ObjectId(userId),
+      ...(customerTotals ? { customerTotals } : {}),
+      ...(serviceLocation ? { serviceLocation } : {}),
     };
 
     booking.quoteVersions.push(quoteVersion);
@@ -1017,16 +1078,48 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'Rejection reason is required' } });
       }
 
-      booking.status = 'quote_rejected';
-      booking.customerRejectionReason = rejectionReason;
-      booking.statusHistory.push({
+      const versionLabel = currentVersion ? ` v${currentVersion.version}` : '';
+      const customerObjectId = new mongoose.Types.ObjectId(userId);
+      const versionGuard = booking.currentQuoteVersion != null
+        ? { currentQuoteVersion: booking.currentQuoteVersion }
+        : {};
+      const rejectFields: Record<string, any> = {
         status: 'quote_rejected',
-        timestamp: now,
-        updatedBy: new mongoose.Types.ObjectId(userId),
-        note: `Customer rejected quotation: ${rejectionReason}`
-      });
-
-      await booking.save();
+        customerRejectionReason: rejectionReason,
+        ...(currentVersion
+          ? {
+              'quoteVersions.$[rejectedVersion].rejectedAt': now,
+              'quoteVersions.$[rejectedVersion].rejectionReason': rejectionReason,
+              'quoteVersions.$[rejectedVersion].rejectedBy': customerObjectId,
+            }
+          : {}),
+      };
+      const rejectedBooking = await Booking.findOneAndUpdate(
+        { _id: booking._id, status: 'quoted', ...versionGuard },
+        {
+          $set: rejectFields,
+          $push: {
+            statusHistory: {
+              status: 'quote_rejected',
+              timestamp: now,
+              updatedBy: customerObjectId,
+              note: `Customer rejected quotation${versionLabel}: ${rejectionReason}`,
+            },
+          },
+        },
+        {
+          new: true,
+          ...(currentVersion
+            ? { arrayFilters: [{ 'rejectedVersion.version': Number(currentVersion.version) }] }
+            : {}),
+        },
+      );
+      if (!rejectedBooking) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_STATUS', message: 'Can only respond to quotations when status is quoted' },
+        });
+      }
 
       try {
         const professionalId = professional._id?.toString?.() || professional.id;
@@ -1050,14 +1143,26 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
 
       return res.json({
         success: true,
-        data: { message: 'Quotation rejected', booking: bookingForRequest(booking, (req as any).user) }
+        data: { message: 'Quotation rejected', booking: bookingForRequest(rejectedBooking, (req as any).user) }
       });
     }
 
-    // Accept
-    // Copy milestones from current version to booking milestonePayments
+    // Accept. The update is conditional on the status/version that was
+    // validated above, so an overlapping edit or double response cannot bind
+    // a superseded version or append a second acceptance fact.
+    const acceptSet: Record<string, any> = {
+      status: 'quote_accepted',
+      quote: {
+        amount: currentVersion?.totalAmount || 0,
+        currency: currentVersion?.currency || 'EUR',
+        description: currentVersion?.description,
+        validUntil: currentVersion?.validUntil,
+        submittedAt: currentVersion?.createdAt || now,
+        submittedBy: booking.professional!._id,
+      },
+    };
     if (currentVersion?.milestones && currentVersion.milestones.length > 0) {
-      booking.milestonePayments = currentVersion.milestones.map(m => ({
+      acceptSet.milestonePayments = currentVersion.milestones.map(m => ({
         title: m.title,
         amount: m.amount,
         description: m.description,
@@ -1068,27 +1173,34 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         workStatus: 'pending',
       }));
     }
-
-    // Also populate legacy quote field for backward compat with payment system
-    const baseAmount = currentVersion?.totalAmount || 0
-    booking.quote = {
-      amount: baseAmount,
-      currency: currentVersion?.currency || 'EUR',
-      description: currentVersion?.description,
-      validUntil: currentVersion?.validUntil,
-      submittedAt: currentVersion?.createdAt || now,
-      submittedBy: booking.professional!._id,
-    };
-
-    booking.status = 'quote_accepted';
-    booking.statusHistory.push({
-      status: 'quote_accepted',
-      timestamp: now,
-      updatedBy: new mongoose.Types.ObjectId(userId),
-      note: 'Customer accepted quotation'
-    });
-
-    await booking.save();
+    if (currentVersion) {
+      acceptSet.acceptedQuoteVersion = Number(currentVersion.version);
+      acceptSet.acceptedQuotationNumber = currentVersion.quotationNumber;
+    }
+    const versionGuard = booking.currentQuoteVersion != null
+      ? { currentQuoteVersion: booking.currentQuoteVersion }
+      : {};
+    const acceptedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: 'quoted', ...versionGuard },
+      {
+        $set: acceptSet,
+        $push: {
+          statusHistory: {
+            status: 'quote_accepted',
+            timestamp: now,
+            updatedBy: new mongoose.Types.ObjectId(userId),
+            note: 'Customer accepted quotation',
+          },
+        },
+      },
+      { new: true },
+    );
+    if (!acceptedBooking) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_STATUS', message: 'Can only respond to quotations when status is quoted' },
+      });
+    }
 
     try {
       const professionalId = professional._id?.toString?.() || professional.id;
@@ -1113,7 +1225,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       success: true,
       data: {
         message: 'Quotation accepted. Please complete the booking wizard to select your start date and proceed to payment.',
-        booking: bookingForRequest(booking, (req as any).user),
+        booking: bookingForRequest(acceptedBooking, (req as any).user),
         requiresBookingWizard: true,
       }
     });
@@ -1164,7 +1276,7 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       }
     }
     if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
-      linkedProject = await Project.findById(projectId).select('title subprojects professionalId status services category service areaOfWork serviceConfigurationId');
+      linkedProject = await Project.findById(projectId);
       if (!linkedProject) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_PROJECT', message: 'Project not found' } });
       }
@@ -1251,6 +1363,18 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
           : 'Professional-initiated direct quotation',
       }],
     };
+
+    const vatQuestionsForSnapshot = await loadVatQuestionDefinitions(
+      linkedProject?.serviceConfigurationId?.toString(),
+    );
+    captureBookingSnapshotIfMissing({
+      booking: bookingData,
+      project: linkedProject,
+      customer,
+      professional,
+      source: 'direct_quotation_creation',
+      vatQuestions: vatQuestionsForSnapshot,
+    });
 
     const booking = await Booking.create(bookingData);
 

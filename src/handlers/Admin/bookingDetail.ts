@@ -5,6 +5,11 @@ import Payment from "../../models/payment";
 import CancellationRequest from "../../models/cancellationRequest";
 import { auditLog } from "../../utils/auditLogger";
 import { params } from "../../utils/requestParams";
+import { buildDetailsForBookingDocument } from "../Booking/details";
+import {
+  filterRawBookingForAdminArea,
+  resolveBookingAdminAccess,
+} from "../../utils/bookingDetails/adminAccess";
 
 export const ADMIN_FORCEABLE_STATUSES = [
   "payment_pending",
@@ -23,9 +28,9 @@ export const getAdminBookingDetail = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(id)
-      .populate("customer", "name email phone role")
-      .populate("professional", "name email username role")
-      .populate("project", "title category service")
+      .populate("customer", "name username email phone role customerType location vatNumber totalSpent timeZone businessName")
+      .populate("professional", "name username email phone role businessInfo vatNumber timeZone")
+      .populate("project", "title description pricing category service areaOfWork timeMode priceModel media rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration services customConfirmationMessage resources")
       .populate("rescheduleHistory.requestedBy", "name email")
       .populate("rescheduleHistory.respondedBy", "name email")
       .populate("dispute.raisedBy", "name email")
@@ -36,24 +41,46 @@ export const getAdminBookingDetail = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, msg: "Booking not found" });
     }
 
+    const adminUser = (req as any).admin || (req as any).user;
+    const adminAccess = await resolveBookingAdminAccess(adminUser);
+    if (!adminAccess.bookings) {
+      return res.status(403).json({
+        success: false,
+        msg: "You do not have permission to view this booking",
+        code: "ADMIN_PERMISSION_DENIED",
+      });
+    }
+
     const [payment, cancellationRequests] = await Promise.all([
-      Payment.findOne({ booking: id })
-        .populate("customer", "name email")
-        .populate("professional", "name email")
-        .lean(),
-      CancellationRequest.find({ booking: id })
-        .sort({ createdAt: -1 })
-        .populate("requestedBy", "name email")
-        .populate("resolvedBy", "name email")
-        .lean(),
+      adminAccess.payments
+        ? Payment.findOne({ booking: id })
+            .populate("customer", "name email")
+            .populate("professional", "name email")
+            .lean()
+        : Promise.resolve(null),
+      adminAccess.cancellations
+        ? CancellationRequest.find({ booking: id })
+            .sort({ createdAt: -1 })
+            .populate("requestedBy", "name email")
+            .populate("resolvedBy", "name email")
+            .lean()
+        : Promise.resolve([]),
     ]);
+
+    const details = await buildDetailsForBookingDocument({
+      booking,
+      viewerRole: "admin",
+      user: adminUser,
+      adminAccess,
+    });
 
     return res.json({
       success: true,
       data: {
-        booking,
+        booking: filterRawBookingForAdminArea(booking, adminAccess),
         payment,
         cancellationRequests,
+        details,
       },
     });
   } catch (error: any) {

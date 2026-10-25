@@ -179,6 +179,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
         const result = await executeRefund(String(booking._id), {
           reason: resolvedReason,
           ...(customAmount !== undefined ? { amount: customAmount } : {}),
+          actorId: adminObjectId,
         });
         refundAmount = result.amount;
         refundedAt = new Date();

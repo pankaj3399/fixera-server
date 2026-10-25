@@ -651,6 +651,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         const refundResult = await executeRefund(resolvedBooking._id.toString(), {
           amount: customRefundAmount,
           reason: refundReason,
+          actorId: adminUser._id,
         });
         await Booking.updateOne(
           { _id: resolvedBooking._id },

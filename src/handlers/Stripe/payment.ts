@@ -31,6 +31,11 @@ import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
 import PlatformSettings from '../../models/platformSettings';
+import {
+  loadBasePaymentRows,
+  recordBasePaymentRefund,
+} from '../../utils/paymentRefundLedger';
+import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
@@ -838,8 +843,28 @@ export const confirmPayment = async (req: Request, res: Response) => {
       if (typeof msIdx === 'number') {
         milestoneFilter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
       }
+      const flipsToBooked = updateFields.status === 'booked';
+      if (flipsToBooked) {
+        milestoneFilter.status = { $in: ['quote_accepted', 'payment_pending'] };
+      }
 
-      await Booking.findOneAndUpdate(milestoneFilter, { $set: updateFields });
+      const updateOperation: Record<string, any> = { $set: updateFields };
+      if (flipsToBooked) {
+        updateOperation.$push = {
+          statusHistory: {
+            status: 'booked',
+            timestamp: now,
+            note: 'Payment confirmed — booking confirmed',
+          },
+        };
+      }
+      const updated = await Booking.findOneAndUpdate(milestoneFilter, updateOperation, { new: true });
+      if (!updated && flipsToBooked) {
+        // Another writer (usually the webhook) already flipped the status.
+        // Still persist the payment fields without appending a second history row.
+        const { status, ...paymentFields } = updateFields;
+        await Booking.findOneAndUpdate({ _id: booking._id }, { $set: paymentFields });
+      }
       const refreshed = await Booking.findById(booking._id);
       if (refreshed) {
         booking.payment = refreshed.payment;
@@ -1211,9 +1236,12 @@ export interface RefundResult {
 
 export const executeRefund = async (
   bookingId: string,
-  opts: { amount?: number; reason?: string }
+  opts: { amount?: number; reason?: string; actorId?: string | mongoose.Types.ObjectId | null }
 ): Promise<RefundResult> => {
   const { amount, reason } = opts;
+  const refundActorId = opts.actorId && mongoose.Types.ObjectId.isValid(String(opts.actorId))
+    ? new mongoose.Types.ObjectId(String(opts.actorId))
+    : undefined;
 
   if (typeof bookingId !== 'string' || !bookingId.trim() || !mongoose.Types.ObjectId.isValid(bookingId)) {
     throw new RefundError('INVALID_BOOKING_ID', 'bookingId must be a valid non-empty ID');
@@ -1238,17 +1266,35 @@ export const executeRefund = async (
   }
 
   const totalWithVat = booking.payment?.totalWithVat ?? 0;
-  let previousRefundTotal = 0;
-  if (['completed', 'authorized', 'partially_refunded'].includes(booking.payment.status)) {
-    const existingPayment = await Payment.findOne({ booking: booking._id });
-    if (existingPayment) {
-      previousRefundTotal = (existingPayment.refunds || []).reduce(
-        (sum: number, r: any) => sum + (r.amount || 0),
-        0
-      );
-    }
-  }
-  const remainingRefundable = Math.max(0, totalWithVat - previousRefundTotal);
+  const roundMoneyLocal = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+  // Cash already returned by every actual refund on this base PaymentIntent:
+  // booking-price refunds AND negative extra-cost refunds share the same
+  // charge. The booking aggregate is only a booking-price fact, so it is
+  // reduced by booking-kind rows (never by extra rows) to avoid double count.
+  // Milestone/other Payment rows are excluded by loadBasePaymentRows.
+  const basePaymentRows = await loadBasePaymentRows(
+    booking,
+    booking.payment.stripePaymentIntentId,
+  );
+  const baseRefunds = summarizeBaseRefunds(basePaymentRows);
+  const existingBookingRefunds = baseRefunds.refunds.filter(
+    (refund: any) => refund?.kind !== 'extra_cost',
+  );
+  const aggregateRefundTotal = Number(booking.payment?.refundAmount);
+  const aggregateBookingRefund = Number.isFinite(aggregateRefundTotal) && aggregateRefundTotal > 0
+    ? roundMoneyLocal(aggregateRefundTotal)
+    : 0;
+  const aggregateResidual = Math.max(
+    0,
+    roundMoneyLocal(aggregateBookingRefund - baseRefunds.bookingTotal),
+  );
+  const previousBookingRefundTotal = roundMoneyLocal(baseRefunds.bookingTotal + aggregateResidual);
+  // Refundable capacity must include extra-cost refunds because Stripe will
+  // reject a later refund that would take the charge above its original
+  // amount. Booking totals/status below still use only booking-price facts.
+  const previousRefundTotal = roundMoneyLocal(baseRefunds.allTotal + aggregateResidual);
+  const remainingRefundable = Math.max(0, roundMoneyLocal(totalWithVat - previousRefundTotal));
   if (remainingRefundable <= 0) {
     throw new RefundError(
       'REFUND_EXCEEDS_TOTAL',
@@ -1265,12 +1311,55 @@ export const executeRefund = async (
   const refundIntentVersion = normalizedAmount
     ? `partial-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}-${normalizedAmount}`
     : `full-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}`;
+  // The only stored authoritative split is the payment-level net/VAT. When
+  // earlier partial refunds each recorded their split, the remaining split is
+  // arithmetic over those recorded facts. Never proportionally invent a split
+  // for a legacy/partial row: an unknown earlier split suppresses the copy.
+  // Extra-cost refunds are excluded from this booking VAT arithmetic.
+  const refundVatSplit: { netAmount?: number; vatAmount?: number; vatRate?: number } = (() => {
+    if (Math.abs(refundAmount - remainingRefundable) >= 0.01) return {};
+    if (typeof booking.payment.netAmount !== 'number' || typeof booking.payment.vatAmount !== 'number') {
+      return {};
+    }
+    if (previousRefundTotal <= 0.005) {
+      return {
+        netAmount: booking.payment.netAmount,
+        vatAmount: booking.payment.vatAmount,
+        ...(typeof booking.payment.vatRate === 'number' ? { vatRate: booking.payment.vatRate } : {}),
+      };
+    }
+    const priorSplitsRecorded = existingBookingRefunds.every(
+      (refund: any) => typeof refund.netAmount === 'number' && typeof refund.vatAmount === 'number',
+    );
+    if (!priorSplitsRecorded) return {};
+    const priorNet = existingBookingRefunds.reduce(
+      (sum: number, refund: any) => sum + Number(refund.netAmount),
+      0,
+    );
+    const priorVat = existingBookingRefunds.reduce(
+      (sum: number, refund: any) => sum + Number(refund.vatAmount),
+      0,
+    );
+    const remainingNet = roundMoneyLocal(booking.payment.netAmount - priorNet);
+    const remainingVat = roundMoneyLocal(booking.payment.vatAmount - priorVat);
+    if (remainingNet < -0.005 || remainingVat < -0.005) return {};
+    if (Math.abs(remainingNet + remainingVat - refundAmount) > 0.02) return {};
+    return {
+      netAmount: Math.max(0, remainingNet),
+      vatAmount: Math.max(0, remainingVat),
+      ...(typeof booking.payment.vatRate === 'number' ? { vatRate: booking.payment.vatRate } : {}),
+    };
+  })();
 
   if (booking.payment.status === 'authorized') {
     const refund = await stripe.refunds.create(
       {
         payment_intent: booking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, booking.payment.currency || 'EUR'),
+        metadata: {
+          bookingId: booking._id.toString(),
+          refundKind: 'booking',
+        },
       },
       {
         idempotencyKey: generateIdempotencyKey({
@@ -1282,9 +1371,14 @@ export const executeRefund = async (
     );
 
     const isPartial = !!normalizedAmount && normalizedAmount < remainingRefundable;
+    const refundCreatedAt = typeof (refund as any).created === 'number'
+      ? new Date((refund as any).created * 1000)
+      : new Date();
     booking.payment.status = isPartial ? 'partially_refunded' : 'refunded';
-    booking.payment.refundedAt = new Date();
-    booking.payment.refundAmount = previousRefundTotal + refundAmount;
+    booking.payment.refundedAt = refundCreatedAt;
+    // The booking aggregate is a booking-price fact; extra-cost refunds stay
+    // out of it even though they reduced the cash refundable capacity above.
+    booking.payment.refundAmount = roundMoneyLocal(previousBookingRefundTotal + refundAmount);
     booking.payment.refundReason = reason;
     booking.payment.refundSource = 'platform';
     if (!isPartial) {
@@ -1292,37 +1386,40 @@ export const executeRefund = async (
     }
     await booking.save();
 
-    await Payment.findOneAndUpdate(
-      { booking: booking._id, "refunds.refundId": { $ne: refund.id } },
-      {
-        $set: buildPaymentUpsertBase(booking, {
-          status: booking.payment.status,
-          refundedAt: booking.payment.refundedAt,
-        }),
-        $push: {
-          refunds: {
-            amount: refundAmount,
-            reason,
-            refundId: refund.id,
-            refundedAt: booking.payment.refundedAt || new Date(),
-            source: 'platform',
-            notes: 'Refund issued before transfer to professional',
-          },
-        },
+    await recordBasePaymentRefund({
+      booking,
+      set: {
+        status: booking.payment.status,
+        refundedAt: booking.payment.refundedAt,
       },
-      { upsert: true }
-    );
+      refund: {
+        amount: refundAmount,
+        reason,
+        refundId: refund.id,
+        refundedAt: refundCreatedAt,
+        source: 'platform',
+        notes: 'Refund issued before transfer to professional',
+        kind: 'booking',
+        status: refund.status || undefined,
+        ...(refundActorId ? { refundedBy: refundActorId } : {}),
+        ...refundVatSplit,
+      },
+    });
 
     console.log(`✅ Payment refunded for booking ${booking._id}: ${refund.id}`);
 
     return { refundId: refund.id, amount: refundAmount, status: refund.status || undefined, refundSource: 'platform' };
   }
 
-  if (booking.payment.status === 'completed' || booking.payment.status === 'partially_refunded') {
+  if (['completed', 'partially_refunded', 'captured'].includes(String(booking.payment.status))) {
     const refund = await stripe.refunds.create(
       {
         payment_intent: booking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, booking.payment.currency || 'EUR'),
+        metadata: {
+          bookingId: booking._id.toString(),
+          refundKind: 'booking',
+        },
       },
       {
         idempotencyKey: generateIdempotencyKey({
@@ -1367,34 +1464,37 @@ export const executeRefund = async (
 
     booking.payment.status =
       normalizedAmount && normalizedAmount < remainingRefundable ? 'partially_refunded' : 'refunded';
-    booking.payment.refundedAt = new Date();
-    booking.payment.refundAmount = previousRefundTotal + refundAmount;
+    const refundCreatedAt = typeof (refund as any).created === 'number'
+      ? new Date((refund as any).created * 1000)
+      : new Date();
+    booking.payment.refundedAt = refundCreatedAt;
+    // Keep the historical aggregate limited to booking-price refunds.
+    booking.payment.refundAmount = roundMoneyLocal(previousBookingRefundTotal + refundAmount);
     booking.payment.refundReason = reason;
     if (booking.payment.status === 'refunded') {
       booking.status = 'refunded';
     }
     await booking.save();
 
-    await Payment.findOneAndUpdate(
-      { booking: booking._id, "refunds.refundId": { $ne: refund.id } },
-      {
-        $set: buildPaymentUpsertBase(booking, {
-          status: booking.payment.status,
-          refundedAt: booking.payment.refundedAt,
-        }),
-        $push: {
-          refunds: {
-            amount: refundAmount,
-            reason,
-            refundId: refund.id,
-            refundedAt: booking.payment.refundedAt || new Date(),
-            source: booking.payment.refundSource || 'platform',
-            notes: booking.payment.refundNotes,
-          },
-        },
+    await recordBasePaymentRefund({
+      booking,
+      set: {
+        status: booking.payment.status,
+        refundedAt: booking.payment.refundedAt,
       },
-      { upsert: true }
-    );
+      refund: {
+        amount: refundAmount,
+        reason,
+        refundId: refund.id,
+        refundedAt: refundCreatedAt,
+        source: booking.payment.refundSource || 'platform',
+        notes: booking.payment.refundNotes,
+        kind: 'booking',
+        status: refund.status || undefined,
+        ...(refundActorId ? { refundedBy: refundActorId } : {}),
+        ...refundVatSplit,
+      },
+    });
 
     console.log(`✅ Refund processed for booking ${booking._id}: ${refund.id}`);
 
@@ -1407,6 +1507,154 @@ export const executeRefund = async (
   }
 
   throw new RefundError('INVALID_STATUS', 'Payment cannot be refunded in current status');
+};
+
+export interface ExtraCostRefundFact {
+  refundId: string;
+  amount: number;
+  status?: string;
+  refundedAt?: Date;
+  obligationId?: string;
+  reason?: string;
+  notes?: string;
+}
+
+/**
+ * Persist one actual extra-cost refund fact (created here or reconciled from
+ * the provider). The ledger write dedupes by provider refund id.
+ */
+export const recordExtraCostRefundFact = async (params: {
+  booking: any;
+  fact: ExtraCostRefundFact;
+  actorId?: string | mongoose.Types.ObjectId | null;
+}): Promise<void> => {
+  const { booking, fact } = params;
+  if (!fact?.refundId) return;
+  const refundActorId = params.actorId && mongoose.Types.ObjectId.isValid(String(params.actorId))
+    ? new mongoose.Types.ObjectId(String(params.actorId))
+    : undefined;
+  await recordBasePaymentRefund({
+    booking,
+    refund: {
+      amount: fact.amount,
+      ...(fact.reason ? { reason: fact.reason } : {}),
+      refundId: fact.refundId,
+      refundedAt: fact.refundedAt || new Date(),
+      source: 'platform',
+      notes: fact.notes || 'Refund of unused negative extra-cost work; recorded separately from booking-price refunds.',
+      kind: 'extra_cost',
+      ...(fact.status ? { status: fact.status as any } : {}),
+      ...(fact.obligationId ? { obligationId: fact.obligationId } : {}),
+      ...(refundActorId ? { refundedBy: refundActorId } : {}),
+    },
+  });
+};
+
+/**
+ * Refund a negative extra-cost adjustment against the base PaymentIntent.
+ *
+ * This is deliberately not a booking-price refund: it must carry the
+ * `refundKind:"extra_cost"` provider metadata (so webhooks classify it
+ * correctly) and write a `kind:"extra_cost"` ledger row, but it must never
+ * change booking.payment.status/refundAmount or the booking VAT split. Both
+ * the customer-confirmation and automatic-acceptance completion paths use
+ * this one operation.
+ *
+ * `obligationId` is the logical completion-refund identity carried in provider
+ * metadata so a later reconciliation can recognise this obligation without
+ * relying on the provider's finite idempotency-key window.
+ */
+export const refundExtraCostAdjustment = async (params: {
+  booking: any;
+  amount: number;
+  reason: string;
+  actorId?: string | mongoose.Types.ObjectId | null;
+  obligationId?: string;
+  attempt?: number;
+  claimId?: string;
+}): Promise<{ refundId: string; amount: number; status?: string }> => {
+  const { booking, reason } = params;
+  const paymentIntentId = booking?.payment?.stripePaymentIntentId;
+  if (!paymentIntentId) {
+    throw new RefundError('NO_PAYMENT', 'No payment to refund');
+  }
+  const amount = Number(params.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new RefundError('INVALID_AMOUNT', 'extra-cost refund amount must be greater than 0');
+  }
+  const currency = (booking.payment.currency || 'EUR').toLowerCase();
+  const amountMinor = convertToStripeAmount(amount, currency);
+  const obligationId = typeof params.obligationId === 'string' && params.obligationId.trim()
+    ? params.obligationId.trim()
+    : undefined;
+  const attempt = Number(params.attempt) > 0 ? Math.floor(Number(params.attempt)) : 0;
+  // A legacy marker without an obligation id keeps the historical key; new
+  // obligations include their logical id. A retry after a recorded
+  // failed/canceled refund needs a distinct key because the provider would
+  // otherwise replay the failed refund forever; reconciliation must have
+  // proven no successful/pending refund exists before this version is used.
+  const baseVersion = obligationId
+    ? `${paymentIntentId}:${amountMinor}:${obligationId}`
+    : `${paymentIntentId}:${amountMinor}`;
+  const keyVersion = attempt > 0 ? `${baseVersion}:retry-${attempt}` : baseVersion;
+
+  const refund = await stripe.refunds.create(
+    {
+      payment_intent: paymentIntentId,
+      amount: amountMinor,
+      metadata: {
+        bookingId: booking._id.toString(),
+        refundKind: 'extra_cost',
+        ...(obligationId ? { obligationId } : {}),
+      },
+    },
+    {
+      idempotencyKey: generateIdempotencyKey({
+        bookingId: booking._id.toString(),
+        operation: 'unit-underuse-refund',
+        version: keyVersion,
+      }),
+    },
+  );
+
+  const refundCreatedAt = typeof (refund as any).created === 'number'
+    ? new Date((refund as any).created * 1000)
+    : new Date();
+
+  // Persist the accepted provider id on the fenced marker before the ledger
+  // write. If the write fails, the retry can retrieve this exact refund instead
+  // of guessing or creating another one.
+  if (params.claimId) {
+    await Booking.updateOne(
+      {
+        _id: booking._id,
+        'payment.extraCostRefundPending.amount': { $gt: 0 },
+        'payment.extraCostRefundPending.claimId': params.claimId,
+      },
+      {
+        $set: {
+          'payment.extraCostRefundPending.providerRefundId': refund.id,
+          ...(obligationId ? { 'payment.extraCostRefundPending.obligationId': obligationId } : {}),
+        },
+      },
+    ).catch(() => undefined);
+  }
+
+  await recordExtraCostRefundFact({
+    booking,
+    fact: {
+      refundId: refund.id,
+      amount,
+      status: refund.status || undefined,
+      refundedAt: refundCreatedAt,
+      obligationId,
+      reason,
+    },
+    actorId: params.actorId,
+  });
+
+  console.log(`✅ Extra-cost adjustment refunded for booking ${booking._id}: ${refund.id}`);
+  return { refundId: refund.id, amount, status: refund.status || undefined };
 };
 
 /**
@@ -1449,7 +1697,7 @@ export const refundPayment = async (req: Request, res: Response) => {
       });
     }
 
-    const result = await executeRefund(bookingId, { amount, reason });
+    const result = await executeRefund(bookingId, { amount, reason, actorId: userId });
 
     if (user?.role === 'admin') {
       await auditLog({

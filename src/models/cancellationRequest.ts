@@ -56,8 +56,12 @@ export interface ICancellationRequest extends Document {
   professionalNote?: string;
   counterOfferAmount?: number;
   professionalRespondedAt?: Date;
+  /** Actual user who submitted the professional response, when recorded. */
+  professionalRespondedBy?: Types.ObjectId;
   customerDecision?: CancellationCustomerDecision;
   customerRespondedAt?: Date;
+  /** Actual user who submitted the customer response, when recorded. */
+  customerRespondedBy?: Types.ObjectId;
   escalatedAt?: Date;
   escalationReason?: CancellationEscalationReason;
   // Final resolution (professional approval or admin)
@@ -117,8 +121,10 @@ const CancellationRequestSchema = new Schema<ICancellationRequest>(
     professionalNote: { type: String, trim: true, maxlength: 1000 },
     counterOfferAmount: { type: Number, min: 0 },
     professionalRespondedAt: { type: Date },
+    professionalRespondedBy: { type: Schema.Types.ObjectId, ref: "User" },
     customerDecision: { type: String, enum: ["accepted", "refused"] },
     customerRespondedAt: { type: Date },
+    customerRespondedBy: { type: Schema.Types.ObjectId, ref: "User" },
     escalatedAt: { type: Date },
     escalationReason: { type: String, enum: ["rejected", "refused", "no_response"] },
     resolvedAt: { type: Date },
