@@ -19,6 +19,7 @@
     "migrate:service-config-active-countries": "npx tsx src/scripts/migrate/migrateServiceConfigActiveCountries.ts",
     "migrate:marketing-suppressions": "npx tsx src/scripts/migrate/backfillMarketingSuppression.ts",
     "migrate:marketing-identities": "npx tsx src/scripts/migrate/backfillMarketingIdentities.ts",
+    "migrate:marketing-leads": "npx tsx src/scripts/migrate/migrateMarketingLeads.ts",
     "migrate:project-statuses": "npx tsx src/scripts/migrate/migrateProjectStatuses.ts",
     "migrate:preparation-duration": "npx tsx src/scripts/migrate/migratePreparationDuration.ts",
     "migrate:support-indexes": "npx tsx src/scripts/migrate/createSupportIndexes.ts",

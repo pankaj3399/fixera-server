@@ -1,9 +1,13 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import MarketingCampaign, {
+  MARKETING_AUDIENCE_TYPES,
   MARKETING_CAMPAIGN_TYPES,
   MARKETING_CAMPAIGN_STATUSES,
   MARKETING_LOCALES,
+  campaignAudienceType,
+  isLeadAudienceType,
+  type MarketingAudienceType,
   type MarketingCampaignType,
   type MarketingLocale,
 } from '../../models/marketingCampaign';
@@ -32,6 +36,41 @@ class MarketingInputError extends Error {}
 function configuredInactiveDays(): number {
   const value = Math.floor(Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS));
   return Number.isFinite(value) && value > 0 ? value : 60;
+}
+
+function parseAudienceType(
+  value: unknown,
+  fallback: MarketingAudienceType,
+): MarketingAudienceType {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== 'string') {
+    throw new MarketingInputError('Audience type must be one of: subscribers, both, leads');
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (!(MARKETING_AUDIENCE_TYPES as readonly string[]).includes(normalized)) {
+    throw new MarketingInputError('Audience type must be one of: subscribers, both, leads');
+  }
+  return normalized as MarketingAudienceType;
+}
+
+function assertAudiencePolicy(
+  campaignType: MarketingCampaignType,
+  audienceType: MarketingAudienceType,
+  roles: Array<'customer' | 'professional'>,
+  opts?: { typeChangedAwayFromLeads?: boolean },
+): void {
+  if (audienceType === 'subscribers') return;
+  if (campaignType !== 'invitation') {
+    throw new MarketingInputError(
+      opts?.typeChangedAwayFromLeads
+        ? 'Select Subscribers before changing this campaign type'
+        : 'Lead audiences are only available for invitation campaigns',
+    );
+  }
+  if (!roles.includes('professional')) {
+    throw new MarketingInputError('Lead audiences require the professional role');
+  }
 }
 
 function parseAudience(body: any, existing?: {
@@ -140,11 +179,21 @@ function validateLocaleContent(
 
 function serializeCampaign(doc: any) {
   const obj = doc.toObject ? doc.toObject() : doc;
-  const { audienceType: _legacyAudienceType, ...campaign } = obj;
+  const { audienceTypeInvalid: _ignoredAudienceTypeInvalid, ...campaign } = obj;
+  const audienceType = campaignAudienceType(obj.audienceType);
+  const rawAudienceType =
+    typeof obj.audienceType === 'string' && obj.audienceType.trim()
+      ? obj.audienceType.trim()
+      : null;
   return {
     ...campaign,
-    _id: String(campaign._id),
-    createdBy: campaign.createdBy ? String(campaign.createdBy) : undefined,
+    _id: String(obj._id),
+    createdBy: obj.createdBy ? String(obj.createdBy) : undefined,
+    // Missing legacy values behave as subscribers. A recognized value is
+    // preserved. An unknown stored value stays visible so it is never silently
+    // relabeled, and send/preview refuse it until an admin corrects it.
+    audienceType: audienceType ?? rawAudienceType,
+    ...(audienceType === undefined ? { audienceTypeInvalid: true } : {}),
   };
 }
 
@@ -165,7 +214,8 @@ export const listMarketingCampaigns = async (req: Request, res: Response) => {
     if (typeof type === 'string' && (MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       query.type = type;
     } else {
-      // Do not expose legacy lead/invitation campaigns through the active UI.
+      // Invitation campaigns are part of the active UI, including recognized
+      // legacy invitation campaigns. No type is hidden by the list.
       query.type = { $in: MARKETING_CAMPAIGN_TYPES };
     }
     if (typeof status === 'string' && status.trim()) query.status = status.trim();
@@ -241,7 +291,9 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
       });
     }
 
+    const audienceType = parseAudienceType(req.body?.audienceType, 'subscribers');
     const audience = parseAudience(req.body?.audience || req.body);
+    assertAudiencePolicy(type as MarketingCampaignType, audienceType, audience.roles);
     validateLocaleContent(content, audience);
     let scheduled: Date | null = null;
     if (scheduledAt) {
@@ -255,6 +307,7 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     const campaign = await MarketingCampaign.create({
       name: name.trim(),
       type: type as MarketingCampaignType,
+      audienceType,
       status: scheduled && scheduled.getTime() > Date.now() ? 'scheduled' : 'draft',
       content,
       audience,
@@ -292,7 +345,7 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     if (['sending', 'sent'].includes(campaign.status)) {
       return res.status(400).json({ success: false, msg: 'Sent campaigns cannot be edited' });
     }
-    if (campaign.deliveries.some((delivery) => delivery.brevoCampaignId)) {
+    if (campaign.deliveries.some((delivery) => delivery.brevoCampaignId || delivery.brevoListId)) {
       return res.status(400).json({
         success: false,
         msg: 'Partially delivered campaigns are immutable; create a new campaign instead',
@@ -302,6 +355,8 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
 
     const { name, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
     if (typeof name === 'string' && name.trim().length >= 2) campaign.name = name.trim();
+
+    let nextAudience = campaign.audience as any;
     if (
       req.body?.audience ||
       req.body?.countries ||
@@ -311,7 +366,52 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
       req.body?.roles
     ) {
       // Merge partial audience updates so unspecified filters are preserved
-      campaign.audience = parseAudience(req.body?.audience || req.body, campaign.audience as any) as any;
+      nextAudience = parseAudience(req.body?.audience || req.body, campaign.audience as any);
+    }
+
+    let nextType = campaign.type;
+    let typeChanged = false;
+    if (req.body?.type !== undefined) {
+      if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(req.body.type)) {
+        return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
+      }
+      nextType = req.body.type as MarketingCampaignType;
+      typeChanged = nextType !== campaign.type;
+    }
+
+    const existingAudienceType = campaignAudienceType(campaign.audienceType);
+    const nextAudienceType =
+      req.body?.audienceType !== undefined
+        ? parseAudienceType(req.body.audienceType, 'subscribers')
+        : existingAudienceType;
+    if (!nextAudienceType) {
+      throw new MarketingInputError('Select an audience type: subscribers, both, leads');
+    }
+    assertAudiencePolicy(
+      nextType,
+      nextAudienceType,
+      nextAudience.roles || ['customer', 'professional'],
+      {
+        typeChangedAwayFromLeads:
+          typeChanged &&
+          nextType !== 'invitation' &&
+          isLeadAudienceType(existingAudienceType) &&
+          req.body?.audienceType === undefined,
+      },
+    );
+
+    campaign.audience = nextAudience;
+    campaign.audienceType = nextAudienceType;
+    if (typeChanged) {
+      campaign.type = nextType;
+      if (campaign.type === 'reengagement') {
+        if (!Number.isFinite(Number(campaign.inactiveDays)) || Number(campaign.inactiveDays) <= 0) {
+          campaign.inactiveDays = configuredInactiveDays();
+        }
+      } else {
+        campaign.inactiveDays = undefined;
+        campaign.autoSend = false;
+      }
     }
     if (req.body?.content) {
       const content = parseContent(req.body);
@@ -319,22 +419,6 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
         return res.status(400).json({ success: false, msg: 'Content update cleared all locales' });
       }
       campaign.content = content as any;
-    }
-    if (req.body?.type !== undefined) {
-      if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(req.body.type)) {
-        return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
-      }
-      if (req.body.type !== campaign.type) {
-        campaign.type = req.body.type as MarketingCampaignType;
-        if (campaign.type === 'reengagement') {
-          if (!Number.isFinite(Number(campaign.inactiveDays)) || Number(campaign.inactiveDays) <= 0) {
-            campaign.inactiveDays = configuredInactiveDays();
-          }
-        } else {
-          campaign.inactiveDays = undefined;
-          campaign.autoSend = false;
-        }
-      }
     }
     if (scheduledAt !== undefined) {
       if (scheduledAt === null || scheduledAt === '') {
@@ -393,7 +477,7 @@ export const deleteMarketingCampaign = async (req: Request, res: Response) => {
     if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
     if (
       ['sending', 'sent'].includes(campaign.status) ||
-      campaign.deliveries.some((delivery) => delivery.brevoCampaignId)
+      campaign.deliveries.some((delivery) => delivery.brevoCampaignId || delivery.brevoListId)
     ) {
       return res.status(400).json({
         success: false,
@@ -410,7 +494,18 @@ export const deleteMarketingCampaign = async (req: Request, res: Response) => {
 
 export const previewMarketingAudience = async (req: Request, res: Response) => {
   try {
+    const requestedType = req.body?.type ?? 'newsletter';
+    if (
+      typeof requestedType !== 'string' ||
+      !(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(requestedType)
+    ) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
+    }
+    const campaignType = requestedType as MarketingCampaignType;
     const audience = parseAudience(req.body?.audience || req.body);
+    const audienceType = parseAudienceType(req.body?.audienceType, 'subscribers');
+    assertAudiencePolicy(campaignType, audienceType, audience.roles);
+
     const hasInactiveDays = req.body?.inactiveDays != null;
     const rawInactive = hasInactiveDays ? Number(req.body.inactiveDays) : NaN;
     if (hasInactiveDays && (!Number.isFinite(rawInactive) || rawInactive <= 0)) {
@@ -420,9 +515,9 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
       Number.isFinite(rawInactive) && rawInactive > 0
         ? Math.max(1, Math.floor(rawInactive))
         : undefined;
-    const campaignType = (req.body?.type || 'newsletter') as MarketingCampaignType;
     const resolution = await resolveMarketingAudience({
       campaignType,
+      audienceType,
       filters: audience,
       contentLocales: Array.isArray(req.body?.contentLocales)
         ? req.body.contentLocales
@@ -446,8 +541,11 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
     return res.json({
       success: true,
       data: {
+        audienceType,
+        includesLeads: audienceType !== 'subscribers',
         exactTotal: resolution.exactTotal,
         exactTotalIsEstimate: resolution.exactTotalIsEstimate,
+        bySource: resolution.bySource,
         byLocale: resolution.byLocale,
         byRole: resolution.byRole,
         deduplicated: resolution.deduplicated,
@@ -496,6 +594,11 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
     if (!content.subject) {
       return res.status(400).json({ success: false, msg: `Campaign subject is missing for ${locale}` });
     }
+    const audienceType = parseAudienceType(
+      req.body?.audienceType ?? req.body?.campaign?.audienceType,
+      'subscribers',
+    );
+    const footerVariant = audienceType === 'subscribers' ? 'subscriber' : 'invitation';
     const rendered = content.brevoTemplateId
       ? renderMarketingTemplateEmail({
         content,
@@ -503,6 +606,7 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
         locale: locale as any,
         firstName,
         unsubscribeToken: signUnsubscribePayload(to),
+        footerVariant,
       })
       : (() => {
         assertInlineMarketingContent(content);
@@ -511,6 +615,7 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
           locale: locale as any,
           firstName,
           unsubscribeToken: signUnsubscribePayload(to),
+          footerVariant,
         });
       })();
     await sendBrevoTransactionalMarketingEmail({
@@ -519,9 +624,9 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
       htmlContent: rendered.htmlContent,
       previewText: rendered.previewText,
     });
-    return res.json({ success: true, data: { to, locale } });
+    return res.json({ success: true, data: { to, locale, audienceType } });
   } catch (error: any) {
-    if (error instanceof MarketingContentError) {
+    if (error instanceof MarketingContentError || error instanceof MarketingInputError) {
       return res.status(400).json({ success: false, msg: error.message });
     }
     console.error('sendMarketingCampaignTestEmail:', error);

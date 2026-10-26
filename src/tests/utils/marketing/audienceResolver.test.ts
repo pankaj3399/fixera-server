@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { subscriberFind, subscriberCountDocuments, suppressionFind, userFind } = vi.hoisted(() => ({
+const { subscriberFind, subscriberCountDocuments, suppressionFind, userFind, leadFind, leadCountDocuments } = vi.hoisted(() => ({
   subscriberFind: vi.fn(),
   subscriberCountDocuments: vi.fn(),
   suppressionFind: vi.fn(),
   userFind: vi.fn(),
+  leadFind: vi.fn(),
+  leadCountDocuments: vi.fn(),
 }));
 
 function queryResult(rows: unknown[]) {
@@ -17,6 +19,14 @@ function queryResult(rows: unknown[]) {
   return query;
 }
 
+function isSuppressionSubscriberQuery(query: Record<string, any>): boolean {
+  const json = JSON.stringify(query || {});
+  return (
+    json.includes('"unsubscribedAt":{"$ne":null}') ||
+    json.includes('"brevoUnsubscribedAt":{"$ne":null}')
+  );
+}
+
 vi.mock('../../../models/marketingSubscriber', () => ({
   default: { find: subscriberFind, countDocuments: subscriberCountDocuments },
 }));
@@ -25,6 +35,9 @@ vi.mock('../../../models/marketingSuppression', () => ({
 }));
 vi.mock('../../../models/user', () => ({
   default: { find: userFind },
+}));
+vi.mock('../../../models/marketingLead', () => ({
+  default: { find: leadFind, countDocuments: leadCountDocuments },
 }));
 vi.mock('../../../utils/marketing/audience', () => ({ MARKETING_AUDIENCE_LIMIT: 5000 }));
 
@@ -36,7 +49,9 @@ describe('resolveMarketingAudience', () => {
     subscriberCountDocuments.mockResolvedValue(3);
     suppressionFind.mockReturnValue(queryResult([{ emailNormalized: 'optedout@example.com' }]));
     userFind.mockReturnValue(queryResult([]));
-    subscriberFind.mockImplementation((query: Record<string, unknown>) => query.unsubscribedAt
+    leadFind.mockReturnValue(queryResult([]));
+    leadCountDocuments.mockResolvedValue(0);
+    subscriberFind.mockImplementation((query: Record<string, any>) => isSuppressionSubscriberQuery(query)
       ? queryResult([{ emailNormalized: 'legacy-optout@example.com', email: 'legacy-optout@example.com' }])
       : queryResult([
           {
@@ -99,7 +114,7 @@ describe('resolveMarketingAudience', () => {
   });
 
   it('uses an explicit user language before the stored subscriber locale and reports mismatches', async () => {
-    subscriberFind.mockImplementation((query: Record<string, unknown>) => query.unsubscribedAt
+    subscriberFind.mockImplementation((query: Record<string, any>) => isSuppressionSubscriberQuery(query)
       ? queryResult([])
       : queryResult([{
           _id: 'subscriber-2',
@@ -141,8 +156,8 @@ describe('resolveMarketingAudience', () => {
       unsubscribedAt: null,
       brevoUnsubscribedAt: null,
     }));
-    subscriberFind.mockImplementation((query: Record<string, unknown>) =>
-      query.unsubscribedAt ? queryResult([]) : queryResult(rows),
+    subscriberFind.mockImplementation((query: Record<string, any>) =>
+      isSuppressionSubscriberQuery(query) ? queryResult([]) : queryResult(rows),
     );
     subscriberCountDocuments.mockResolvedValue(rows.length);
 

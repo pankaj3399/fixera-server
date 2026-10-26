@@ -146,6 +146,7 @@ import ChatMessage from '../../models/chatMessage';
 import Referral from '../../models/referral';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import MarketingSuppression from '../../models/marketingSuppression';
+import MarketingLead from '../../models/marketingLead';
 import Notification from '../../models/notification';
 import EmailLog from '../../models/emailLog';
 import CancellationRequest from '../../models/cancellationRequest';
@@ -655,6 +656,7 @@ beforeAll(async () => {
     Referral.createIndexes(),
     MarketingSubscriber.createIndexes(),
     MarketingSuppression.createIndexes(),
+    MarketingLead.createIndexes(),
     Notification.createIndexes(),
     EmailLog.createIndexes(),
   ]);
@@ -1007,6 +1009,18 @@ describeDb('admin account anonymization', () => {
       unsubscribeToken: `unsub-${new Types.ObjectId()}`,
       source: 'user_sync',
     });
+    const leadEmail = String(target.email).toLowerCase();
+    const lead = await MarketingLead.create({
+      email: leadEmail,
+      emailNormalized: leadEmail,
+      country: 'BE',
+      locale: 'nl',
+      serviceKeys: ['plumbing'],
+      primaryServiceKey: 'plumbing',
+      interestedServices: ['Plumbing'],
+      identityHash: `anonymize-${new Types.ObjectId()}`,
+      status: 'active',
+    });
     await Notification.create({
       userId: target._id,
       eventKey: 'test.event',
@@ -1110,6 +1124,7 @@ describeDb('admin account anonymization', () => {
     expect(storedPayment?.refunds[0]?.amount).toBe(10);
 
     expect(await MarketingSubscriber.findById(subscriber._id)).toBeNull();
+    expect(await MarketingLead.findById(lead._id)).toBeNull();
     expect(await Notification.countDocuments({ userId: target._id })).toBe(0);
     const storedEmailLog = await EmailLog.findOne({ relatedUser: target._id }).lean();
     expect(storedEmailLog?.to).toMatch(/^deleted-/);

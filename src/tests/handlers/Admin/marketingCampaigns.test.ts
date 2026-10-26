@@ -13,8 +13,14 @@ vi.mock('../../../models/marketingCampaign', () => ({
     create: campaignCreate,
     findById: campaignFindById,
   },
-  MARKETING_CAMPAIGN_TYPES: ['newsletter', 'promotion', 'reengagement'],
+  MARKETING_CAMPAIGN_TYPES: ['newsletter', 'promotion', 'reengagement', 'invitation'],
+  MARKETING_AUDIENCE_TYPES: ['subscribers', 'both', 'leads'],
   MARKETING_LOCALES: ['en', 'nl', 'fr'],
+  campaignAudienceType: (value: unknown) => {
+    if (value === undefined || value === null || value === '') return 'subscribers';
+    return value === 'subscribers' || value === 'both' || value === 'leads' ? value : undefined;
+  },
+  isLeadAudienceType: (value: unknown) => value === 'both' || value === 'leads',
 }));
 
 vi.mock('../../../models/marketingSubscriber', () => ({
@@ -270,6 +276,139 @@ describe('marketing campaign admin handlers', () => {
       subject: '[TEST] Template',
       htmlContent: expect.stringContaining('Hi Ada,'),
     }));
+  });
+
+  it('persists invitation audience types and rejects leads on other campaign types', async () => {
+    campaignCreate.mockImplementation(async (payload) => ({
+      toObject: () => ({ _id: '507f1f77bcf86cd799439011', ...payload }),
+    }));
+    const invitation = mockRes();
+    await createMarketingCampaign(
+      {
+        admin: { _id: '507f1f77bcf86cd799439012' },
+        body: {
+          name: 'Invite professionals',
+          type: 'invitation',
+          audienceType: 'leads',
+          content: {
+            en: { subject: 'Invitation', htmlContent: '<p>Professional invitation body.</p>' },
+          },
+          audience: {
+            locales: ['en'],
+            roles: ['professional'],
+            countries: ['BE'],
+            interestedServices: ['Plumbing'],
+            serviceKeys: ['plumbing'],
+          },
+        },
+      } as unknown as Request,
+      invitation,
+    );
+    expect(invitation.statusCode).toBe(201);
+    expect(campaignCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'invitation', audienceType: 'leads' }),
+    );
+
+    campaignCreate.mockClear();
+    const defaulted = mockRes();
+    await createMarketingCampaign(
+      {
+        admin: { _id: '507f1f77bcf86cd799439012' },
+        body: {
+          name: 'Invite subscribers',
+          type: 'invitation',
+          content: {
+            en: { subject: 'Invitation', htmlContent: '<p>Professional invitation body.</p>' },
+          },
+          audience: {
+            locales: ['en'],
+            roles: ['professional'],
+            countries: [],
+            interestedServices: [],
+          },
+        },
+      } as unknown as Request,
+      defaulted,
+    );
+    expect(defaulted.statusCode).toBe(201);
+    expect(campaignCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ audienceType: 'subscribers' }),
+    );
+
+    campaignCreate.mockClear();
+    const rejected = mockRes();
+    await createMarketingCampaign(
+      {
+        admin: { _id: '507f1f77bcf86cd799439012' },
+        body: {
+          name: 'Newsletter with leads',
+          type: 'newsletter',
+          audienceType: 'both',
+          content: {
+            en: { subject: 'Newsletter', htmlContent: '<p>Newsletter body content.</p>' },
+          },
+          audience: {
+            locales: ['en'],
+            roles: ['professional'],
+            countries: [],
+            interestedServices: [],
+          },
+        },
+      } as unknown as Request,
+      rejected,
+    );
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.body).toEqual(
+      expect.objectContaining({
+        success: false,
+        msg: 'Lead audiences are only available for invitation campaigns',
+      }),
+    );
+    expect(campaignCreate).not.toHaveBeenCalled();
+  });
+
+  it('uses the neutral invitation footer for a lead-inclusive test send', async () => {
+    const res = mockRes();
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: 'admin@example.com',
+          locale: 'en',
+          audienceType: 'leads',
+          campaign: {
+            content: { en: { subject: 'Invitation', htmlContent: '<p>Body content</p>' } },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const payload = sendTestEmail.mock.calls[0][0];
+    expect(payload.htmlContent).toContain('professional invitation');
+    expect(payload.htmlContent).not.toContain('opted in');
+    expect(payload.htmlContent).not.toContain('Notification preferences');
+    expect(payload.htmlContent).toContain('/unsubscribe?token=');
+    expect(res.body).toMatchObject({ data: { audienceType: 'leads' } });
+  });
+
+  it('rejects an invalid audience type on test send before rendering', async () => {
+    const res = mockRes();
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: 'admin@example.com',
+          locale: 'en',
+          audienceType: 'everyone',
+          campaign: {
+            content: { en: { subject: 'Invitation', htmlContent: '<p>Body content</p>' } },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(sendTestEmail).not.toHaveBeenCalled();
   });
 
   it('rejects an invalid test recipient before calling Brevo', async () => {

@@ -2,12 +2,18 @@ import MarketingCampaign, {
   type IMarketingCampaign,
   type MarketingLocale,
   MARKETING_LOCALES,
+  campaignAudienceType,
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingLead from '../../models/marketingLead';
 import { randomUUID } from 'node:crypto';
 import { MARKETING_AUDIENCE_LIMIT } from './audience';
 import { resolveMarketingAudience } from './audienceResolver';
-import { renderMarketingEmail, renderMarketingFooter } from './renderCampaign';
+import {
+  renderMarketingEmail,
+  renderMarketingFooter,
+  type MarketingFooterVariant,
+} from './renderCampaign';
 import {
   createBrevoCampaign,
   createCampaignList,
@@ -148,6 +154,42 @@ export async function sendMarketingCampaign(
   }
   const sendAttempt = Math.max(1, campaign.sendAttempts || 1);
 
+  const audienceType = campaignAudienceType(campaign.audienceType);
+  if (!audienceType) {
+    return failOwnedCampaign(
+      campaignId,
+      claimId,
+      'This campaign has an unsupported audience type. Edit the campaign and select Subscribers, Subscribers+Leads, or Leads before sending.',
+      undefined,
+      sendAttempt,
+    );
+  }
+  const campaignRoles = campaign.audience?.roles?.length
+    ? campaign.audience.roles
+    : (['customer', 'professional'] as Array<'customer' | 'professional'>);
+  if (audienceType !== 'subscribers') {
+    if (campaign.type !== 'invitation') {
+      return failOwnedCampaign(
+        campaignId,
+        claimId,
+        'Lead audiences are only available for invitation campaigns',
+        undefined,
+        sendAttempt,
+      );
+    }
+    if (!campaignRoles.includes('professional')) {
+      return failOwnedCampaign(
+        campaignId,
+        claimId,
+        'Lead audiences require the professional role',
+        undefined,
+        sendAttempt,
+      );
+    }
+  }
+  const footerVariant: MarketingFooterVariant =
+    audienceType === 'subscribers' ? 'subscriber' : 'invitation';
+
   const locales = localesToSend(campaign);
   if (locales.length === 0) {
     return failOwnedCampaign(
@@ -171,59 +213,75 @@ export async function sendMarketingCampaign(
 
   let members;
   let audienceAudit = {
-    subscriberCount: 0,
     deduplicatedRecipientCount: 0,
     criteriaHash: '',
   };
   try {
+    const previousCriteriaHash = campaign.deliveries.find(
+      (delivery) => delivery.criteriaHash,
+    )?.criteriaHash;
     const resolved = await resolveMarketingAudience({
       campaignType: campaign.type,
+      audienceType,
       filters: campaign.audience,
       contentLocales: locales,
       inactiveDays: resolveReengagementInactiveDays(campaign),
       limitMode: 'delivery',
     });
     if (resolved.overLimit) throw new Error(`Audience has ${resolved.exactTotal} recipients, exceeding the configured delivery limit of ${MARKETING_AUDIENCE_LIMIT}`);
+    if (previousCriteriaHash && previousCriteriaHash !== resolved.criteriaHash) {
+      throw new Error(
+        'Campaign audience changed since the last attempt; review the campaign before retrying',
+      );
+    }
     audienceAudit = {
-      subscriberCount: resolved.exactTotal,
       deduplicatedRecipientCount: resolved.deduplicated,
       criteriaHash: resolved.criteriaHash,
     };
-    members = resolved.recipients.map((recipient) => ({
+    // Defense in depth: one mailbox, one recipient, regardless of source.
+    const memberByEmail = new Map<string, (typeof resolved.recipients)[number]>();
+    for (const recipient of resolved.recipients) {
+      if (!memberByEmail.has(recipient.email)) memberByEmail.set(recipient.email, recipient);
+    }
+    members = Array.from(memberByEmail.values()).map((recipient) => ({
       email: recipient.email,
       name: recipient.firstName,
       locale: recipient.locale,
       region: recipient.country,
       subscriberId: recipient.subscriberId,
+      leadId: recipient.leadId,
       userId: recipient.userId,
+      source: recipient.source,
     }));
   } catch (err: any) {
     const raw = err?.message || String(err) || 'Failed to resolve campaign audience';
     console.error('[MARKETING] Failed to resolve campaign audience:', { campaignId, error: raw });
-    const error = /^Audience has \d+ recipients/.test(raw)
+    const error = /^Audience has \d+ recipients/.test(raw) ||
+      raw.startsWith('Campaign audience changed since the last attempt')
       ? raw
       : 'Failed to resolve the campaign audience. Check the campaign filters and try again.';
     return failOwnedCampaign(campaignId, claimId, error, undefined, sendAttempt);
   }
 
   if (members.length === 0) {
-    return failOwnedCampaign(
-      campaignId,
-      claimId,
-      'Audience is empty — sync subscribers and check filters',
-      undefined,
-      sendAttempt,
-    );
+    const emptyMessage =
+      audienceType === 'leads'
+        ? 'Audience is empty — import leads and check filters'
+        : audienceType === 'both'
+          ? 'Audience is empty — sync subscribers, import leads and check filters'
+          : 'Audience is empty — sync subscribers and check filters';
+    return failOwnedCampaign(campaignId, claimId, emptyMessage, undefined, sendAttempt);
   }
 
   const stamp = Date.now().toString(36);
   const deliveries: IMarketingCampaign['deliveries'] = campaign.deliveries.map((delivery) => ({
     locale: delivery.locale,
     brevoListId: delivery.brevoListId,
-      brevoCampaignId: delivery.brevoCampaignId,
+    brevoCampaignId: delivery.brevoCampaignId,
     brevoStatus: delivery.brevoStatus,
     recipientCount: delivery.recipientCount,
     subscriberCount: delivery.subscriberCount,
+    leadCount: delivery.leadCount,
     deduplicatedRecipientCount: delivery.deduplicatedRecipientCount,
     criteriaHash: delivery.criteriaHash,
     stats: delivery.stats,
@@ -269,11 +327,17 @@ export async function sendMarketingCampaign(
         locale === 'en'
           ? members.filter((m) => m.locale === 'en' || !locales.includes(m.locale))
           : localeMembers;
+      const localeSourceCounts = {
+        subscriberCount: recipients.filter((r) => r.source === 'subscriber').length,
+        leadCount: recipients.filter((r) => r.source === 'lead').length,
+      };
 
       if (recipients.length === 0) {
         recordDelivery({
           locale,
           recipientCount: 0,
+          subscriberCount: 0,
+          leadCount: 0,
           ...audienceAudit,
           error: 'No recipients for locale',
         });
@@ -287,6 +351,7 @@ export async function sendMarketingCampaign(
         recordDelivery({
           locale,
           recipientCount: recipients.length,
+          ...localeSourceCounts,
           ...audienceAudit,
           stats: {
             sent: recipients.length,
@@ -313,6 +378,7 @@ export async function sendMarketingCampaign(
         brevoCampaignId: previous?.brevoCampaignId,
         brevoStatus: previous?.brevoStatus,
         recipientCount: recipients.length,
+        ...localeSourceCounts,
         ...audienceAudit,
       });
       if (!(await checkpoint())) {
@@ -343,6 +409,7 @@ export async function sendMarketingCampaign(
           content,
           locale,
           firstName: '{{ contact.FIRSTNAME }}',
+          footerVariant,
         });
         const inlineHtml = content.brevoTemplateId ? content.htmlContent : rendered.htmlContent;
         const created = await createBrevoCampaign({
@@ -357,7 +424,9 @@ export async function sendMarketingCampaign(
           // schedule it again (or leave it unsent when that timestamp is already in the past).
           scheduledAt: null,
           utmCampaign: campaign.utmCampaign || `Fixtract ${campaign.type} ${campaign._id}`,
-          footer: content.brevoTemplateId ? renderMarketingFooter(locale) : undefined,
+          footer: content.brevoTemplateId
+            ? renderMarketingFooter(locale, undefined, footerVariant)
+            : undefined,
         });
         brevoCampaignId = created.campaignId;
         recordDelivery({
@@ -366,6 +435,7 @@ export async function sendMarketingCampaign(
           brevoCampaignId,
           brevoStatus: 'created',
           recipientCount: recipients.length,
+          ...localeSourceCounts,
           ...audienceAudit,
         });
         if (!(await checkpoint())) {
@@ -381,6 +451,7 @@ export async function sendMarketingCampaign(
         brevoCampaignId,
         brevoStatus: 'sent',
         recipientCount: recipients.length,
+        ...localeSourceCounts,
         ...audienceAudit,
       });
       if (!(await checkpoint())) {
@@ -391,6 +462,13 @@ export async function sendMarketingCampaign(
       if (ids.length > 0) {
         await MarketingSubscriber.updateMany(
           { _id: { $in: ids } },
+          { $set: { lastCampaignSentAt: new Date() } },
+        );
+      }
+      const leadIds = recipients.map((r) => r.leadId).filter(Boolean);
+      if (leadIds.length > 0) {
+        await MarketingLead.updateMany(
+          { _id: { $in: leadIds } },
           { $set: { lastCampaignSentAt: new Date() } },
         );
       }

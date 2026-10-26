@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import MarketingSuppression from '../../models/marketingSuppression';
+import MarketingLead from '../../models/marketingLead';
 import {
   generateUnsubscribeToken,
   verifyUnsubscribePayload,
@@ -60,11 +61,27 @@ async function resolveUnsubscribeEmail(req: Request): Promise<
 async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
   const normalized = normalizeEmail(email);
   const now = new Date();
-  await MarketingSuppression.findOneAndUpdate(
-    { emailNormalized: normalized },
-    { $set: { emailNormalized: normalized, reason: 'unsubscribe', source: 'user' } },
-    { upsert: true, setDefaultsOnInsert: true },
-  );
+  const preexistingSuppression = await MarketingSuppression.exists({
+    emailNormalized: normalized,
+  });
+  // Preserve a stronger provider/admin reason. A local unsubscribe must not
+  // weaken the global suppression that already protects this mailbox.
+  try {
+    await MarketingSuppression.findOneAndUpdate(
+      { emailNormalized: normalized },
+      {
+        $setOnInsert: {
+          emailNormalized: normalized,
+          reason: 'unsubscribe',
+          source: 'user',
+        },
+      },
+      { upsert: true, setDefaultsOnInsert: true },
+    );
+  } catch (error: unknown) {
+    // A concurrent unsubscribe may win the unique-email insert race.
+    if (!isDuplicateKeyError(error)) throw error;
+  }
   await User.updateMany(
     { email: normalized },
     {
@@ -121,7 +138,12 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
     }
   }
 
-  return { already };
+  await MarketingLead.updateMany(
+    { emailNormalized: normalized, status: 'active', unsubscribedAt: null },
+    { $set: { unsubscribedAt: now } },
+  );
+
+  return { already: already || Boolean(preexistingSuppression) };
 }
 
 /**
@@ -137,10 +159,14 @@ export const unsubscribeMarketing = async (req: Request, res: Response) => {
     const { email } = resolved;
 
     if (req.method === 'GET') {
-      const sub = await MarketingSubscriber.findOne({ email: email.toLowerCase().trim() })
-        .select('unsubscribedAt')
-        .lean();
-      const alreadyUnsubscribed = Boolean(sub?.unsubscribedAt);
+      const normalized = email.toLowerCase().trim();
+      const [sub, suppression] = await Promise.all([
+        MarketingSubscriber.findOne({ email: normalized })
+          .select('unsubscribedAt')
+          .lean(),
+        MarketingSuppression.exists({ emailNormalized: normalized }),
+      ]);
+      const alreadyUnsubscribed = Boolean(sub?.unsubscribedAt || suppression);
       return res.json({
         success: true,
         data: {

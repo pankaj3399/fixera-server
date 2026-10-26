@@ -10,6 +10,7 @@ import EmailLog from "../models/emailLog";
 import Favorite from "../models/favorite";
 import MarketingSubscriber from "../models/marketingSubscriber";
 import MarketingSuppression from "../models/marketingSuppression";
+import MarketingLead from "../models/marketingLead";
 import Meeting from "../models/meeting";
 import MeetingRequest from "../models/meetingRequest";
 import Notification from "../models/notification";
@@ -2169,6 +2170,8 @@ const redactAncillaryData = async (
     ,
     ,
     ,
+    ,
+    ,
     emailLogResult,
     actorEmailLogResult,
     relatedEmailLogResult,
@@ -2201,9 +2204,16 @@ const redactAncillaryData = async (
       },
       { session },
     ),
+    () => MarketingLead.deleteMany(
+      originalEmail
+        ? { $or: [{ emailNormalized: originalEmail }, { email: originalEmail }] }
+        : { _id: null },
+      { session },
+    ),
     () => PointTransaction.deleteMany({ userId }, { session }),
     () => BacklinkSubmission.deleteMany({ userId }, { session }),
     () => Favorite.deleteMany({
+
       $or: [
         { user: userId },
         { targetType: "professional", targetId: userId },

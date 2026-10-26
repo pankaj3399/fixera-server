@@ -140,6 +140,14 @@ import {
 } from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
 import { listMarketingServiceOptions } from "../../handlers/Admin/marketingServiceOptions";
+import {
+  deleteMarketingLead,
+  importMarketingLeads,
+  listMarketingLeadImports,
+  listMarketingLeads,
+  marketingLeadUpload,
+  updateMarketingLead,
+} from "../../handlers/Admin/marketingLeads";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
 import {
   adminListTickets,
@@ -365,6 +373,14 @@ adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaig
 adminRouter.route('/marketing-campaigns/:id').get(getMarketingCampaign).patch(updateMarketingCampaign).delete(deleteMarketingCampaign);
 adminRouter.route('/marketing-subscribers').get(listMarketingSubscribers);
 adminRouter.route('/marketing-subscribers/sync').post(syncMarketingSubscribers);
+
+// Professional lead database and upload history
+adminRouter.route('/marketing-leads').get(listMarketingLeads);
+adminRouter.route('/marketing-leads/import').post(marketingLeadUpload.single('file'), importMarketingLeads);
+adminRouter.route('/marketing-leads/:id').patch(updateMarketingLead).delete(deleteMarketingLead);
+adminRouter.route('/marketing-lead-imports')
+  .post(marketingLeadUpload.single('file'), importMarketingLeads)
+  .get(listMarketingLeadImports);
 
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);

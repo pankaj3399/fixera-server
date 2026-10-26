@@ -19,26 +19,62 @@ vi.mock('../../../utils/marketing/brevoMarketing', () => ({
 }));
 
 import { subscriberProfileForUser } from '../../../utils/marketing/audience';
+import { indexMarketingServiceOptions } from '../../../utils/marketing/serviceCatalog';
+
+const serviceIndex = indexMarketingServiceOptions([
+  { key: 'plumbing', label: 'Plumbing', countries: ['BE'] },
+  { key: 'painting', label: 'Painting', countries: ['BE'] },
+]);
 
 describe('subscriber profile metadata', () => {
-  it('records a professional with role, locale, region, and services', () => {
-    const profile = subscriberProfileForUser({
-      role: 'professional',
-      name: 'Ada Lovelace',
-      serviceCategories: ['solar', 'roofing', 'solar'],
-      location: { country: 'be' },
-    });
+  it('records a professional with canonical country, explicit language, labels and service keys', () => {
+    const profile = subscriberProfileForUser(
+      {
+        role: 'professional',
+        name: 'Ada Lovelace',
+        marketingLocale: 'nl',
+        businessInfo: { country: 'Belgium' },
+        serviceCategories: ['Plumbing'],
+      },
+      [],
+      serviceIndex,
+    );
 
     expect(profile).toEqual({
       role: 'professional',
       name: 'Ada Lovelace',
       firstName: 'Ada',
       region: 'BE',
-      interestedServices: ['solar', 'roofing'],
-      serviceKeys: ['solar', 'roofing'],
+      interestedServices: ['Plumbing'],
+      serviceKeys: ['plumbing'],
       locale: 'nl',
-      localeSource: 'country_default',
+      localeSource: 'explicit',
     });
+  });
+
+  it('uses a localized legacy language name as an explicit choice', () => {
+    const profile = subscriberProfileForUser({
+      role: 'professional',
+      preferredLocale: 'Nederlands',
+      businessInfo: { country: 'België' },
+      serviceCategories: ['Plumbing'],
+    });
+
+    expect(profile.region).toBe('BE');
+    expect(profile.locale).toBe('nl');
+    expect(profile.localeSource).toBe('explicit');
+  });
+
+  it('does not infer Dutch or French from Belgium without an explicit language', () => {
+    const profile = subscriberProfileForUser({
+      role: 'professional',
+      businessInfo: { country: 'Belgium' },
+      serviceCategories: ['Plumbing'],
+    });
+
+    expect(profile.region).toBe('BE');
+    expect(profile.locale).toBe('en');
+    expect(profile.localeSource).toBe('fallback');
   });
 
   it('prefers an explicit marketing locale over the country default', () => {
