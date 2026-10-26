@@ -30,6 +30,9 @@ import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 import { notify } from "../../utils/notifications/notify";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { params } from "../../utils/requestParams";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
+import { UserFacingError } from "../../utils/appErrors";
+import { maskAnonymizedUser, maskWarrantyClaimForAnonymizedParties } from "../../utils/accountAnonymity";
 
 const WARRANTY_ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -99,7 +102,8 @@ const validateWarrantyUrlsForClaim = (urls: string[], claim: any, userId: string
 
 const presignClaim = async (claim: any) => {
   if (!claim) return claim;
-  const obj = claim.toObject ? claim.toObject() : { ...claim };
+  const raw = claim.toObject ? claim.toObject() : { ...claim };
+  const obj = maskWarrantyClaimForAnonymizedParties(raw);
   if (Array.isArray(obj.evidence) && obj.evidence.length > 0) {
     const results = await Promise.all(
       obj.evidence.map(async (url: string) => {
@@ -123,6 +127,8 @@ const presignClaim = async (claim: any) => {
       })
     );
   }
+  obj.customer = maskAnonymizedUser(obj.customer);
+  obj.professional = maskAnonymizedUser(obj.professional);
   return obj;
 };
 
@@ -546,7 +552,9 @@ export const attachClaimEvidence = async (req: Request, res: Response) => {
 
     const newUrls = uploaded.map((f) => f.url);
     claim.evidence = [...(claim.evidence || []), ...newUrls];
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     return res.status(200).json({
       success: true,
@@ -678,6 +686,19 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
         msg: "Booking has no assigned professional",
       });
     }
+    const professionalAccount = await User.findById(professionalId)
+      .select("deletedAt isAnonymized")
+      .lean();
+    if (
+      !professionalAccount
+      || professionalAccount.deletedAt
+      || professionalAccount.isAnonymized
+    ) {
+      return res.status(409).json({
+        success: false,
+        msg: "The counterparty account is no longer active.",
+      });
+    }
 
     const { validUrls: evidenceUrls, invalidUrls: invalidEvidenceUrls } = validateWarrantyUrlsForUser(
       Array.isArray(evidence) ? evidence.slice(0, 10) : [],
@@ -688,20 +709,35 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
     }
 
     const openedAt = new Date();
-    const claim = await WarrantyClaim.create({
-      booking: booking._id,
-      customer: booking.customer,
-      professional: professionalId,
-      reason,
-      description: description.trim(),
-      evidence: evidenceUrls,
-      warrantyEndsAt: warrantyCoverage.endsAt,
-      openedAt,
-      sla: {
-        professionalResponseDueAt: addWorkingDays(openedAt, PROFESSIONAL_RESPONSE_DAYS),
-        customerAutoCloseDays: CUSTOMER_AUTO_CLOSE_DAYS,
-      },
-    });
+    let claim: any;
+    try {
+      [claim] = await withAnonymizationWriteFence(
+        [booking.customer, professionalId],
+        async (session) => WarrantyClaim.create([{
+          booking: booking._id,
+          customer: booking.customer,
+          professional: professionalId,
+          reason,
+          description: description.trim(),
+          evidence: evidenceUrls,
+          warrantyEndsAt: warrantyCoverage.endsAt,
+          openedAt,
+          sla: {
+            professionalResponseDueAt: addWorkingDays(openedAt, PROFESSIONAL_RESPONSE_DAYS),
+            customerAutoCloseDays: CUSTOMER_AUTO_CLOSE_DAYS,
+          },
+        }], { session }),
+      );
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+          success: false,
+          msg: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
 
     await ensureWarrantyChatContext({
       customerId: booking.customer as Types.ObjectId,
@@ -722,6 +758,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       if (professionalUser?._id) {
         await notify({
           userId: professionalUser._id.toString(),
+          actorId: userId,
           eventKey: 'professional.warranty_claim_opened',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -811,8 +848,8 @@ export const getWarrantyClaimById = async (req: Request, res: Response) => {
 
     const claim = await WarrantyClaim.findById(claimId)
       .populate("booking", "bookingNumber status")
-      .populate("customer", "name email")
-      .populate("professional", "name email businessInfo");
+      .populate("customer", "name email isAnonymized deletedAt")
+      .populate("professional", "name email businessInfo isAnonymized deletedAt");
     if (!claim) {
       return res.status(404).json({ success: false, msg: "Warranty claim not found" });
     }
@@ -856,8 +893,8 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     const [claims, total] = await Promise.all([
       WarrantyClaim.find(query)
         .populate("booking", "bookingNumber status")
-        .populate("customer", "name email")
-        .populate("professional", "name email businessInfo")
+        .populate("customer", "name email isAnonymized deletedAt")
+        .populate("professional", "name email businessInfo isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),
@@ -950,7 +987,9 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: "Professional submitted warranty resolve proposal",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -971,6 +1010,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       if (customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: userId,
           eventKey: 'customer.warranty_proposal_sent',
           entityType: 'booking',
           entityId: String(claim.booking),
@@ -1035,7 +1075,9 @@ export const declineWarrantyClaim = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: `Professional declined claim: ${reason.trim()}`,
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1120,7 +1162,9 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
       });
     }
 
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1205,7 +1249,9 @@ export const markWarrantyResolved = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: "Professional marked warranty claim resolved",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1265,7 +1311,9 @@ export const confirmWarrantyResolution = async (req: Request, res: Response) => 
       updatedBy: toObjectId(userId),
       note: "Customer confirmed warranty resolution",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1333,7 +1381,9 @@ export const escalateWarrantyClaim = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: reason?.trim() || "Claim manually escalated",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1780,8 +1830,8 @@ export const listAdminWarrantyClaims = async (req: Request, res: Response) => {
     const [claims, total] = await Promise.all([
       WarrantyClaim.find(query)
         .populate("booking", "bookingNumber status")
-        .populate("customer", "name email")
-        .populate("professional", "name email businessInfo")
+        .populate("customer", "name email isAnonymized deletedAt")
+        .populate("professional", "name email businessInfo isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),

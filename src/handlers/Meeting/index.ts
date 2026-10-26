@@ -15,8 +15,8 @@ import {
   buildCalendarReservationKeysForInterval,
   releaseCalendarReservations,
   reserveCalendarKeys,
-  withCalendarTransaction,
 } from '../../utils/support/calendarReservations';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 const meetingErrorResponse = (res: Response, error: unknown, message: string) => {
     if (error instanceof UserFacingError) {
@@ -301,7 +301,7 @@ export const createMeeting = async (req: Request, res: Response) => {
             createdBy: professionalId
         });
 
-        await withCalendarTransaction(async (session) => {
+        await withAnonymizationWriteFence([professionalId], async (session) => {
             await reserveCalendarKeys(
                 {
                     sourceType: 'meeting',
@@ -497,7 +497,7 @@ export const updateMeeting = async (req: Request, res: Response) => {
         });
 
         if (scheduleChanged) {
-            await withCalendarTransaction(async (session) => {
+            await withAnonymizationWriteFence([professionalId], async (session) => {
                 await releaseCalendarReservations('meeting', meeting._id, session);
                 await reserveCalendarKeys(
                     {
@@ -516,7 +516,9 @@ export const updateMeeting = async (req: Request, res: Response) => {
                 return true;
             });
         } else {
-            await meeting.save();
+            await withAnonymizationWriteFence([professionalId], async (session) => {
+                await meeting.save(session ? { session } : undefined);
+            });
         }
 
         res.status(200).json({
@@ -563,8 +565,8 @@ export const cancelMeeting = async (req: Request, res: Response) => {
         meeting.cancelledBy = professionalId;
         meeting.cancellationReason = cancellationReason;
 
-        await withCalendarTransaction(async (session) => {
-            await meeting.save({ session });
+        await withAnonymizationWriteFence([professionalId], async (session) => {
+            await meeting.save(session ? { session } : undefined);
             await releaseCalendarReservations('meeting', meeting._id, session);
             return true;
         });

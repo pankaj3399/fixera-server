@@ -21,9 +21,11 @@ import {
   sanitizePaymentForViewer,
 } from "../../utils/invoiceVisibility";
 import { IUser } from "../../models/user";
+import { maskAnonymizedUser, maskBookingForAnonymizedParties } from "../../utils/accountAnonymity";
 import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 import { sendHandlerError } from '../../utils/handlerErrors';
+import { runWithEmailActor } from '../../utils/emailActorContext';
 import { UserFacingError } from '../../utils/appErrors';
 import { assertValidInvoiceUnit } from '../../utils/invoiceUnits';
 import {
@@ -36,8 +38,8 @@ import {
   resolveBookingAdminAccess,
   type BookingAdminAccess,
 } from '../../utils/bookingDetails/adminAccess';
-import { withCalendarTransaction } from '../../utils/support/calendarReservations';
 import { buildBookingCalendarKeys, reserveBookingCalendar } from '../../utils/support/bookingCalendar';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import {
   captureBookingSnapshotIfMissing,
   loadVatQuestionDefinitions,
@@ -1175,18 +1177,21 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     const needsCalendarLock = buildBookingCalendarKeys(calendarBooking).length > 0;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        if (!needsCalendarLock) {
-          booking = await Booking.create(bookingData);
-        } else {
-          // Reserve the same shared calendar keys as support/Meeting writers in
-          // the same transaction as the booking row. A booking that overlaps a
-          // support meeting (or another booking) cannot be created twice.
-          booking = await withCalendarTransaction(async (session) => {
-            await reserveBookingCalendar(calendarBooking, session);
-            const [created] = await Booking.create([bookingData], { session });
+        booking = await withAnonymizationWriteFence(
+          [userId, bookingData.professional],
+          async (session) => {
+            if (needsCalendarLock) {
+              // Reserve the same shared calendar keys as support/Meeting writers
+              // in the same transaction as the booking row.
+              await reserveBookingCalendar(calendarBooking, session);
+            }
+            const [created] = await Booking.create(
+              [bookingData],
+              session ? { session } : undefined,
+            );
             return created;
-          });
-        }
+          },
+        );
         break;
       } catch (err: any) {
         if (err?.code === 11000 && (err.keyPattern?.bookingNumber || err.keyPattern?.quotationNumber) && attempt < 2) {
@@ -1204,8 +1209,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       customer: Pick<IUser, '_id' | 'name' | 'email' | 'phone'>;
       professional: Pick<IUser, '_id' | 'name' | 'email'>;
     }>([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' },
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' },
       { path: 'project', select: 'title description subprojects.pricing' }
     ]);
 
@@ -1214,6 +1219,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     if (notifyProfessionalId && populated.status === "rfq") {
       await notify({
         userId: notifyProfessionalId,
+        actorId: String(userId),
         eventKey: 'professional.rfq_received',
         entityType: 'booking',
         entityId: populated._id.toString(),
@@ -1393,9 +1399,9 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
 
     const [bookings, total, distinctServices] = await Promise.all([
       Booking.find(query)
-        .populate('customer', 'name email phone customerType')
-        .populate('professional', 'name email username businessInfo')
-        .populate('project', 'title description pricing category service timeMode subprojects executionDuration')
+        .populate('customer', 'name email phone customerType isAnonymized deletedAt')
+        .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
+        .populate('project', 'title description pricing category service timeMode subprojects executionDuration professionalId')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parsedLimit),
@@ -1404,7 +1410,31 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     ]);
 
     const viewerRole = user.role === 'professional' ? 'professional' : 'customer';
-    const visibleBookings = bookings.map((booking) => bookingForViewer(booking, viewerRole));
+    const projectOwnerIds = [...new Set(bookings
+      .filter((booking) => booking.bookingType === 'project' && !booking.professional)
+      .map((booking) => referenceId((booking.project as any)?.professionalId))
+      .filter((value): value is string => Boolean(value)))];
+    const projectOwnerRows = projectOwnerIds.length > 0
+      ? await User.find({ _id: { $in: projectOwnerIds } })
+          .select('_id isAnonymized deletedAt')
+          .lean()
+      : [];
+    const anonymizedProjectOwners = new Set(
+      projectOwnerRows
+        .filter((owner: any) => owner.isAnonymized || owner.deletedAt)
+        .map((owner: any) => String(owner._id)),
+    );
+    const visibleBookings = bookings.map((booking) => {
+      const visible = bookingForViewer(booking, viewerRole);
+      const projectOwnerId = referenceId((booking.project as any)?.professionalId);
+      if (projectOwnerId && anonymizedProjectOwners.has(projectOwnerId)) {
+        return maskBookingForAnonymizedParties(visible, {
+          professional: true,
+          professionalId: projectOwnerId,
+        });
+      }
+      return visible;
+    });
 
     return res.status(200).json({
       success: true,
@@ -1453,15 +1483,15 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const isViewerCustomer = !isAdmin && req.user?.role === 'customer';
 
     const professionalFields = isAdmin
-      ? 'name email phone username businessInfo hourlyRate stripe role createdAt vatNumber timeZone'
+      ? 'name email phone username businessInfo hourlyRate stripe role createdAt vatNumber timeZone isAnonymized deletedAt'
       : isViewerCustomer
-        ? '_id name username businessInfo.companyName businessInfo.description businessInfo.website businessInfo.city businessInfo.country businessInfo.timezone businessInfo.postalCode timeZone'
-        : 'name email username businessInfo timeZone';
+        ? '_id name username businessInfo.companyName businessInfo.description businessInfo.website businessInfo.city businessInfo.country businessInfo.timezone businessInfo.postalCode timeZone isAnonymized deletedAt'
+        : 'name email username businessInfo timeZone isAnonymized deletedAt';
 
     const bookingQuery = Booking.findById(bookingId)
       .populate('customer', isAdmin
-        ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone'
-        : 'name username email phone customerType location businessName timeZone')
+        ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone isAnonymized deletedAt'
+        : 'name username email phone customerType location businessName timeZone isAnonymized deletedAt')
       .populate('professional', professionalFields)
       .populate(
         'project',
@@ -1492,14 +1522,35 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    const bookingWithSignedFiles = await presignBookingFiles(booking);
     const viewerRole = isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional';
+    const projectProfessionalId = referenceId((booking as any).project?.professionalId);
+    let projectProfessionalAnonymized = false;
+    if (projectProfessionalId && !booking.professional) {
+      const projectProfessional = await User.findById(projectProfessionalId)
+        .select('isAnonymized deletedAt')
+        .lean();
+      projectProfessionalAnonymized = Boolean(
+        projectProfessional?.isAnonymized || projectProfessional?.deletedAt,
+      );
+    }
+    const maskingFlags = projectProfessionalAnonymized
+      ? { professional: true, professionalId: projectProfessionalId || undefined }
+      : {};
     // Participants keep the existing raw-booking behavior. An admin gets only
     // the granular areas resolved above: no dispute internals, cancellation
     // details or payment provider credentials beyond their permissions.
-    const visibleBooking = isAdmin
-      ? filterRawBookingForAdminArea(bookingWithSignedFiles, adminAccess!)
-      : bookingForViewer(bookingWithSignedFiles, viewerRole);
+    const filteredBooking = isAdmin
+      ? filterRawBookingForAdminArea(
+          typeof (booking as any).toObject === 'function'
+            ? (booking as any).toObject()
+            : booking,
+          adminAccess!,
+        )
+      : bookingForViewer(booking, viewerRole);
+    const maskedBooking = maskBookingForAnonymizedParties(filteredBooking, maskingFlags);
+    // Masking must remove target-owned file keys before any presigner sees
+    // them. The old order signed first and could return a working URL.
+    const visibleBooking = await presignBookingFiles(maskedBooking);
     // Legacy rows can contain null definition/answer entries; a details
     // projection failure must not take the whole booking read down.
     const details = await attachBookingDetails(booking, viewerRole, req.user, adminAccess).catch(
@@ -1697,7 +1748,9 @@ export const submitPostBookingAnswers = async (
       };
     }
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     return res.status(200).json({
       success: true,
@@ -1773,8 +1826,8 @@ export const submitQuote = async (req: Request, res: Response, next: NextFunctio
     await (booking as any).updateStatus('quoted', userId, 'Quote submitted by professional');
 
     await booking.populate([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' }
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' }
     ]);
 
     return res.status(200).json({
@@ -1833,8 +1886,8 @@ export const respondToQuote = async (req: Request, res: Response, next: NextFunc
     await (booking as any).updateStatus(newStatus, userId, note);
 
     await booking.populate([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' }
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' }
     ]);
 
     return res.status(200).json({
@@ -1885,8 +1938,8 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
     await (booking as any).updateStatus(status, userId, note);
 
     await booking.populate([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' }
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' }
     ]);
 
     return res.status(200).json({
@@ -1990,9 +2043,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
     const shouldMarkNoShow = isCustomer && normalizedCategory === 'no_show' && !booking.noShow?.markedAt;
 
     let cancellationRequest!: InstanceType<typeof CancellationRequest>;
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    try {
+    cancellationRequest = await withAnonymizationWriteFence([userId], async (session) => {
       const [created] = await CancellationRequest.create(
         [{
           booking: booking._id,
@@ -2004,9 +2055,8 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
           status: 'pending',
           ...(isCustomer ? { responseDeadline: addBusinessDays(new Date(), REFUND_RESPONSE_BUSINESS_DAYS) } : {}),
         }],
-        { session }
+        session ? { session } : undefined,
       );
-      cancellationRequest = created;
 
       if (shouldMarkNoShow) {
         booking.noShow = {
@@ -2015,16 +2065,10 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
           reason: trimmedReason,
           source: 'customer_cancellation',
         };
-        await booking.save({ session });
+        await booking.save(session ? { session } : undefined);
       }
-
-      await session.commitTransaction();
-    } catch (txError) {
-      await session.abortTransaction();
-      throw txError;
-    } finally {
-      session.endSession();
-    }
+      return created;
+    });
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
@@ -2034,17 +2078,18 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       const requesterName = isCustomer
         ? customerUser?.name || 'Customer'
         : getProfessionalDisplayName(professionalUser);
-      await sendCancellationRequestAdminEmail({
+      await runWithEmailActor(String(userId), () => sendCancellationRequestAdminEmail({
         bookingId: String(booking._id),
         requesterName,
         requesterRole: requestedRole,
         reason: trimmedReason,
-      });
+      }));
 
       const otherPartyUserId = isCustomer ? professionalUser?._id : customerUser?._id;
       if (otherPartyUserId) {
         await notify({
           userId: otherPartyUserId.toString(),
+          actorId: String(userId),
           eventKey: isCustomer
             ? 'professional.cancellation_request_received'
             : 'customer.cancellation_request_received',
@@ -2062,6 +2107,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       if (isCustomer && professionalUser?._id) {
         await notify({
           userId: professionalUser._id.toString(),
+          actorId: String(userId),
           eventKey: 'professional.refund_request',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -2070,6 +2116,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
         if (customerUser?._id) {
           await notify({
             userId: customerUser._id.toString(),
+            actorId: String(userId),
             eventKey: 'customer.refund_negotiation',
             entityType: 'booking',
             entityId: String(booking._id),
@@ -2079,6 +2126,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       } else if (!isCustomer && customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: String(userId),
           eventKey: 'customer.refund_negotiation',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -2117,8 +2165,8 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
     })
       .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
-      .populate('customer', 'name')
-      .populate('professional', 'name')
+      .populate('customer', 'name isAnonymized deletedAt')
+      .populate('professional', 'name isAnonymized deletedAt')
       .populate('project', 'title')
       .sort({ 'dispute.raisedAt': -1 })
       .limit(100)
@@ -2166,7 +2214,7 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
     const [payments, totalCount, summaryStats] = await Promise.all([
       Payment.find(query)
         .populate('booking', 'status bookingType bookingNumber')
-        .populate('professional', 'name email username businessInfo')
+        .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber)
@@ -2196,9 +2244,10 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       if (s._id === 'partially_refunded') summary.refunded += s.total || 0;
     });
 
-    const visiblePayments = payments.map((payment: any) =>
-      sanitizePaymentForViewer(payment, 'customer')
-    );
+    const visiblePayments = payments.map((payment: any) => ({
+      ...sanitizePaymentForViewer(payment, 'customer'),
+      professional: maskAnonymizedUser(payment.professional),
+    }));
 
     return res.status(200).json({
       success: true,

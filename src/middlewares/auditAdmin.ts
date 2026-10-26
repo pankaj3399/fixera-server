@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import AuditLog from '../models/auditLog';
-import { getRequestIp, sanitizeAdminAuditBody, sanitizeForAudit } from '../utils/auditLogger';
+import { getRequestIp, sanitizeAdminAuditBody, sanitizeAdminAuditQuery } from '../utils/auditLogger';
 
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -62,7 +62,7 @@ export const auditAdmin = (req: Request, res: Response, next: NextFunction): voi
 
   const path = req.originalUrl?.split('?')[0] || req.path;
   const bodySnapshot = sanitizeAdminAuditBody(path, req.body);
-  const querySnapshot = sanitizeForAudit(req.query);
+  const querySnapshot = sanitizeAdminAuditQuery(path, req.query);
 
   res.on('finish', () => {
     try {

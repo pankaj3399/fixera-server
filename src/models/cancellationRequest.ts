@@ -48,6 +48,8 @@ export interface ICancellationRequest extends Document {
   requestedRole: "customer" | "professional";
   reasonCategory?: CancellationReasonCategory;
   reason: string;
+  /** Admin-authored resolution note, kept separate from the requester's reason. */
+  adminResolutionNote?: string;
   evidence: string[];
   status: CancellationRequestStatus;
   // Customer-initiated negotiation between customer and professional
@@ -100,6 +102,11 @@ const CancellationRequestSchema = new Schema<ICancellationRequest>(
       required: true,
       trim: true,
       maxlength: 1000,
+    },
+    adminResolutionNote: {
+      type: String,
+      trim: true,
+      maxlength: 500,
     },
     evidence: {
       type: [{ type: String, maxlength: 2048 }],

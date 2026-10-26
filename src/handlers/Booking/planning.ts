@@ -5,8 +5,9 @@ import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
 import User from '../../models/user';
 import { buildPerResourceBlockedDays, toZonedTime, fromZonedTime, startOfDayZoned } from '../../utils/scheduleEngine';
-import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
 import { findBookingCalendarConflictsForSchedule, replaceBookingCalendar } from '../../utils/support/bookingCalendar';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { isAnonymizedAccount, maskAnonymizedUser } from '../../utils/accountAnonymity';
 
 const PLANNING_ACTIVE_STATUSES: BookingStatus[] = ['booked', 'rescheduling_requested', 'in_progress', 'professional_completed'];
 
@@ -221,8 +222,10 @@ const buildPlanningPayload = async (booking: any, professional: any, project: an
     }
   }
 
-  const customer = booking.customer && (booking.customer.name || booking.customer.email)
-    ? booking.customer
+  const customer = booking.customer
+    && (booking.customer.name || booking.customer.email)
+    && !isAnonymizedAccount(booking.customer)
+    ? maskAnonymizedUser(booking.customer)
     : null;
   const customerName = customer
     ? (customer.name || customer.username || customer.email || 'Customer')
@@ -264,7 +267,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(bookingId)
       .populate('professional', '_id name email username businessInfo companyAvailability availability companyBlockedDates companyBlockedRanges')
-      .populate('customer', '_id name email username');
+      .populate('customer', '_id name email username isAnonymized deletedAt');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Booking not found' } });
@@ -468,13 +471,16 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
           },
         });
       }
-      await withCalendarTransactionIfConnected(async (session) => {
+      await withAnonymizationWriteFence([userId], async (session) => {
         await replaceBookingCalendar(calendarCandidate as any, session);
         await booking.save({ validateModifiedOnly: true, ...(session ? { session } : {}) });
         return true;
       });
     } else {
-      await booking.save({ validateModifiedOnly: true });
+      await withAnonymizationWriteFence([userId], async (session) => {
+        await booking.save({ validateModifiedOnly: true, ...(session ? { session } : {}) });
+        return true;
+      });
     }
 
     const payload = await buildPlanningPayload(booking, professional, project);

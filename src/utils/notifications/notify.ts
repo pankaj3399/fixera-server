@@ -3,8 +3,16 @@ import mongoose from 'mongoose';
 import Notification from '../../models/notification';
 import User from '../../models/user';
 import { sendPushToUser } from '../fcmService';
-import { getEventDef, type NotifyContext } from './registry';
+import {
+  eventNamedSubjectContextKey,
+  eventRequiresCounterpartyProvenance,
+  getEventDef,
+  type NotifyContext,
+} from './registry';
 import { resolveChannels, type NotificationEntityType } from './types';
+import { withAnonymizationWriteFence } from '../support/accountGuard';
+import { UserFacingError } from '../appErrors';
+import { runWithEmailActor } from '../emailActorContext';
 
 export interface NotifyDeliveryOptions {
   /** When false, skip in-app inbox row. Default true. */
@@ -20,6 +28,10 @@ export interface NotifyDeliveryOptions {
 export interface NotifyArgs {
   userId: string;
   eventKey: string;
+  /** User whose action produced the event. Fenced with the recipient. */
+  actorId?: string;
+  /** User the notification is about when not the actor. Fenced with the recipient. */
+  subjectUserId?: string;
   entityType?: NotificationEntityType;
   entityId?: string;
   meta?: Record<string, unknown>;
@@ -36,10 +48,30 @@ export interface NotifyResult {
   emailSent: boolean;
   pushSent: boolean;
   emailOutcome?: EmailDeliveryOutcome;
-  skipped?: 'unknown_event' | 'user_not_found';
+  skipped?: 'unknown_event' | 'user_not_found' | 'missing_provenance';
 }
 
 const DELIVERY_CLAIM_LEASE_MS = 5 * 60 * 1000;
+
+const optionalObjectId = (value: string | undefined): mongoose.Types.ObjectId | undefined =>
+  value && mongoose.Types.ObjectId.isValid(value)
+    ? new mongoose.Types.ObjectId(value)
+    : undefined;
+
+/** A queued delivery must not carry a tombstoned actor's old text. */
+async function notificationSubjectsActive(args: NotifyArgs): Promise<boolean> {
+  const ids = [...new Set(
+    [args.userId, args.actorId, args.subjectUserId]
+      .filter((value): value is string => Boolean(value && mongoose.Types.ObjectId.isValid(value))),
+  )];
+  if (ids.length === 0) return true;
+  const active = await User.countDocuments({
+    _id: { $in: ids.map((id) => new mongoose.Types.ObjectId(id)) },
+    deletedAt: null,
+    isAnonymized: { $ne: true },
+  });
+  return active === ids.length;
+}
 
 type DeliveryChannel = 'email' | 'push';
 type DeliveryClaim =
@@ -106,12 +138,50 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     return { notificationId: null, emailSent: false, pushSent: false, skipped: 'unknown_event' };
   }
 
+  if (
+    eventRequiresCounterpartyProvenance(args.eventKey)
+    && !optionalObjectId(args.actorId)
+    && !optionalObjectId(args.subjectUserId)
+  ) {
+    console.error(
+      `[notify] ${args.eventKey} embeds another user's identity but no actorId/subjectUserId was supplied`,
+    );
+    return {
+      notificationId: null,
+      emailSent: false,
+      pushSent: false,
+      emailOutcome: 'not_eligible',
+      skipped: 'missing_provenance',
+    };
+  }
+
+  const ctx: NotifyContext = args.context ?? {};
+  const namedSubjectKey = eventNamedSubjectContextKey(args.eventKey);
+  const namedSubjectValue = namedSubjectKey ? ctx[namedSubjectKey] : undefined;
+  if (
+    namedSubjectKey
+    && typeof namedSubjectValue === 'string'
+    && namedSubjectValue.trim() !== ''
+    && !optionalObjectId(args.subjectUserId)
+  ) {
+    console.error(
+      `[notify] ${args.eventKey} names a counterparty but no subjectUserId was supplied`,
+    );
+    return {
+      notificationId: null,
+      emailSent: false,
+      pushSent: false,
+      emailOutcome: 'not_eligible',
+      skipped: 'missing_provenance',
+    };
+  }
+
   const user = await User.findById(args.userId).select(
-    'email name notificationPreferences',
+    'email name notificationPreferences deletedAt isAnonymized',
   );
-  if (!user) {
+  if (!user || user.deletedAt || user.isAnonymized) {
     console.warn(`[notify] User not found: ${args.userId}`);
-    if (strict) throw new Error(`Notification user not found: ${args.userId}`);
+    if (!user && strict) throw new Error(`Notification user not found: ${args.userId}`);
     return {
       notificationId: null,
       emailSent: false,
@@ -122,13 +192,17 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
   }
 
   const persistInbox = args.delivery?.persistInbox !== false;
-  const ctx: NotifyContext = args.context ?? {};
   const built = def.build(ctx);
   const entityType = args.entityType ?? def.defaultEntityType;
   const entityId =
     args.entityId && mongoose.Types.ObjectId.isValid(args.entityId)
       ? new mongoose.Types.ObjectId(args.entityId)
       : undefined;
+  const actorId = optionalObjectId(args.actorId);
+  const subjectUserId = optionalObjectId(args.subjectUserId);
+  const fenceIds = [user._id, actorId, subjectUserId].filter(
+    (value): value is mongoose.Types.ObjectId => Boolean(value),
+  );
 
   let notificationId: string | null = null;
   let deliveryError: unknown;
@@ -136,6 +210,8 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     try {
       const notificationData = {
         userId: user._id,
+        ...(actorId ? { actorId } : {}),
+        ...(subjectUserId ? { subjectUserId } : {}),
         eventKey: args.eventKey,
         category: def.category,
         title: built.title,
@@ -151,19 +227,43 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
         meta: args.meta,
         ...(args.idempotencyKey ? { deliveryKey: args.idempotencyKey } : {}),
       };
-      const doc = args.idempotencyKey
-        ? await Notification.findOneAndUpdate(
-            { deliveryKey: args.idempotencyKey },
-            { $setOnInsert: notificationData },
-            { upsert: true, new: true },
-          )
-        : await Notification.create(notificationData);
+      const doc = await withAnonymizationWriteFence(fenceIds, async (session) => (
+        args.idempotencyKey
+          ? Notification.findOneAndUpdate(
+              { deliveryKey: args.idempotencyKey },
+              { $setOnInsert: notificationData },
+              { upsert: true, new: true, session },
+            )
+          : Notification.create([notificationData], { session }).then(([created]) => created)
+      ));
       notificationId = doc._id.toString();
     } catch (err) {
+      if (err instanceof UserFacingError) {
+        return {
+          notificationId: null,
+          emailSent: false,
+          pushSent: false,
+          emailOutcome: 'not_eligible',
+          skipped: 'user_not_found',
+        };
+      }
       console.error(`[notify] Failed to persist inbox for ${args.eventKey}:`, err);
       deliveryError = err;
       // Continue to attempt channels even if persist failed (best-effort)
     }
+  }
+
+  // External delivery is outside the database transaction. Re-check the
+  // actor/subject immediately before sending so a queued email/push does not
+  // carry text about an account that was tombstoned after persistence.
+  if (!(await notificationSubjectsActive(args))) {
+    return {
+      notificationId,
+      emailSent: false,
+      pushSent: false,
+      emailOutcome: 'not_eligible',
+      skipped: 'user_not_found',
+    };
   }
 
   const channels = resolveChannels(def.tier, def.category, user.notificationPreferences);
@@ -184,11 +284,14 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
         emailOutcome = 'in_progress';
       } else {
         // claimDelivery already sets emailAttempted when the lease is acquired.
-        emailSent = await built.sendEmail({
-          email: user.email,
-          name: user.name || 'User',
-          userId: user._id.toString(),
-        });
+        emailSent = await runWithEmailActor(
+          args.actorId,
+          () => built.sendEmail!({
+            email: user.email,
+            name: user.name || 'User',
+            userId: user._id.toString(),
+          }),
+        );
         emailOutcome = emailSent ? 'sent' : 'failed';
         if (!emailSent) {
           deliveryError ??= new Error(`Email provider returned false for ${args.eventKey}`);

@@ -11,6 +11,7 @@ export type ActorDto = {
   role: 'customer' | 'professional' | 'admin' | 'system' | 'unknown';
   name: string | null;
   email?: string | null;
+  isAnonymized?: boolean;
   source: 'recorded' | 'inferred_route' | 'system_job' | 'provider_webhook' | 'not_recorded';
 };
 
@@ -108,6 +109,7 @@ export type BookingOverviewDto = {
     role: 'customer' | 'professional';
     name: string | null;
     companyName: string | null;
+    isAnonymized?: boolean;
   };
   quote: {
     quotationNumber: string | null;
@@ -159,6 +161,7 @@ export type PartiesDto = {
     vatNumber: string | null;
     address: { city: string | null; country: string | null; postalCode: string | null } | null;
     timeZone: string | null;
+    isAnonymized?: boolean;
   };
   professional: {
     id: string;
@@ -171,6 +174,7 @@ export type PartiesDto = {
     website: string | null;
     address: { city: string | null; country: string | null; postalCode: string | null } | null;
     timeZone: string | null;
+    isAnonymized?: boolean;
   };
   recordedAt: string | null;
   source: 'booking_snapshot' | 'current_profile';
@@ -681,6 +685,7 @@ export type CancellationRequestDto = {
   status: 'pending' | 'processing' | 'negotiating' | 'escalated' | 'approved' | 'denied';
   reasonCategory: string | null;
   reason: string;
+  adminResolutionNote?: string | null;
   evidence: AttachmentDto[];
   requestedBy: ActorDto | null;
   requestedRole: 'customer' | 'professional';

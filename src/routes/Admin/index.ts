@@ -193,7 +193,7 @@ import {
   triggerKpiEmailReport,
 } from "../../handlers/Admin/kpiDashboard";
 import { listAuditLogs, getAuditLogStats, getAuditLogFilterOptions, exportAuditLogs } from "../../handlers/Admin/auditLogs";
-import { adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
+import { adminAnonymizePreview, adminAnonymizeRecoveryList, adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
 import { auditAdmin } from "../../middlewares/auditAdmin";
 import {
   getMyAdminAccess,
@@ -314,6 +314,8 @@ adminRouter.route('/disputes/:bookingId/resolve').post(resolveDispute);
 
 // User deletion route (hard delete) and GDPR anonymization
 adminRouter.route('/users/:userId').delete(deleteUser);
+adminRouter.route('/users/anonymization/recovery').get(adminAnonymizeRecoveryList);
+adminRouter.route('/users/:userId/anonymize/preview').get(adminAnonymizePreview);
 adminRouter.route('/users/:userId/anonymize').put(adminAnonymizeUser);
 
 // Favorites admin routes

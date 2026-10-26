@@ -1,6 +1,7 @@
 import User from '../../models/user';
 import { SYSTEM_USER_ID } from '../../constants/system';
 import { referenceId } from './attachments';
+import { isAnonymizedAccount, maskAnonymizedUser } from '../accountAnonymity';
 import type { ActorDto, DetailsViewerRole } from './types';
 
 export interface ActorRecord {
@@ -10,6 +11,7 @@ export interface ActorRecord {
   email: string | null;
   role: 'customer' | 'professional' | 'admin' | 'unknown';
   companyName: string | null;
+  isAnonymized: boolean;
 }
 
 export type ActorMap = Map<string, ActorRecord>;
@@ -52,10 +54,11 @@ export const loadActorMap = async (ids: string[]): Promise<ActorMap> => {
   const unique = [...new Set(ids.filter((id) => /^[a-f0-9]{24}$/i.test(id)))];
   if (unique.length === 0) return new Map();
   const users = await User.find({ _id: { $in: unique } })
-    .select('_id name username email role businessInfo.companyName')
+    .select('_id name username email role businessInfo.companyName isAnonymized deletedAt')
     .lean();
   const map: ActorMap = new Map();
-  for (const user of users as any[]) {
+  for (const raw of users as any[]) {
+    const user = maskAnonymizedUser(raw);
     const role =
       user.role === 'admin' || user.role === 'professional' ? user.role : 'customer';
     map.set(String(user._id), {
@@ -65,6 +68,7 @@ export const loadActorMap = async (ids: string[]): Promise<ActorMap> => {
       email: user.email || null,
       role,
       companyName: user.businessInfo?.companyName || null,
+      isAnonymized: isAnonymizedAccount(raw),
     });
   }
   return map;
@@ -99,7 +103,10 @@ export const actorForId = (
     id: showIdentity ? key : null,
     role,
     name: record?.name ?? options.fallbackName ?? null,
-    ...(viewerRole === 'admin' && record?.email ? { email: record.email } : {}),
+    ...(viewerRole === 'admin' && record?.email && !record.isAnonymized
+      ? { email: record.email }
+      : {}),
+    ...(record?.isAnonymized ? { isAnonymized: true } : {}),
     source: options.source || 'recorded',
   };
 };

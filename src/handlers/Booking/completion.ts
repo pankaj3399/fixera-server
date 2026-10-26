@@ -49,9 +49,10 @@ import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
 import { commissionedExtraCostTotal } from '../../utils/customerPricing';
 import { getTransferStatus } from '../../utils/paymentSafety';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
-import { isUserFacingError } from '../../utils/appErrors';
+import { isUserFacingError, UserFacingError } from '../../utils/appErrors';
 import { bookingForViewer } from '../../utils/invoiceVisibility';
 import { isUploadOwnedByUser } from '../../utils/bookingDetails/attachments';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -374,11 +375,13 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       updateDoc.$set.extraCostTotal = extraCostTotal;
     }
 
-    const updatedBooking = await Booking.findOneAndUpdate(
-      { _id: booking._id, status: 'in_progress' as BookingStatus },
-      updateDoc,
-      { new: true }
-    ).populate('project');
+    const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => (
+      Booking.findOneAndUpdate(
+        { _id: booking._id, status: 'in_progress' as BookingStatus },
+        updateDoc,
+        { new: true, ...(session ? { session } : {}) },
+      ).populate('project')
+    ));
 
     if (!updatedBooking) {
       if (attachmentKeys.length > 0) {
@@ -414,6 +417,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
           : extraCostTotal;
         await notify({
           userId: customerUser._id.toString(),
+          actorId: userId,
           eventKey: 'customer.completion_requested',
           entityType: 'booking',
           entityId: String(updatedBooking._id),
@@ -449,7 +453,10 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
     const message = isUserFacingError(error) ? error.message : "We couldn't process completion. Please try again.";
     return res.status(status).json({
       success: false,
-      error: { code: 'SERVER_ERROR', message }
+      error: {
+        code: isUserFacingError(error) ? error.code : 'SERVER_ERROR',
+        message,
+      }
     });
   }
 };
@@ -601,41 +608,40 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostStatus', 'pending');
     booking.set('payment.extraCostPaymentSucceeded', false);
     booking.set('payment.extraCostTransferStatus', 'pending');
-    const session = await mongoose.startSession();
     try {
-      await session.withTransaction(async () => {
+      await withAnonymizationWriteFence([professional._id], async (session) => {
         await Payment.findOneAndUpdate(
-          { booking: booking._id },
-          {
-            $set: {
-              extraCostAmount: customerChargeAmount,
-              extraCostCustomerNetAmount: customerNetChargeAmount,
-              extraCostVatAmount: vatAmount,
-              extraCostPlatformFee: platformFeeAmount,
-              extraCostNetAmount: extraCostTotal,
-              extraCostCustomerDiscount: cappedLoyalty,
-              extraCostLoyaltyTier: loyalty.tier,
-              extraCostLoyaltyPercentage: loyalty.percentage,
-              extraCostPlatformCommission: platformCommissionAmount,
-              extraCostProfessionalPayout: extraCostTotal,
-              extraCostStatus: 'pending',
-              extraCostPaymentSucceeded: false,
-              extraCostStripePaymentIntentId: paymentIntent.id,
-              extraCostTransferStatus: 'pending',
-            },
-            $setOnInsert: {
-              booking: booking._id,
-              bookingNumber: booking.bookingNumber,
-              customer: (booking.customer as any)._id,
-              professional: professional._id,
-              currency: currency.toUpperCase(),
-              amount: booking.payment?.amount || 0,
-              status: booking.payment?.status || 'pending',
-            },
+        { booking: booking._id },
+        {
+          $set: {
+            extraCostAmount: customerChargeAmount,
+            extraCostCustomerNetAmount: customerNetChargeAmount,
+            extraCostVatAmount: vatAmount,
+            extraCostPlatformFee: platformFeeAmount,
+            extraCostNetAmount: extraCostTotal,
+            extraCostCustomerDiscount: cappedLoyalty,
+            extraCostLoyaltyTier: loyalty.tier,
+            extraCostLoyaltyPercentage: loyalty.percentage,
+            extraCostPlatformCommission: platformCommissionAmount,
+            extraCostProfessionalPayout: extraCostTotal,
+            extraCostStatus: 'pending',
+            extraCostPaymentSucceeded: false,
+            extraCostStripePaymentIntentId: paymentIntent.id,
+            extraCostTransferStatus: 'pending',
           },
-          { upsert: true, session },
-        );
-        await booking.save({ session });
+          $setOnInsert: {
+            booking: booking._id,
+            bookingNumber: booking.bookingNumber,
+            customer: (booking.customer as any)._id,
+            professional: professional._id,
+            currency: currency.toUpperCase(),
+            amount: booking.payment?.amount || 0,
+            status: booking.payment?.status || 'pending',
+          },
+        },
+        { upsert: true, session },
+      );
+      await booking.save(session ? { session } : undefined);
       });
     } catch (writeError) {
       // The PaymentIntent was created before the database transaction. Cancel it
@@ -646,8 +652,6 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
         console.error(`Failed to cancel orphaned extra-cost PaymentIntent ${paymentIntent.id}:`, cancelError);
       }
       throw writeError;
-    } finally {
-      await session.endSession();
     }
 
     return res.json({
@@ -820,7 +824,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       requestedAt: completionDate,
     });
 
-    const completedBooking = await Booking.findOneAndUpdate(
+    const completedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
       { _id: booking._id, status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
       {
         $set: {
@@ -841,8 +845,8 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           }
         }
       },
-      { new: true }
-    );
+      { new: true, ...(session ? { session } : {}) },
+    ));
 
     if (!completedBooking) {
       const currentBooking = await Booking.findById(booking._id).select('status payment.extraCostRefundPending');
@@ -1053,6 +1057,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
         if (professionalUser?._id) {
           await notify({
             userId: professionalUser._id.toString(),
+            actorId: userId,
             eventKey: 'professional.completion_confirmed_by_customer',
             entityType: 'booking',
             entityId: String(finalizedBooking._id),
@@ -1173,35 +1178,69 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       });
     }
 
+    const disputeProfessionalId = await getProfessionalId(booking);
+    if (disputeProfessionalId) {
+      const disputeProfessional = await User.findById(disputeProfessionalId)
+        .select('deletedAt isAnonymized')
+        .lean();
+      if (
+        !disputeProfessional
+        || disputeProfessional.deletedAt
+        || disputeProfessional.isAnonymized
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'COUNTERPARTY_UNAVAILABLE',
+            message: 'The counterparty account is no longer active.',
+          },
+        });
+      }
+    }
+
     const disputedAt = new Date();
     const slaDeadline = new Date(disputedAt.getTime() + DISPUTE_SLA_HOURS * 60 * 60 * 1000);
-    const disputedBooking = await Booking.findOneAndUpdate(
-      { _id: booking._id, status: booking.status },
-      {
-        $set: {
-          status: 'dispute' as BookingStatus,
-          ...(booking.extraCosts && booking.extraCosts.length > 0 && requestedType === 'extra_costs' ? { extraCostStatus: 'disputed' } : {}),
-          dispute: {
-            raisedBy: authUser._id,
-            reason: trimmedReason,
-            description: trimmedDescription,
-            raisedAt: disputedAt,
-            slaDeadline,
-            type: requestedType,
-            attachments,
-          }
-        },
-        $push: {
-          statusHistory: {
-            status: 'dispute' as BookingStatus,
-            timestamp: disputedAt,
-            updatedBy: authUser._id,
-            note: `Customer disputed (${requestedType}): ${trimmedReason}`
-          }
-        }
-      },
-      { new: true }
-    );
+    let disputedBooking: any;
+    try {
+      disputedBooking = await withAnonymizationWriteFence(
+        [authUser._id, disputeProfessionalId],
+        async (session) => Booking.findOneAndUpdate(
+          { _id: booking._id, status: booking.status },
+          {
+            $set: {
+              status: 'dispute' as BookingStatus,
+              ...(booking.extraCosts && booking.extraCosts.length > 0 && requestedType === 'extra_costs' ? { extraCostStatus: 'disputed' } : {}),
+              dispute: {
+                raisedBy: authUser._id,
+                reason: trimmedReason,
+                description: trimmedDescription,
+                raisedAt: disputedAt,
+                slaDeadline,
+                type: requestedType,
+                attachments,
+              }
+            },
+            $push: {
+              statusHistory: {
+                status: 'dispute' as BookingStatus,
+                timestamp: disputedAt,
+                updatedBy: authUser._id,
+                note: `Customer disputed (${requestedType}): ${trimmedReason}`
+              }
+            }
+          },
+          { new: true, session },
+        ),
+      );
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+          success: false,
+          error: { code: error.code, message: error.message },
+        });
+      }
+      throw error;
+    }
 
     if (!disputedBooking) {
       const currentBooking = await Booking.findById(booking._id).select('status');
@@ -1238,6 +1277,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       if (proId) {
         await notify({
           userId: proId,
+          actorId: userId,
           eventKey: 'professional.dispute_started',
           entityType: 'booking',
           entityId: String(disputedBooking._id),
@@ -1247,6 +1287,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       if (customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: userId,
           eventKey: 'customer.dispute_started',
           entityType: 'booking',
           entityId: String(disputedBooking._id),

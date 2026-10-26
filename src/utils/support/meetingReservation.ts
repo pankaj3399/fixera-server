@@ -2,6 +2,7 @@ import { Types, type ClientSession } from "mongoose";
 import SupportTicket, { type ISupportTicket } from "../../models/supportTicket";
 import { getNextSequence } from "../counterSequence";
 import { UserFacingError } from "../appErrors";
+import { fenceAccountWritesInSession } from "./accountGuard";
 import {
   getSupportAvailabilityForProfessional,
   type SupportAdminLike,
@@ -944,6 +945,9 @@ async function cancelSupportMeetingAttempt(
   if (cancellationReason) transitionSet["meeting.cancellationReason"] = cancellationReason;
   try {
     await withCalendarTransaction(async (session) => {
+      if (params.actorRole === "user") {
+        await fenceAccountWritesInSession([ticket.userId], session);
+      }
       await applyMeetingTransition(ticket, {
         session,
         stateFilter: { "meeting.status": { $in: ["pending", "scheduled"] } },
@@ -1076,6 +1080,7 @@ export async function rescheduleSupportMeeting(params: {
   timeZone: string;
   owner: SupportEmailUser;
   now?: Date;
+  actorRole?: "user" | "admin";
   /** Support admins may repair a pending, unconfirmed meeting whose slot passed. */
   allowPastPending?: boolean;
 }): Promise<{ ticket: ISupportTicket; emailSent: boolean; emailAttempted: boolean }> {
@@ -1090,6 +1095,7 @@ async function rescheduleSupportMeetingAttempt(
     timeZone: string;
     owner: SupportEmailUser;
     now?: Date;
+    actorRole?: "user" | "admin";
     allowPastPending?: boolean;
   },
   attempt: number,
@@ -1161,6 +1167,9 @@ async function rescheduleSupportMeetingAttempt(
   const end = new Date(selected.start.getTime() + 30 * 60 * 1000);
   try {
     await withCalendarTransaction(async (session) => {
+      if ((params.actorRole || "user") === "user") {
+        await fenceAccountWritesInSession([ticket.userId], session);
+      }
       await releaseCalendarReservations("support", ticket._id, session);
       await reserveCalendarKeys(
         {

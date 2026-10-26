@@ -164,6 +164,8 @@ async function searchProfessionals(
     const filter: any = {
       role: "professional",
       professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
     };
 
     if (professionalLevels.length > 0) {
@@ -402,13 +404,25 @@ async function searchProjects(
 ) {
   try {
     // Build the filter object
+    const activeProfessionalIds = await User.distinct("_id", {
+      role: "professional",
+      professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
+    });
     const filter: any = {
       status: "published",
+      professionalId: { $in: activeProfessionalIds },
     };
 
     if (professionalLevels.length > 0 || adminTags.length > 0) {
       const MAX_MATCHED_PROS = 1000;
-      const proFilter: any = { role: "professional", professionalStatus: "approved" };
+      const proFilter: any = {
+        role: "professional",
+        professionalStatus: "approved",
+        deletedAt: null,
+        isAnonymized: { $ne: true },
+      };
       if (professionalLevels.length > 0) proFilter.professionalLevel = { $in: professionalLevels };
       if (adminTags.length > 0) proFilter.adminTags = { $in: adminTags };
       const matchedProsCount = await User.countDocuments(proFilter);
@@ -956,6 +970,8 @@ export const autocomplete = async (req: Request, res: Response) => {
       const professionals = await User.find({
         role: "professional",
         professionalStatus: "approved",
+        deletedAt: null,
+        isAnonymized: { $ne: true },
         $or: [
           { name: searchRegex },
           { username: searchRegex },
@@ -975,6 +991,8 @@ export const autocomplete = async (req: Request, res: Response) => {
       const uniqueCategories = await User.distinct("serviceCategories", {
         role: "professional",
         professionalStatus: "approved",
+        deletedAt: null,
+        isAnonymized: { $ne: true },
         serviceCategories: searchRegex,
       });
 

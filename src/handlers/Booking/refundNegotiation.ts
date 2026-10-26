@@ -9,6 +9,7 @@ import { params } from '../../utils/requestParams';
 import { notifyBookingCancelledAndRefunded } from '../../utils/notifications/notifyBookingCancelledAndRefunded';
 import { notify } from '../../utils/notifications/notify';
 import { bookingForViewer } from '../../utils/invoiceVisibility';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 const REFUND_FINALIZED_BOOKING_STATUS = 'cancelled';
 
@@ -63,7 +64,9 @@ const finalizeRefund = async (
   if (resolvedBy) request.resolvedBy = resolvedBy;
   request.refundAmount = result.amount;
   request.refundedAt = new Date();
-  await request.save();
+  await withAnonymizationWriteFence([request.requestedBy, actorId], async (session) => {
+    await request.save(session ? { session } : undefined);
+  });
 
   booking.status = REFUND_FINALIZED_BOOKING_STATUS;
   booking.cancellation = {
@@ -79,7 +82,9 @@ const finalizeRefund = async (
     updatedBy: resolvedBy || request.requestedBy,
     note: `Refund issued (${result.amount}) — ${reason}`,
   });
-  await booking.save();
+  await withAnonymizationWriteFence([request.requestedBy, actorId], async (session) => {
+    await booking.save(session ? { session } : undefined);
+  });
 
   return { ok: true, refundAmount: result.amount };
 };
@@ -91,7 +96,9 @@ const escalateRequest = async (
   request.status = 'escalated';
   request.escalatedAt = new Date();
   request.escalationReason = reason;
-  await request.save();
+  await withAnonymizationWriteFence([request.requestedBy], async (session) => {
+    await request.save(session ? { session } : undefined);
+  });
 
   try {
     const booking = await Booking.findById(request.booking);
@@ -105,7 +112,9 @@ const escalateRequest = async (
         updatedBy: request.requestedBy,
         note: `Refund dispute escalated (${reason})`,
       } as any);
-      await booking.save();
+      await withAnonymizationWriteFence([request.requestedBy], async (session) => {
+        await booking.save(session ? { session } : undefined);
+      });
     }
   } catch (err) {
     console.error('Failed to set booking status to dispute on refund escalation:', err);
@@ -235,11 +244,14 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
       request.professionalDecision = 'counter';
       request.counterOfferAmount = Math.round(counter * 100) / 100;
       request.status = 'negotiating';
-      await request.save();
+      await withAnonymizationWriteFence([request.requestedBy, userId], async (session) => {
+        await request.save(session ? { session } : undefined);
+      });
       try {
         if (customerUser?._id) {
           await notify({
             userId: customerUser._id.toString(),
+            actorId: userId,
             eventKey: 'customer.refund_counter_offer',
             entityType: 'booking',
             entityId: String(booking._id),
@@ -263,6 +275,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
       if (customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: userId,
           eventKey: 'customer.refund_escalated',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -275,6 +288,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
       if (professionalUser?._id) {
         await notify({
           userId: professionalUser._id.toString(),
+          actorId: userId,
           eventKey: 'professional.refund_escalated',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -362,6 +376,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
       if (customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: userId,
           eventKey: 'customer.refund_escalated',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -374,6 +389,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
       if (professionalUser?._id) {
         await notify({
           userId: professionalUser._id.toString(),
+          actorId: userId,
           eventKey: 'professional.refund_escalated',
           entityType: 'booking',
           entityId: String(booking._id),

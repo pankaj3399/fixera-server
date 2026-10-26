@@ -27,7 +27,17 @@ import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
+import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
 // import { seedServiceCategories } from '../../scripts/seedProject';
+
+const saveProjectWithFence = async (project: any, userId: string) =>
+  withAnonymizationWriteFence(
+    [userId, (project as any).professionalId?._id || (project as any).professionalId],
+    async (session) => {
+      await project.save(session ? { session } : undefined);
+      return project;
+    },
+  );
 
 let cachedWindowFieldsSupport: boolean | null = null;
 const mongoHasWindowFields = async (): Promise<boolean> => {
@@ -502,11 +512,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
       console.log("[PROJECT] Update data keys:", Object.keys(updateData));
 
-      project = await Project.findOneAndUpdate(
-        { _id: projectData.id, professionalId },
-        updateData,
-        { new: true, runValidators: true }
-      );
+      project = await withAnonymizationWriteFence([professionalId], async (session) =>
+        Project.findOneAndUpdate(
+          { _id: projectData.id, professionalId },
+          updateData,
+          { new: true, runValidators: true, ...(session ? { session } : {}) },
+        ));
 
       console.log("[PROJECT] Project updated successfully");
       console.log("Updated project ID:", project?._id);
@@ -520,7 +531,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         status: "draft",
         autoSaveTimestamp: new Date(),
       });
-      await project.save();
+      await saveProjectWithFence(project, professionalId);
       console.log("[PROJECT] New project created with ID:", project._id);
     }
 
@@ -613,6 +624,21 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     }
 
     const professionalId = (project.professionalId as any)?._id || project.professionalId;
+    const ownerIsActive = professionalId
+      ? await User.exists({
+          _id: professionalId,
+          role: "professional",
+          deletedAt: null,
+          isAnonymized: { $ne: true },
+        })
+      : null;
+    if (!ownerIsActive) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published"
+      });
+    }
+
     const professionalStats = professionalId
       ? await computeProfessionalStats(professionalId.toString())
       : null;
@@ -1857,7 +1883,7 @@ export const submitProject = async (req: Request, res: Response) => {
 
     if (failedChecks.length > 0) {
       project.qualityChecks = qualityChecks;
-      await project.save();
+      await saveProjectWithFence(project, professionalId);
       return res.status(400).json({
         error: "Quality checks failed",
         qualityChecks: failedChecks,
@@ -1897,7 +1923,7 @@ export const submitProject = async (req: Request, res: Response) => {
         project.reapprovalType = undefined;
         project.isResubmission = false;
 
-        await project.save();
+        await saveProjectWithFence(project, professionalId);
         return res.json({
           message: "Changes approved automatically",
           id: project._id,
@@ -1915,7 +1941,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.approvedAt = undefined;
       project.approvedBy = undefined;
 
-      await project.save();
+      await saveProjectWithFence(project, professionalId);
       console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
       return res.json({
         message: "Changes submitted for admin review",
@@ -1935,7 +1961,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.adminFeedback = undefined;
     }
 
-    await project.save();
+    await saveProjectWithFence(project, professionalId);
 
     const message = isResubmission
       ? "Project resubmitted for approval"
@@ -1961,35 +1987,52 @@ export const duplicateProject = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const original = await Project.findOne({ _id: id, professionalId });
-    if (!original) {
+    const exists = await Project.findOne({ _id: id, professionalId }).select("_id").lean();
+    if (!exists) {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    const plain = original.toObject();
-    // Reset fields for a clean draft copy
-    delete (plain as any)._id;
-    delete (plain as any).id;
-    const duplicated = new Project({
-      ...plain,
-      title: `${plain.title} (Copy)`,
-      status: "draft",
-      adminFeedback: undefined,
-      submittedAt: undefined,
-      approvedAt: undefined,
-      approvedBy: undefined,
-      previousSnapshot: undefined,
-      pendingChanges: undefined,
-      reapprovalType: undefined,
-      isResubmission: false,
-      autoSaveTimestamp: new Date(),
-      createdAt: undefined,
-      updatedAt: undefined,
+    // Re-read and create in the live account fence. The source snapshot is
+    // never reused after the owner is tombstoned, and the copy and its media
+    // references commit or abort together.
+    const duplicated = await withAnonymizationWriteFence([professionalId], async (session) => {
+      const original = await Project.findOne({ _id: id, professionalId })
+        .session(session ?? null);
+      if (!original) return null;
+      const plain = original.toObject();
+      // Reset fields for a clean draft copy
+      delete (plain as any)._id;
+      delete (plain as any).id;
+      const copy = new Project({
+        ...plain,
+        title: `${plain.title} (Copy)`,
+        status: "draft",
+        adminFeedback: undefined,
+        submittedAt: undefined,
+        approvedAt: undefined,
+        approvedBy: undefined,
+        previousSnapshot: undefined,
+        pendingChanges: undefined,
+        reapprovalType: undefined,
+        isResubmission: false,
+        autoSaveTimestamp: new Date(),
+        createdAt: undefined,
+        updatedAt: undefined,
+      });
+      await copy.save(session ? { session } : undefined);
+      return copy;
     });
-
-    await duplicated.save();
+    if (!duplicated) {
+      return res.status(404).json({ error: "Project not found" });
+    }
     res.json(duplicated);
   } catch (error) {
+    if ((error as { code?: string })?.code === ACCOUNT_WRITE_FENCE_CODE) {
+      return res.status(409).json({
+        error: (error as Error).message,
+        code: ACCOUNT_WRITE_FENCE_CODE,
+      });
+    }
     res.status(500).json({ error: "Failed to duplicate project" });
   }
 };
@@ -2042,7 +2085,7 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
     }
 
     project.status = status as any;
-    await project.save();
+    await saveProjectWithFence(project, professionalId);
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to update project status" });

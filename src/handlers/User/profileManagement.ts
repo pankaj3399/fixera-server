@@ -15,6 +15,8 @@ import { params } from "../../utils/requestParams";
 import { sendHandlerError } from '../../utils/handlerErrors';
 import { parseBlockedRanges } from '../../utils/blockedRanges';
 import { safeErrorSummary } from '../../utils/safeErrorLog';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { UserFacingError } from '../../utils/appErrors';
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 
@@ -75,6 +77,8 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
 // Upload ID proof
 export const uploadIdProof = async (req: Request, res: Response, next: NextFunction) => {
+  let uploadedKey: string | undefined;
+  let saved = false;
   try {
     await connecToDatabase();
     const userId = req.user?.id;
@@ -146,6 +150,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
 
     // Upload to S3
     const uploadResult = await uploadToS3(req.file, fileName);
+    uploadedKey = uploadResult.key;
 
     // Update user record
     user.idProofUrl = uploadResult.url;
@@ -168,7 +173,10 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
       user.rejectionReason = undefined;
     }
 
-    await user.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await user.save(session ? { session } : undefined);
+      saved = true;
+    });
 
     console.log(`✅ ID Proof: Successfully uploaded for ${user.email}`);
 
@@ -198,6 +206,13 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
     });
 
   } catch (error: any) {
+    if (uploadedKey && !saved) {
+      try {
+        await deleteFromS3(uploadedKey);
+      } catch {
+        // The account fence rejected the write; the orphaned upload is best-effort cleanup.
+      }
+    }
     console.error('ID proof upload error:', error);
     return sendHandlerError(res, error, "We couldn't upload your ID proof. Please check the file and try again.");
   }
@@ -428,7 +443,9 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     }
 
     try {
-      await user.save();
+      await withAnonymizationWriteFence([userId], async (session) => {
+        await user.save(session ? { session } : undefined);
+      });
     } catch (err: any) {
       if (err.code === 11000 && err.keyPattern?.username) {
         return res.status(400).json({ success: false, msg: "Username already taken" });
@@ -667,7 +684,9 @@ export const submitForVerification = async (req: Request, res: Response, next: N
     if (!user.professionalOnboardingCompletedAt) {
       user.professionalOnboardingCompletedAt = new Date();
     }
-    await user.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
 
     try {
       await sendProfessionalWelcomeEmail(user.email, user.name);
@@ -778,7 +797,9 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
 
     user.phone = normalizedPhone;
     user.isPhoneVerified = false;
-    await user.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
 
     console.log(`📱 Phone: Updated phone for userId=${String(user._id)}`);
 
@@ -909,7 +930,9 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
       if (typeof companyAddress.postalCode === 'string') user.companyAddress.postalCode = companyAddress.postalCode.trim();
     }
 
-    await user.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
 
     console.log(`🏠 Customer Profile: Updated for ${String(user._id)}`);
     return res.status(200).json({
@@ -1024,7 +1047,9 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
     user.idExpiryReminderLastSentAt = undefined;
     user.idExpiryReminderCount = 0;
 
-    await user.save({ validateModifiedOnly: true });
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await user.save({ validateModifiedOnly: true, ...(session ? { session } : {}) });
+    });
 
     const changedFields = changes.map((change) => change.field);
     console.log(`🔄 ID Info: Updated for userId=${String(user._id)}. Fields: ${changedFields.join(', ')}`);
@@ -1050,6 +1075,8 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 };
 
 export const uploadProfileImage = async (req: Request, res: Response, next: NextFunction) => {
+  let uploadedKey: string | undefined;
+  let saved = false;
   try {
     await connecToDatabase();
 
@@ -1081,9 +1108,13 @@ export const uploadProfileImage = async (req: Request, res: Response, next: Next
 
     const fileName = generateFileName(file.originalname, user._id.toString(), 'profile-images');
     const result = await uploadToS3(file, fileName);
+    uploadedKey = result.key;
 
     user.profileImage = result.url;
-    await user.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await user.save(session ? { session } : undefined);
+      saved = true;
+    });
 
     if (oldProfileImage) {
       const oldKey = parseS3KeyFromUrl(oldProfileImage);
@@ -1100,6 +1131,16 @@ export const uploadProfileImage = async (req: Request, res: Response, next: Next
       data: { profileImage: result.url }
     });
   } catch (error) {
+    if (uploadedKey && !saved) {
+      try {
+        await deleteFromS3(uploadedKey);
+      } catch {
+        // The new upload is orphaned only; the account row was not changed.
+      }
+    }
+    if (error instanceof UserFacingError) {
+      return res.status(error.status).json({ success: false, msg: error.message, code: error.code });
+    }
     console.error("Upload profile image error:", error);
     return res.status(500).json({ success: false, msg: "Failed to upload profile image" });
   }
@@ -1121,13 +1162,15 @@ export const deleteProfileImage = async (req: Request, res: Response, next: Next
 
     if (user.profileImage) {
       const oldKey = parseS3KeyFromUrl(user.profileImage);
+      user.profileImage = undefined;
+      await withAnonymizationWriteFence([userId], async (session) => {
+        await user.save(session ? { session } : undefined);
+      });
       if (oldKey) {
         try { await deleteFromS3(oldKey); } catch (err) {
           console.error("Failed to delete old profile image from S3:", { key: oldKey, userId, error: err });
         }
       }
-      user.profileImage = undefined;
-      await user.save();
     }
 
     return res.status(200).json({ success: true, msg: "Profile image removed" });
@@ -1268,7 +1311,9 @@ export const updateUsername = async (req: Request, res: Response, next: NextFunc
 
     user.username = normalized;
     try {
-      await user.save();
+      await withAnonymizationWriteFence([userId], async (session) => {
+        await user.save(session ? { session } : undefined);
+      });
     } catch (err: any) {
       if (err.code === 11000) {
         return res.status(400).json({ success: false, msg: "Username was just taken by someone else, please try another" });

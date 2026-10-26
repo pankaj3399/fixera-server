@@ -8,6 +8,10 @@ import User from "../../models/user";
 import Project from "../../models/project";
 import { params } from "../../utils/requestParams";
 import {
+  maskAnonymizedUser,
+  maskChatMessageForAnonymizedSender,
+} from "../../utils/accountAnonymity";
+import {
   buildSupportParticipantKpis,
   escapeRegex,
   formatChatClosedMessage,
@@ -19,6 +23,26 @@ import {
 } from "../../utils/support/settings";
 
 const VALID_STATUSES = ["pending", "reviewed", "dismissed"] as const;
+
+const maskChatReportForRead = (report: any): any => {
+  if (!report) return report;
+  const next = {
+    ...report,
+    reportedBy: maskAnonymizedUser(report.reportedBy),
+    messageId: report.messageId && typeof report.messageId === "object"
+      ? maskChatMessageForAnonymizedSender(report.messageId)
+      : report.messageId,
+  };
+  if (report.conversationId && typeof report.conversationId === "object") {
+    next.conversationId = {
+      ...report.conversationId,
+      customerId: maskAnonymizedUser(report.conversationId.customerId),
+      professionalId: maskAnonymizedUser(report.conversationId.professionalId),
+      supportTargetUserId: maskAnonymizedUser(report.conversationId.supportTargetUserId),
+    };
+  }
+  return next;
+};
 
 const parsePagination = (query: any) => {
   const page = Math.max(1, Math.floor(Number(query.page) || 1));
@@ -41,21 +65,25 @@ export const listChatReports = async (req: Request, res: Response) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate("reportedBy", "name email role")
-        .populate({ path: "messageId", select: "text senderId senderRole createdAt" })
+        .populate("reportedBy", "name email role isAnonymized deletedAt")
+        .populate({
+          path: "messageId",
+          select: "text senderId senderRole createdAt",
+          populate: { path: "senderId", select: "name email isAnonymized deletedAt" },
+        })
         .populate({
           path: "conversationId",
           select: "type customerId professionalId supportAdminId supportTargetUserId",
           populate: [
-            { path: "customerId", select: "name email" },
-            { path: "professionalId", select: "name email" },
+            { path: "customerId", select: "name email isAnonymized deletedAt" },
+            { path: "professionalId", select: "name email isAnonymized deletedAt" },
           ],
         })
         .lean(),
       ChatReport.countDocuments(filter),
     ]);
 
-    return res.json({ success: true, data: { items, total, page, limit } });
+    return res.json({ success: true, data: { items: items.map(maskChatReportForRead), total, page, limit } });
   } catch (error: any) {
     console.error("List chat reports error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load chat reports" });
@@ -69,14 +97,18 @@ export const getChatReport = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
     const report = await ChatReport.findById(id)
-      .populate("reportedBy", "name email role")
-      .populate({ path: "messageId", select: "text senderId senderRole createdAt" })
+      .populate("reportedBy", "name email role isAnonymized deletedAt")
+      .populate({
+        path: "messageId",
+        select: "text senderId senderRole createdAt",
+        populate: { path: "senderId", select: "name email isAnonymized deletedAt" },
+      })
       .populate({
         path: "conversationId",
         select: "type customerId professionalId supportAdminId supportTargetUserId",
         populate: [
-          { path: "customerId", select: "name email" },
-          { path: "professionalId", select: "name email" },
+          { path: "customerId", select: "name email isAnonymized deletedAt" },
+          { path: "professionalId", select: "name email isAnonymized deletedAt" },
         ],
       })
       .lean();
@@ -95,7 +127,7 @@ export const getChatReport = async (req: Request, res: Response) => {
       })
         .sort({ _id: -1 })
         .limit(10)
-        .populate("senderId", "name email")
+        .populate("senderId", "name email isAnonymized deletedAt")
         .lean();
       const after = await ChatMessage.find({
         conversationId,
@@ -103,10 +135,10 @@ export const getChatReport = async (req: Request, res: Response) => {
       })
         .sort({ _id: 1 })
         .limit(10)
-        .populate("senderId", "name email")
+        .populate("senderId", "name email isAnonymized deletedAt")
         .lean();
       const reported = await ChatMessage.findById(reportedMessageId)
-        .populate("senderId", "name email")
+        .populate("senderId", "name email isAnonymized deletedAt")
         .lean();
       surroundingMessages = [
         ...before.reverse(),
@@ -115,7 +147,13 @@ export const getChatReport = async (req: Request, res: Response) => {
       ];
     }
 
-    return res.json({ success: true, data: { report, surroundingMessages } });
+    return res.json({
+      success: true,
+      data: {
+        report: maskChatReportForRead(report),
+        surroundingMessages: surroundingMessages.map(maskChatMessageForAnonymizedSender),
+      },
+    });
   } catch (error: any) {
     console.error("Get chat report error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load chat report" });
@@ -239,15 +277,23 @@ export const adminGetConversation = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Invalid id" });
     }
     const conversation = await Conversation.findById(id)
-      .populate("customerId", "name email phone username")
-      .populate("professionalId", "name email phone username professionalLevel")
+      .populate("customerId", "name email phone username isAnonymized deletedAt")
+      .populate("professionalId", "name email phone username professionalLevel isAnonymized deletedAt")
       .populate("supportAdminId", "name email")
-      .populate("supportTargetUserId", "name email phone username role professionalLevel")
+      .populate("supportTargetUserId", "name email phone username role professionalLevel isAnonymized deletedAt")
       .lean();
     if (!conversation) {
       return res.status(404).json({ success: false, msg: "Conversation not found" });
     }
-    return res.json({ success: true, data: conversation });
+    return res.json({
+      success: true,
+      data: {
+        ...conversation,
+        customerId: maskAnonymizedUser(conversation.customerId),
+        professionalId: maskAnonymizedUser(conversation.professionalId),
+        supportTargetUserId: maskAnonymizedUser(conversation.supportTargetUserId),
+      },
+    });
   } catch (error: any) {
     console.error("Admin get conversation error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load conversation" });
@@ -266,11 +312,19 @@ export const adminGetConversationMessages = async (req: Request, res: Response) 
         .sort({ _id: -1 })
         .skip(skip)
         .limit(limit)
-        .populate("senderId", "name email")
+        .populate("senderId", "name email isAnonymized deletedAt")
         .lean(),
       ChatMessage.countDocuments({ conversationId: id }),
     ]);
-    return res.json({ success: true, data: { items: messages.reverse(), total, page, limit } });
+    return res.json({
+      success: true,
+      data: {
+        items: messages.reverse().map(maskChatMessageForAnonymizedSender),
+        total,
+        page,
+        limit,
+      },
+    });
   } catch (error: any) {
     console.error("Admin get messages error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load messages" });
@@ -305,15 +359,21 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
       });
     }
 
-    const targetUser = await User.findById(targetUserId).select("_id role name email").lean();
+    const targetUser = await User.findById(targetUserId)
+      .select("_id role name email deletedAt isAnonymized")
+      .lean();
     if (!targetUser) {
       return res.status(404).json({ success: false, msg: "Target user not found" });
     }
-    if (targetUser.role !== "professional") {
-      return res.status(403).json({
+    if (
+      targetUser.role !== "professional"
+      || targetUser.deletedAt
+      || targetUser.isAnonymized
+    ) {
+      return res.status(409).json({
         success: false,
-        msg: "Support chats are only available for professionals",
-        code: "FORBIDDEN",
+        msg: "Support chats are only available for active professional accounts",
+        code: "ACCOUNT_UNAVAILABLE",
       });
     }
 
@@ -571,7 +631,7 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
     }
 
     const user = await User.findById(targetId)
-      .select("name email phone username role professionalLevel")
+      .select("name email phone username role professionalLevel isAnonymized deletedAt")
       .lean();
     if (!user) {
       return res.status(404).json({ success: false, msg: "Participant not found" });
@@ -655,16 +715,19 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
     ]);
 
     const row = agg[0] || {};
+    const safeUser = maskAnonymizedUser(user);
     return res.json({
       success: true,
       data: {
         user: {
-          _id: user._id,
-          name: user.name || null,
-          email: user.email || null,
-          phone: user.phone || null,
-          username: user.username || null,
-          role: user.role,
+          _id: safeUser._id,
+          name: safeUser.name || null,
+          email: safeUser.email || null,
+          phone: safeUser.phone || null,
+          username: safeUser.username || null,
+          role: safeUser.role,
+          ...(safeUser.isAnonymized ? { isAnonymized: true } : {}),
+          ...(safeUser.deletedAt ? { deletedAt: safeUser.deletedAt } : {}),
         },
         kpis: buildSupportParticipantKpis({
           professionalLevel: user.professionalLevel,
@@ -813,7 +876,7 @@ export const adminListSupportConversations = async (req: Request, res: Response)
           awaitingReply: Boolean(targetId && senderId && targetId === senderId),
         };
       });
-      return res.json({ success: true, data: { items, total, page, limit } });
+      return res.json({ success: true, data: { items: items.map(maskChatReportForRead), total, page, limit } });
     }
 
     const [conversations, total] = await Promise.all([
@@ -821,7 +884,7 @@ export const adminListSupportConversations = async (req: Request, res: Response)
         .sort({ lastMessageAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate("supportTargetUserId", "name email username")
+        .populate("supportTargetUserId", "name email username isAnonymized deletedAt")
         .populate("supportAdminId", "name email")
         .select("_id supportAdminId supportTargetUserId lastMessagePreview lastMessageAt lastMessageSenderId")
         .lean(),
@@ -841,7 +904,7 @@ export const adminListSupportConversations = async (req: Request, res: Response)
       };
     });
 
-    return res.json({ success: true, data: { items, total, page, limit } });
+    return res.json({ success: true, data: { items: items.map(maskChatReportForRead), total, page, limit } });
   } catch (error: any) {
     console.error("Admin list support conversations error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load support conversations" });

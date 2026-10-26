@@ -75,14 +75,14 @@ export const adminListSupportItems = async (req: Request, res: Response) => {
 
     const [tickets, legacyRequests, ticketTotal, legacyTotal] = await Promise.all([
       SupportTicket.find(ticketFilter)
-        .populate("userId", "name email role")
+        .populate("userId", "name email role isAnonymized deletedAt")
         .populate("meeting.adminId", "name email")
         .sort({ updatedAt: -1, _id: -1 })
         .limit(fetchLimit)
         .lean(),
       legacyFilter
         ? MeetingRequest.find(legacyFilter)
-            .populate("userId", "name email role")
+            .populate("userId", "name email role isAnonymized deletedAt")
             .sort({ updatedAt: -1, _id: -1 })
             .limit(fetchLimit)
             .lean()
@@ -144,13 +144,13 @@ async function findAdminSupportTicket(kind: string, id: string) {
     ? { _id: id, kind: { $ne: "meeting" } }
     : { _id: id, kind: "meeting" };
   return SupportTicket.findOne(query)
-    .populate("userId", "name email role isEmailVerified deletedAt")
+    .populate("userId", "name email role isEmailVerified deletedAt isAnonymized")
     .populate("meeting.adminId", "name email");
 }
 
 async function findAdminLegacyMeeting(id: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) return null;
-  return MeetingRequest.findOne({ _id: id }).populate("userId", "name email role");
+  return MeetingRequest.findOne({ _id: id }).populate("userId", "name email role isAnonymized deletedAt");
 }
 
 export const adminGetSupportItem = async (req: Request, res: Response) => {
@@ -548,6 +548,7 @@ export const adminUpdateSupportMeeting = async (req: Request, res: Response) => 
         start,
         timeZone,
         owner,
+        actorRole: "admin",
         allowPastPending: true,
       });
       const notes = await SupportTicketInternalNote.find({ ticketId: ticket._id })

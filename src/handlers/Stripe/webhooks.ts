@@ -19,6 +19,7 @@ import { deductPoints } from '../../utils/pointsSystem';
 import { notify } from '../../utils/notifications/notify';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
+import { getProfessionalId } from '../../utils/bookingHelpers';
 import {
   loadBasePaymentRows,
   recordBasePaymentRefund,
@@ -479,11 +480,16 @@ async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentInte
 
   if (booking.customer) {
     try {
+      const professionalId =
+        (booking.professional as any)?._id?.toString?.()
+        || (booking.professional as any)?.toString?.()
+        || await getProfessionalId(booking);
       await notify({
         userId: String(booking.customer),
         eventKey: 'customer.payment_confirmed',
         entityType: 'booking',
         entityId: String(booking._id),
+        ...(professionalId ? { subjectUserId: String(professionalId) } : {}),
         idempotencyKey: `stripe:${paymentIntent.id}:extra_cost_payment_confirmed`,
         context: {
           bookingId: String(booking._id),
@@ -890,6 +896,9 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
           eventKey: 'customer.booking_cancelled_refunded',
           entityType: 'booking',
           entityId: String(booking._id),
+          ...(booking.professional
+            ? { subjectUserId: String(booking.professional) }
+            : {}),
           context: { bookingId: String(booking._id) },
           meta: { partial: booking.payment.status === 'partially_refunded' },
         });
@@ -900,6 +909,9 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
           eventKey: 'professional.booking_cancelled_refunded',
           entityType: 'booking',
           entityId: String(booking._id),
+          ...(booking.customer
+            ? { subjectUserId: String(booking.customer) }
+            : {}),
           context: { bookingId: String(booking._id) },
           meta: { partial: booking.payment.status === 'partially_refunded' },
         });

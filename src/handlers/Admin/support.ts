@@ -17,6 +17,10 @@ import {
   resolveStoredCalendarTimeZone,
 } from "../../utils/support/availability";
 import {
+  isAnonymizedAccount,
+  maskAnonymizedUser,
+} from "../../utils/accountAnonymity";
+import {
   buildCalendarReservationKeysForInterval,
   releaseCalendarReservations,
   reserveCalendarKeys,
@@ -66,7 +70,7 @@ export const adminListTickets = async (req: Request, res: Response) => {
     await connectDB();
     const [items, total] = await Promise.all([
       SupportTicket.find(filter)
-        .populate("userId", "name email role")
+        .populate("userId", "name email role isAnonymized deletedAt")
         .sort({ updatedAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -145,7 +149,7 @@ export const adminUpdateTicket = async (req: Request, res: Response) => {
     let emailSent: boolean | undefined;
     if (replyBody) {
       try {
-        await ticket.populate("userId", "name email isEmailVerified deletedAt");
+        await ticket.populate("userId", "name email isEmailVerified deletedAt isAnonymized");
         emailSent = await sendSupportReplyEmail(
           ticket.userId as unknown as { name?: string; email?: string; isEmailVerified?: boolean },
           ticket as unknown as never,
@@ -190,7 +194,7 @@ export const adminListMeetingRequests = async (req: Request, res: Response) => {
     await connectDB();
     const [items, total] = await Promise.all([
       MeetingRequest.find(filter)
-        .populate("userId", "name email role")
+        .populate("userId", "name email role isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -200,7 +204,16 @@ export const adminListMeetingRequests = async (req: Request, res: Response) => {
     return res.status(200).json({
       success: true,
       data: {
-        items,
+        items: items.map((item: any) => {
+          const requesterAnonymized = isAnonymizedAccount(item.userId);
+          return {
+            ...item,
+            userId: maskAnonymizedUser(item.userId),
+            ...(requesterAnonymized
+              ? { topic: "[deleted]", preferredTimes: "[deleted]" }
+              : {}),
+          };
+        }),
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       },
     });

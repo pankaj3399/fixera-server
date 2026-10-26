@@ -40,7 +40,7 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
         code: 'AUTH_REQUIRED'
       });
     }
-    if (user.deletedAt) {
+    if (user.deletedAt || user.isAnonymized) {
       return res.status(403).json({
         success: false,
         msg: 'This account has been deleted.',
@@ -116,6 +116,7 @@ export const optionalProtect = async (
     if (
       user &&
       !user.deletedAt &&
+      !user.isAnonymized &&
       !['suspended', 'rejected'].includes(user.accountStatus || '')
     ) {
       req.user = user;
@@ -168,7 +169,7 @@ export const authMiddleware = (allowedRoles: string[]) => {
           code: 'AUTH_REQUIRED'
         });
       }
-      if (user.deletedAt) {
+      if (user.deletedAt || user.isAnonymized) {
         return res.status(403).json({
           success: false,
           msg: 'This account has been deleted.',

@@ -12,6 +12,7 @@ import { presignS3Url } from '../../utils/s3Upload';
 import { parseFlexibleNumber } from '../../utils/vatManagement';
 import { buildOversightTransferStatusExpression, canRetryTransfer, getTransferStatus } from '../../utils/paymentSafety';
 import { auditLog } from '../../utils/auditLogger';
+import { maskAnonymizedUser } from '../../utils/accountAnonymity';
 
 class ManualInvoiceValidationError extends Error {
   readonly code = 'MANUAL_INVOICE_VALIDATION_ERROR';
@@ -110,8 +111,8 @@ export const getPayments = async (req: Request, res: Response) => {
     const [payments, totalCount, statusBreakdown] = await Promise.all([
       Payment.find(query)
         .populate('booking', 'status bookingType bookingNumber createdAt')
-        .populate('customer', 'name email')
-        .populate('professional', 'name email businessInfo companyName')
+        .populate('customer', 'name email isAnonymized deletedAt')
+        .populate('professional', 'name email businessInfo companyName isAnonymized deletedAt')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber)
@@ -149,7 +150,11 @@ export const getPayments = async (req: Request, res: Response) => {
 
     const paymentsWithSignedUrls = await Promise.all(
       payments.map((payment) => withPresignedInvoiceUrls(payment))
-    );
+    ).then((rows) => rows.map((payment) => ({
+      ...payment,
+      customer: maskAnonymizedUser(payment.customer),
+      professional: maskAnonymizedUser(payment.professional),
+    })));
 
     res.json({
       success: true,
