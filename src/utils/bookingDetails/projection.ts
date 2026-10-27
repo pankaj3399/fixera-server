@@ -1447,6 +1447,7 @@ export const buildBookingDetails = async (params: {
     justification: String(item.justification || ''),
     professionalAmount: num(item.amount) ?? 0,
     unitPrice: num(item.unitPrice),
+    unit: str(item.unit),
     estimatedUnits: num(item.estimatedUnits),
     actualUnits: num(item.actualUnits),
     referenceIndex: num(item.referenceIndex),

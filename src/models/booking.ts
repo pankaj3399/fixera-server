@@ -180,6 +180,7 @@ export interface IBookingSnapshot {
   selectedSubproject?: Record<string, unknown>;
   selectedExtraOptions?: Array<Record<string, unknown>>;
   checkoutSnapshot?: Record<string, unknown>;
+  scheduleSnapshot?: { quantity?: number; executionDuration?: { value: number; unit: 'hours' | 'days' }; preparationDuration?: { value: number; unit: 'hours' | 'days' }; bufferDuration?: { value: number; unit: 'hours' | 'days' }; version?: number };
   parties?: Record<string, unknown>;
   serviceConfigurationId?: string;
 }
@@ -708,6 +709,7 @@ const BookingSnapshotSchema = new Schema(
     selectedSubproject: { type: Schema.Types.Mixed },
     selectedExtraOptions: { type: [Schema.Types.Mixed], default: undefined },
     checkoutSnapshot: { type: Schema.Types.Mixed },
+    scheduleSnapshot: { type: Schema.Types.Mixed },
     parties: { type: Schema.Types.Mixed },
     serviceConfigurationId: { type: String, maxlength: 64 },
   },
@@ -1549,7 +1551,8 @@ const BookingSchema = new Schema({
     referenceIndex: { type: Number },
     estimatedUnits: { type: Number },
     actualUnits: { type: Number },
-    unitPrice: { type: Number }
+    unitPrice: { type: Number },
+    unit: { type: String, maxlength: 50 }
   }],
   extraCostStatus: {
     type: String,

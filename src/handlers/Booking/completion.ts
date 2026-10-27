@@ -237,6 +237,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
             estimatedUnits: cost.estimatedUnits,
             actualUnits: cost.actualUnits,
             unitPrice: cost.unitPrice,
+            unit: booking.checkoutSnapshot?.unit,
           });
           extraCostTotal += amount;
         } else if (costType === 'condition') {

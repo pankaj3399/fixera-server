@@ -18,6 +18,7 @@ import PointsConfig from '../../models/pointsConfig';
 import PointTransaction from '../../models/pointTransaction';
 import {
   buildProjectScheduleWindow,
+  getBookingScheduleOptions,
   validateProjectScheduleSelection,
 } from '../../utils/scheduleEngine';
 import {
@@ -216,7 +217,7 @@ const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
   }
 };
 
-const buildScheduleUpdatePayload = async ({
+export const buildScheduleUpdatePayload = async ({
   booking,
   scheduledStartDate,
   scheduledStartTime,
@@ -286,7 +287,9 @@ const buildScheduleUpdatePayload = async ({
     } else {
       const excludeBookingId = booking?._id ? String(booking._id) : undefined;
 
+      const scheduleOptions = getBookingScheduleOptions(booking);
       const validation = await validateProjectScheduleSelection({
+        ...scheduleOptions,
         projectId,
         subprojectIndex: resolvedSubprojectIndex,
         startDate: scheduledStartDate,
@@ -312,6 +315,7 @@ const buildScheduleUpdatePayload = async ({
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
+        ...scheduleOptions,
         excludeBookingId,
       });
 

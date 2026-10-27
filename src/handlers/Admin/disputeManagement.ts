@@ -19,7 +19,7 @@ import {
 import { auditLog } from '../../utils/auditLogger';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { presignS3Url } from '../../utils/s3Upload';
-import { buildProjectScheduleWindow } from '../../utils/scheduleEngine';
+import { buildProjectScheduleWindow, getBookingScheduleOptions } from '../../utils/scheduleEngine';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import {
   findBookingCalendarConflictsForSchedule,
@@ -474,6 +474,8 @@ export const resolveDispute = async (req: Request, res: Response) => {
         });
       }
       const window = await buildProjectScheduleWindow({
+        ...getBookingScheduleOptions(booking),
+        customerBlocks: booking.customerBlocks,
         projectId,
         subprojectIndex: typeof booking.selectedSubprojectIndex === 'number' ? booking.selectedSubprojectIndex : undefined,
         startDate: forcedStartDate.trim(),

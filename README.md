@@ -192,3 +192,7 @@ The Google Maps API is used for address autocomplete and validation features.
 
 - Logs: only essential error logs are kept by default.
 - You can add more structured logging if needed (e.g., pino/winston) without changing the flow.
+
+## Project copy generation
+
+See [OpenAI title and FAQ setup](PROJECT_COPY_AI_SETUP.md) for server-only configuration and mocked verification.

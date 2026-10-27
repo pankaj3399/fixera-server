@@ -326,29 +326,66 @@ export type DurationOverride = {
   buffer?: { value: number; unit: 'hours' | 'days' };
 };
 
-const getProjectDurations = (project: any, subprojectIndex?: number, override?: DurationOverride) => {
+export const resolveProjectScheduleQuantity = (project: any, subprojectIndex: number | undefined, rawQuantity: unknown) => {
+  const subproject = typeof subprojectIndex === 'number' ? project?.subprojects?.[subprojectIndex] : undefined;
+  if (subproject?.pricing?.type !== 'unit') return { valid: true as const, quantity: 1 };
+  if (rawQuantity != null && typeof rawQuantity !== 'number' && typeof rawQuantity !== 'string') {
+    return { valid: false as const, error: 'Quantity must be a single number' };
+  }
+  const quantity = rawQuantity == null ? 1 : Number(rawQuantity);
+  const minimum = Number(subproject.pricing.minOrderQuantity) > 0 ? Number(subproject.pricing.minOrderQuantity) : 1;
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity < minimum) {
+    return { valid: false as const, error: `Quantity must be a positive number of at least ${minimum}` };
+  }
+  return { valid: true as const, quantity };
+};
+
+/** Persisted duration overrides are already scaled; missing prep/buffer means zero. */
+export const getBookingScheduleOptions = (booking: any): { quantity: number; durationOverride?: DurationOverride } => {
+  const quantity = Number(booking.scheduleSnapshot?.quantity ?? booking.checkoutSnapshot?.quantity) || 1;
+  const snapshot = booking.scheduleSnapshot;
+  if (!snapshot?.executionDuration) return { quantity };
+  return {
+    quantity,
+    durationOverride: {
+      execution: snapshot.executionDuration,
+      preparation: snapshot.preparationDuration || { value: 0, unit: 'hours' },
+      buffer: snapshot.bufferDuration || { value: 0, unit: 'hours' },
+    },
+  };
+};
+
+export const getProjectDurations = (project: any, subprojectIndex?: number, override?: DurationOverride, quantity = 1) => {
   const subproject =
     typeof subprojectIndex === "number" &&
     Array.isArray(project.subprojects) &&
     project.subprojects[subprojectIndex]
       ? project.subprojects[subprojectIndex]
       : null;
+  const unitPricing = subproject?.pricing?.type === 'unit';
+  const unit = String(subproject?.pricing?.unit || '').toLowerCase();
+  const scalesDuration = unitPricing && subproject?.pricing?.durationBasis === 'per_unit';
+  const customerDeterminedHours = scalesDuration && /^(h|hr|hrs|hour|hours|hur)$/.test(unit);
+  if (unitPricing && (!Number.isFinite(quantity) || quantity <= 0)) return null;
 
   const hasValidExecutionOverride =
     override?.execution &&
     typeof override.execution.value === 'number' &&
     override.execution.value > 0 &&
     (override.execution.unit === 'hours' || override.execution.unit === 'days');
-  const execution = hasValidExecutionOverride
+  let execution = hasValidExecutionOverride
     ? override!.execution
+    : customerDeterminedHours
+    ? { value: quantity, unit: 'hours' }
     : (subproject?.executionDuration || project.executionDuration);
   const isRfqPackage = subproject?.pricing?.type === "rfq";
-  const executionValue =
+  let executionValue =
     typeof execution?.value === "number" && execution.value > 0
       ? execution.value
       : isRfqPackage
       ? execution?.range?.max || execution?.range?.min
       : execution?.range?.min || execution?.range?.max;
+  if (scalesDuration && !customerDeterminedHours && !hasValidExecutionOverride && typeof executionValue === 'number' && executionValue > 0) executionValue *= quantity;
 
   if (!isRfqPackage && (!execution || typeof executionValue !== "number" || executionValue <= 0)) {
     return null;
@@ -363,7 +400,7 @@ const getProjectDurations = (project: any, subprojectIndex?: number, override?: 
   const hasValidBufferOverride =
     override?.buffer &&
     typeof override.buffer.value === 'number' &&
-    override.buffer.value > 0 &&
+    override.buffer.value >= 0 &&
     (override.buffer.unit === 'hours' || override.buffer.unit === 'days');
   const buffer = hasValidBufferOverride
     ? override!.buffer
@@ -373,7 +410,7 @@ const getProjectDurations = (project: any, subprojectIndex?: number, override?: 
   const overridePrep =
     override?.preparation &&
     typeof override.preparation.value === "number" &&
-    override.preparation.value > 0 &&
+    override.preparation.value >= 0 &&
     (override.preparation.unit === 'hours' || override.preparation.unit === 'days')
       ? override.preparation
       : null;
@@ -2223,13 +2260,14 @@ export const buildProjectScheduleProposalsWithData = async (
   professional: any,
   subprojectIndex?: number,
   durationOverride?: DurationOverride,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  quantity = 1
 ): Promise<ScheduleProposals | null> => {
   if (!project || !professional) {
     return null;
   }
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride);
+  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
     return null;
   }
@@ -2569,14 +2607,15 @@ export const buildProjectScheduleProposals = async (
   projectId: string,
   subprojectIndex?: number,
   durationOverride?: DurationOverride,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  quantity = 1
 ): Promise<ScheduleProposals | null> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project || !professional) {
     return null;
   }
 
-  return buildProjectScheduleProposalsWithData(project, professional, subprojectIndex, durationOverride, excludeBookingId);
+  return buildProjectScheduleProposalsWithData(project, professional, subprojectIndex, durationOverride, excludeBookingId, quantity);
 };
 
 type ScheduleContext = {
@@ -2599,13 +2638,15 @@ type AssembleResult =
 
 const assembleScheduleContext = async (
   projectId: string,
-  subprojectIndex?: number
+  subprojectIndex?: number,
+  quantity = 1,
+  durationOverride?: DurationOverride
 ): Promise<AssembleResult> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project) return { ok: false, reason: "Project not found" };
   if (!professional) return { ok: false, reason: "Professional not found" };
 
-  const durations = getProjectDurations(project, subprojectIndex);
+  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
     return { ok: false, reason: "Missing execution duration" };
   }
@@ -2644,6 +2685,8 @@ export const validateProjectScheduleSelection = async ({
   startTime,
   customerBlocks,
   excludeBookingId,
+  quantity = 1,
+  durationOverride,
 }: {
   projectId: string;
   subprojectIndex?: number;
@@ -2651,12 +2694,14 @@ export const validateProjectScheduleSelection = async ({
   startTime?: string;
   customerBlocks?: CustomerBlocks;
   excludeBookingId?: string;
+  quantity?: number;
+  durationOverride?: DurationOverride;
 }) => {
   if (!startDate) {
     return { valid: true };
   }
 
-  const assembled = await assembleScheduleContext(projectId, subprojectIndex);
+  const assembled = await assembleScheduleContext(projectId, subprojectIndex, quantity, durationOverride);
   if (!assembled.ok) {
     return { valid: false, reason: assembled.reason };
   }
@@ -2830,11 +2875,13 @@ export const getProjectAvailableSlotsForDate = async ({
   subprojectIndex,
   startDate,
   customerBlocks,
+  quantity,
 }: {
   projectId: string;
   subprojectIndex?: number;
   startDate: string;
   customerBlocks?: CustomerBlocks;
+  quantity?: number;
 }): Promise<{ slots: string[]; mode: "hours" | "days" } | null> => {
   if (!startDate) return null;
 
@@ -2851,7 +2898,7 @@ export const getProjectAvailableSlotsForDate = async ({
     return null;
   }
 
-  const assembled = await assembleScheduleContext(projectId, subprojectIndex);
+  const assembled = await assembleScheduleContext(projectId, subprojectIndex, quantity);
   if (!assembled.ok) return null;
   const {
     project,
@@ -2924,6 +2971,7 @@ export const buildProjectScheduleWindow = async ({
   startTime,
   customerBlocks,
   durationOverride,
+  quantity = 1,
   excludeBookingId,
 }: {
   projectId: string;
@@ -2932,6 +2980,7 @@ export const buildProjectScheduleWindow = async ({
   startTime?: string;
   customerBlocks?: CustomerBlocks;
   durationOverride?: DurationOverride;
+  quantity?: number;
   excludeBookingId?: string;
 }) => {
   if (!startDate) {
@@ -2943,7 +2992,7 @@ export const buildProjectScheduleWindow = async ({
     return null;
   }
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride);
+  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
     return null;
   }
@@ -3277,12 +3326,14 @@ export const getUnbookableStartDates = async ({
   from,
   to,
   subprojectIndex,
+  quantity = 1,
   excludeBookingId,
 }: {
   projectId: string;
   from: Date;
   to: Date;
   subprojectIndex?: number;
+  quantity?: number;
   excludeBookingId?: string;
 }): Promise<string[]> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
@@ -3303,7 +3354,7 @@ export const getUnbookableStartDates = async ({
     if (daysSubIdx >= 0) resolvedSubprojectIndex = daysSubIdx;
   }
 
-  const durations = getProjectDurations(project, resolvedSubprojectIndex);
+  const durations = getProjectDurations(project, resolvedSubprojectIndex, undefined, quantity);
   if (!durations || !durations.execution?.value) {
     return [];
   }
