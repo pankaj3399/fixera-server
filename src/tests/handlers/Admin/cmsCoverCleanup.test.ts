@@ -1,11 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request, Response } from 'express';
 
-const { findById, findByIdAndDelete, find, deleteFromS3 } = vi.hoisted(() => ({
+const {
+  findById,
+  findByIdAndDelete,
+  find,
+  deleteFromS3,
+  syncCmsTranslations,
+  deleteAutoTranslatedSiblings,
+  moveAutoTranslatedSiblings,
+  isTranslationSource,
+} = vi.hoisted(() => ({
   findById: vi.fn(),
   findByIdAndDelete: vi.fn(),
   find: vi.fn(),
   deleteFromS3: vi.fn(),
+  syncCmsTranslations: vi.fn(),
+  deleteAutoTranslatedSiblings: vi.fn(),
+  moveAutoTranslatedSiblings: vi.fn(),
+  isTranslationSource: vi.fn(),
 }));
 
 vi.mock('../../../models/cmsContent', () => ({
@@ -26,6 +39,14 @@ vi.mock('../../../utils/s3Upload', async (importOriginal) => {
 vi.mock('../../../utils/cmsPresign', () => ({
   presignCmsDoc: vi.fn(async (doc: unknown) => doc),
   presignCmsDocs: vi.fn(async (docs: unknown[]) => docs),
+}));
+
+vi.mock('../../../utils/cms/syncTranslations', () => ({
+  syncCmsTranslations,
+  deleteAutoTranslatedSiblings,
+  moveAutoTranslatedSiblings,
+  mergeTranslationResults: vi.fn((...groups: any[][]) => groups.flat()),
+  isTranslationSource,
 }));
 
 import {
@@ -69,6 +90,7 @@ function makeDoc(overrides: Record<string, any> = {}) {
     coverImageAlt: 'Old alt',
     status: 'published',
     publishedAt: new Date('2026-01-01T00:00:00.000Z'),
+    autoTranslated: false,
     translatedFrom: undefined,
     seo: {},
     relatedContent: [],
@@ -105,10 +127,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockReferenceDocs([]);
   deleteFromS3.mockResolvedValue(undefined);
+  syncCmsTranslations.mockResolvedValue([]);
+  deleteAutoTranslatedSiblings.mockResolvedValue({ deleted: 0, detached: 0 });
+  moveAutoTranslatedSiblings.mockResolvedValue([]);
+  isTranslationSource.mockReturnValue(true);
 });
 
 describe('CMS cover cleanup on update', () => {
-  it('reclaims the replaced cover when nothing else references it', async () => {
+  it('runs the translation sync before reclaiming the replaced cover', async () => {
     mockFindById(makeDoc());
 
     const res = mockRes();
@@ -118,7 +144,11 @@ describe('CMS cover cleanup on update', () => {
     );
 
     expect(res.statusCode).toBe(200);
+    expect(syncCmsTranslations).toHaveBeenCalledTimes(1);
     expect(deleteFromS3).toHaveBeenCalledWith(OLD_KEY);
+    expect(syncCmsTranslations.mock.invocationCallOrder[0]).toBeLessThan(
+      deleteFromS3.mock.invocationCallOrder[0]
+    );
   });
 
   it('keeps the replaced object when a surviving manual translation still references it', async () => {
@@ -132,13 +162,35 @@ describe('CMS cover cleanup on update', () => {
     );
 
     expect(res.statusCode).toBe(200);
+    expect(syncCmsTranslations).toHaveBeenCalledTimes(1);
     expect(deleteFromS3).not.toHaveBeenCalled();
+  });
+
+  it('keeps the replaced object when the translation sync fails', async () => {
+    mockFindById(makeDoc());
+    syncCmsTranslations.mockRejectedValueOnce(new Error('translator unavailable'));
+    mockReferenceDocs([{ _id: 'auto-nl', coverImage: OLD_COVER }]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = mockRes();
+    await updateCmsContent(
+      { params: { id: ID }, body: { coverImage: NEW_COVER } } as unknown as Request,
+      res
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.translations).toEqual([
+      { locale: '*', status: 'failed', error: 'Translation sync crashed' },
+    ]);
+    expect(deleteFromS3).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 });
 
 describe('CMS cover cleanup on delete', () => {
   it('keeps the cover object while a manual translation survivor references it', async () => {
     findByIdAndDelete.mockResolvedValue(makeDoc());
+    deleteAutoTranslatedSiblings.mockResolvedValue({ deleted: 1, detached: 1 });
     mockReferenceDocs([{ _id: 'manual-nl', coverImage: OLD_COVER }]);
 
     const res = mockRes();
@@ -148,11 +200,13 @@ describe('CMS cover cleanup on delete', () => {
     );
 
     expect(res.statusCode).toBe(200);
+    expect(deleteAutoTranslatedSiblings).toHaveBeenCalledTimes(1);
     expect(deleteFromS3).not.toHaveBeenCalled();
   });
 
   it('deletes the cover object when no surviving document references it', async () => {
     findByIdAndDelete.mockResolvedValue(makeDoc());
+    deleteAutoTranslatedSiblings.mockResolvedValue({ deleted: 2, detached: 0 });
 
     const res = mockRes();
     await deleteCmsContent(
@@ -161,5 +215,8 @@ describe('CMS cover cleanup on delete', () => {
     );
 
     expect(deleteFromS3).toHaveBeenCalledWith(OLD_KEY);
+    expect(deleteAutoTranslatedSiblings.mock.invocationCallOrder[0]).toBeLessThan(
+      deleteFromS3.mock.invocationCallOrder[0]
+    );
   });
 });

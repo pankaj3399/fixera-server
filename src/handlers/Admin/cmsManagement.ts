@@ -37,8 +37,33 @@ import {
   CMS_LOCALES,
   isCmsLocale,
 } from "../../utils/cms/locales";
+import {
+  deleteAutoTranslatedSiblings,
+  isTranslationSource,
+  mergeTranslationResults,
+  moveAutoTranslatedSiblings,
+  syncCmsTranslations,
+  TranslationResult,
+} from "../../utils/cms/syncTranslations";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
+
+/**
+ * Runs the Azure translation sync for a saved source doc inside the request
+ * (Vercel serverless freezes post-response work, so never fire-and-forget).
+ * A translation failure must never fail or roll back the admin's save.
+ */
+async function runTranslationSync(
+  doc: Record<string, any>,
+  options: { force?: boolean } = {}
+): Promise<TranslationResult[]> {
+  try {
+    return await syncCmsTranslations(doc, options);
+  } catch (err) {
+    console.error("CMS translation sync crashed (save kept, continuing):", err);
+    return [{ locale: "*", status: "failed", error: "Translation sync crashed" }];
+  }
+}
 
 const sanitizeStringArray = (input: unknown, max = 20): string[] => {
   if (!Array.isArray(input)) return [];
@@ -417,10 +442,14 @@ export const createCmsContent = async (req: Request, res: Response) => {
       activeCountries: sanitizeCmsActiveCountries(body.activeCountries),
     });
 
+    // Await the sync synchronously within the request — serverless freezes
+    // post-response work, so fire-and-forget would silently lose it.
+    const translations = await runTranslationSync(doc);
+
     const fallback = doc.toObject() as Record<string, any>;
     const populated = await loadCmsDocForResponse(doc._id, fallback);
     const presigned = await presignCmsDoc(populated);
-    return res.status(201).json({ success: true, data: presigned });
+    return res.status(201).json({ success: true, translations, data: presigned });
   } catch (error: any) {
     if (error?.code === 11000) {
       return res.status(409).json({ success: false, msg: "Slug already exists for this type and locale" });
@@ -463,6 +492,8 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Slug is required" });
     }
 
+    const slugChanged = finalSlug !== doc.slug;
+
     if (finalSlug !== doc.slug || finalLocale !== doc.locale) {
       const clash = await CmsContent.findOne({
         type: doc.type,
@@ -471,7 +502,6 @@ export const updateCmsContent = async (req: Request, res: Response) => {
         _id: { $ne: doc._id },
       });
       if (clash) {
-        const slugChanged = finalSlug !== doc.slug;
         const localeChanged = finalLocale !== doc.locale;
         const detail = slugChanged && localeChanged ? "slug and locale" : slugChanged ? "slug" : "locale";
         return res.status(409).json({
@@ -567,10 +597,35 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       doc.activeCountries = sanitizeCmsActiveCountries(body.activeCountries);
     }
 
+    // An admin directly editing a machine translation demotes it to a manual
+    // translation: manual translations always win, and they never act as
+    // translation sources (so the human en source is never overwritten).
+    if (doc.autoTranslated === true) doc.autoTranslated = false;
+
     await doc.save();
 
-    // Drop the replaced cover object only when no surviving CMS document
-    // (including manual translations kept on purpose) references it.
+    // Await synchronously (serverless freezes post-response work). A failure
+    // here is reported in the response; the admin's save is never rolled back.
+    // Only originals are sources; a manual translation (translatedFrom set) is
+    // a no-op here, whatever the edit changed.
+    let translations: TranslationResult[] = [];
+    if (isTranslationSource(doc)) {
+      try {
+        // Repoint machine-managed siblings to the new slug first so the
+        // per-locale upserts below update the right docs.
+        const moveResults = slugChanged ? await moveAutoTranslatedSiblings(doc) : [];
+        const syncResults = await runTranslationSync(doc);
+        translations = mergeTranslationResults(moveResults, syncResults);
+      } catch (err) {
+        console.error("CMS translation sync/move crashed after save (save kept):", err);
+        translations = [{ locale: "*", status: "failed", error: "Translation sync crashed" }];
+      }
+    }
+
+    // Drop the replaced object only after the sync: auto siblings have moved
+    // to the new cover by now, while manual survivors still reference the old
+    // one and must keep it. A failed sync also leaves references in place, so
+    // the reference check preserves the object instead of breaking those docs.
     if (previousCoverToCleanup) {
       try {
         await deleteCmsMediaIfUnreferenced(previousCoverToCleanup);
@@ -582,7 +637,7 @@ export const updateCmsContent = async (req: Request, res: Response) => {
     const fallback = doc.toObject() as Record<string, any>;
     const populated = await loadCmsDocForResponse(doc._id, fallback);
     const presigned = await presignCmsDoc(populated);
-    return res.status(200).json({ success: true, data: presigned });
+    return res.status(200).json({ success: true, translations, data: presigned });
   } catch (error: any) {
     if (error?.code === 11000) {
       return res.status(409).json({ success: false, msg: "Slug already exists for this type and locale" });
@@ -605,8 +660,18 @@ export const deleteCmsContent = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, msg: "Content not found" });
     }
 
-    // The deleted doc is gone. Only remove the shared S3 object when nothing
-    // that remains (including manual translations kept on purpose) references it.
+    // Await synchronously: delete machine translations of this source, keep
+    // manual ones and detach them (translatedFrom unset). Never fails the delete.
+    let translationCleanup: { deleted: number; detached: number } = { deleted: 0, detached: 0 };
+    try {
+      translationCleanup = await deleteAutoTranslatedSiblings(doc);
+    } catch (siblingError) {
+      console.error("Failed to clean up auto-translated CMS siblings:", siblingError);
+    }
+
+    // The deleted doc is gone; auto siblings were deleted above and manual
+    // survivors detached. Only remove the shared S3 object when nothing that
+    // remains (including manual translations kept on purpose) references it.
     if (doc.coverImage) {
       try {
         await deleteCmsMediaIfUnreferenced(doc.coverImage);
@@ -615,10 +680,59 @@ export const deleteCmsContent = async (req: Request, res: Response) => {
       }
     }
 
-    return res.status(200).json({ success: true, msg: "Content deleted" });
+    return res.status(200).json({ success: true, msg: "Content deleted", translationCleanup });
   } catch (error) {
     console.error("Delete CMS content error:", error);
     return res.status(500).json({ success: false, msg: "Failed to delete content" });
+  }
+};
+
+/**
+ * POST /api/admin/cms/:id/translate — re-run the translation sync for a doc.
+ * body { force?: boolean }:
+ * - default: sync the doc as usual (manual translations preserved).
+ * - force: also overwrite manual translations.
+ *
+ * Only originals are translation sources. When the id points at a translation
+ * (translatedFrom set), the sync is re-run from its origin instead, so force
+ * never overwrites the human source locale with machine text. If the origin no
+ * longer exists, the doc is promoted to a manual original first.
+ */
+export const translateCmsContent = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, msg: "Invalid content ID" });
+    }
+
+    const force = req.body?.force === true;
+
+    await connecToDatabase();
+    const doc = await CmsContent.findById(id);
+    if (!doc) {
+      return res.status(404).json({ success: false, msg: "Content not found" });
+    }
+
+    let sourceDoc: Record<string, any> = doc;
+    if (doc.translatedFrom) {
+      const origin = await CmsContent.findById(doc.translatedFrom);
+      if (origin) {
+        sourceDoc = origin;
+      } else {
+        // Orphaned translation: promote it to a manual original so the sync
+        // runs from a real source instead of a document that no longer exists.
+        doc.translatedFrom = undefined;
+        doc.autoTranslated = false;
+        doc.sourceHash = undefined;
+        await doc.save();
+      }
+    }
+
+    const translations = await runTranslationSync(sourceDoc, { force });
+    return res.status(200).json({ success: true, translations });
+  } catch (error) {
+    console.error("Translate CMS content error:", error);
+    return res.status(500).json({ success: false, msg: "Translation sync failed" });
   }
 };
 
