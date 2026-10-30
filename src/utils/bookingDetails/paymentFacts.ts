@@ -89,6 +89,11 @@ export interface RefundFact {
   refundedAt: string | null;
   source: 'professional' | 'platform' | 'mixed' | null;
   status: 'recorded' | 'aggregate_only' | 'approved' | 'denied';
+  /**
+   * Provider refund status when the record came from Stripe. A `pending` or
+   * `requires_action` refund counts as reserved cash but has not moved yet.
+   */
+  providerStatus: string | null;
   justification: string | null;
   justificationRecorded: boolean;
   vatAmount: number | null;
@@ -183,6 +188,7 @@ export const resolveRefundFacts = (params: {
         refundedAt: iso(refund.refundedAt),
         source: refund.source || null,
         status: 'recorded',
+        providerStatus: str(refund.status),
         justification: str(refund.reason),
         justificationRecorded: Boolean(str(refund.reason)),
         vatAmount,
@@ -229,6 +235,7 @@ export const resolveRefundFacts = (params: {
         refundedAt: iso(booking?.payment?.refundedAt),
         source: booking?.payment?.refundSource || null,
         status: 'aggregate_only',
+        providerStatus: null,
         justification: str(booking?.payment?.refundReason),
         justificationRecorded: Boolean(str(booking?.payment?.refundReason)),
         vatAmount: null,
@@ -279,6 +286,7 @@ export const resolveRefundFacts = (params: {
       refundedAt,
       source: 'platform',
       status: request?.status === 'denied' ? 'denied' : 'approved',
+      providerStatus: null,
       justification: str(request?.reason),
       justificationRecorded: Boolean(str(request?.reason)),
       vatAmount: null,

@@ -233,13 +233,28 @@ export async function finalizeBookingCompletion(args: {
       ? `Completion finalized with extra costs of ${extraCostTotal}`
       : 'Completion finalized');
 
-  const pendingRefund = buildPendingExtraCostRefund({
+  const commissionPercent = extraCostTotal < 0 ? await getPlatformCommissionPercent() : 0;
+  const freshRefund = buildPendingExtraCostRefund({
     booking,
-    commissionPercent: extraCostTotal < 0 ? await getPlatformCommissionPercent() : 0,
+    commissionPercent,
     actorId,
     notifyAutoAccept: args.notifyAutoAccept === true,
     requestedAt: completionDate,
   });
+  // A retried completion must reuse the obligation it already created when the
+  // amount is unchanged: the provider refund keyed by obligationId may still be
+  // in flight, and a fresh obligation would allow a duplicate refund.
+  const existingRefund = getPendingExtraCostRefund(booking);
+  const pendingRefund =
+    existingRefund && freshRefund && existingRefund.amount === freshRefund.amount
+      ? {
+          ...existingRefund,
+          ...(freshRefund.actorId ? { actorId: freshRefund.actorId } : {}),
+          ...(freshRefund.notifyAutoAccept ? { notifyAutoAccept: true as const } : {}),
+          processingAt: freshRefund.processingAt,
+          claimId: freshRefund.claimId,
+        }
+      : freshRefund;
 
   const completedBooking = await Booking.findOneAndUpdate(
     { _id: booking._id, status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
@@ -307,7 +322,14 @@ export async function finalizeBookingCompletion(args: {
         },
         {
           $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
-          $unset: { actualEndDate: 1, 'payment.extraCostRefundPending': 1 },
+          $unset: {
+            // Keep the obligation identity (obligationId/providerRefundId): a refund
+            // may already be in flight, and a new obligation would let Stripe accept
+            // a second refund for the same money. Only this attempt's lease goes.
+            'payment.extraCostRefundPending.claimId': 1,
+            'payment.extraCostRefundPending.processingAt': 1,
+            actualEndDate: 1,
+          },
           $push: {
             statusHistory: {
               status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
@@ -331,7 +353,14 @@ export async function finalizeBookingCompletion(args: {
         },
         {
           $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
-          $unset: { actualEndDate: 1, 'payment.extraCostRefundPending': 1 },
+          $unset: {
+            // Keep the obligation identity (obligationId/providerRefundId): a refund
+            // may already be in flight, and a new obligation would let Stripe accept
+            // a second refund for the same money. Only this attempt's lease goes.
+            'payment.extraCostRefundPending.claimId': 1,
+            'payment.extraCostRefundPending.processingAt': 1,
+            actualEndDate: 1,
+          },
           $push: {
             statusHistory: {
               status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
@@ -428,7 +457,14 @@ async function recoverPendingCompletionRefund(
           },
           {
             $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
-            $unset: { actualEndDate: 1, 'payment.extraCostRefundPending': 1 },
+            $unset: {
+              // Keep the obligation identity (obligationId/providerRefundId): a refund
+              // may already be in flight, and a new obligation would let Stripe accept
+              // a second refund for the same money. Only this attempt's lease goes.
+              'payment.extraCostRefundPending.claimId': 1,
+              'payment.extraCostRefundPending.processingAt': 1,
+              actualEndDate: 1,
+            },
             $push: {
               statusHistory: {
                 status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
@@ -450,7 +486,14 @@ async function recoverPendingCompletionRefund(
           },
           {
             $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
-            $unset: { actualEndDate: 1, 'payment.extraCostRefundPending': 1 },
+            $unset: {
+              // Keep the obligation identity (obligationId/providerRefundId): a refund
+              // may already be in flight, and a new obligation would let Stripe accept
+              // a second refund for the same money. Only this attempt's lease goes.
+              'payment.extraCostRefundPending.claimId': 1,
+              'payment.extraCostRefundPending.processingAt': 1,
+              actualEndDate: 1,
+            },
             $push: {
               statusHistory: {
                 status: PROFESSIONAL_COMPLETION_PENDING_STATUS,

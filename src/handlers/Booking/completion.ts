@@ -39,6 +39,7 @@ import { finalizeBookingCompletion } from '../../utils/notifications/runCompleti
 import {
   buildPendingExtraCostRefund,
   clearPersistedPendingExtraCostRefund,
+  releasePendingExtraCostRefundClaim,
   getPendingExtraCostRefund,
   settlePendingExtraCostRefund,
 } from '../../utils/completionRefund';
@@ -738,13 +739,32 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           },
         });
       }
+      // Recovery may have reverted the booking (payout/payment failure) and
+      // released the obligation lease. Report the actual state instead of
+      // claiming a refund is still queued for a booking that is no longer
+      // completed.
+      const afterRecovery = await Booking.findById(booking._id).select('status');
+      if (!afterRecovery || afterRecovery.status !== COMPLETED_BOOKING_STATUS) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'COMPLETION_REVERTED',
+            message: 'Completion could not be finalized because the payment or payout failed. The booking is back to awaiting completion; resolve the payout and confirm again.',
+          },
+          data: {
+            bookingId: booking._id.toString(),
+            status: afterRecovery?.status ?? null,
+            refundStatus: 'not_settled',
+          },
+        });
+      }
       return res.status(502).json({
         success: false,
         error: {
           code: 'REFUND_RECOVERY_REQUIRED',
           message: 'The booking is completed, but the required extra-cost refund could not be confirmed yet. It remains queued for automatic retry.',
         },
-        data: { bookingId: booking._id.toString(), status: booking.status, refundStatus: 'pending' },
+        data: { bookingId: booking._id.toString(), status: afterRecovery.status, refundStatus: 'pending' },
       });
     }
 
@@ -959,7 +979,18 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     markMilestonesCompleted(finalizedBooking, completionDate);
     await ensureWarrantyCoverageSnapshot(finalizedBooking);
 
-    await finalizedBooking.save();
+    try {
+      await finalizedBooking.save();
+    } catch (saveError) {
+      // The refund is already recorded with the provider but the completion
+      // write failed: release this attempt's lease so a retry can finish
+      // instead of waiting out the 15-minute claim.
+      await releasePendingExtraCostRefundClaim(
+        finalizedBooking._id,
+        settledClaimId,
+      ).catch(() => undefined);
+      throw saveError;
+    }
     if (getPendingExtraCostRefund(finalizedBooking)) {
       const cleared = await clearPersistedPendingExtraCostRefund(
         finalizedBooking._id,

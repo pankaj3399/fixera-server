@@ -18,6 +18,16 @@ const numberOrUndefined = (value: unknown): number | undefined => {
   return value !== null && value !== '' && Number.isFinite(parsed) ? parsed : undefined;
 };
 
+const isoDay = (value: unknown): string | undefined => {
+  if (value == null || value === '') return undefined;
+  const date = value instanceof Date ? value : new Date(String(value));
+  const time = date.getTime();
+  // An unparseable date must not throw during snapshot capture (which runs
+  // before Booking.create): drop it instead of failing the whole booking.
+  if (!Number.isFinite(time)) return undefined;
+  return date.toISOString().slice(0, 10);
+};
+
 export const isValidIanaTimeZone = (value: unknown): value is string => {
   if (typeof value !== 'string' || !value.trim()) return false;
   try {
@@ -342,26 +352,26 @@ export const buildBookingSnapshot = (params: {
       : undefined;
 
   const schedule = {
-    ...(booking.rfqData?.preferredStartDate
-      ? { preferredStartDate: new Date(booking.rfqData.preferredStartDate).toISOString().slice(0, 10) }
+    ...(isoDay(booking.rfqData?.preferredStartDate)
+      ? { preferredStartDate: isoDay(booking.rfqData?.preferredStartDate) }
       : {}),
     ...(stringOrUndefined(booking.rfqData?.preferredStartTime)
       ? { preferredStartTime: String(booking.rfqData.preferredStartTime) }
       : {}),
     ...(booking.scheduledStartDate
-      ? { scheduledStartDate: new Date(booking.scheduledStartDate).toISOString().slice(0, 10) }
+      ? { scheduledStartDate: isoDay(booking.scheduledStartDate) }
       : {}),
     ...(stringOrUndefined(booking.scheduledStartTime)
       ? { scheduledStartTime: String(booking.scheduledStartTime) }
       : {}),
     ...(booking.scheduledExecutionEndDate
-      ? { scheduledExecutionEndDate: new Date(booking.scheduledExecutionEndDate).toISOString().slice(0, 10) }
+      ? { scheduledExecutionEndDate: isoDay(booking.scheduledExecutionEndDate) }
       : {}),
     ...(booking.scheduledBufferStartDate
-      ? { scheduledBufferStartDate: new Date(booking.scheduledBufferStartDate).toISOString().slice(0, 10) }
+      ? { scheduledBufferStartDate: isoDay(booking.scheduledBufferStartDate) }
       : {}),
     ...(booking.scheduledBufferEndDate
-      ? { scheduledBufferEndDate: new Date(booking.scheduledBufferEndDate).toISOString().slice(0, 10) }
+      ? { scheduledBufferEndDate: isoDay(booking.scheduledBufferEndDate) }
       : {}),
     ...(params.scheduleTimeZone && isValidIanaTimeZone(params.scheduleTimeZone)
       ? { timeZone: params.scheduleTimeZone }

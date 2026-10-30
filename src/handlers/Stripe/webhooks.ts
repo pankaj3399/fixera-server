@@ -304,6 +304,9 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
         statusHistory: {
           status: 'booked',
           timestamp: now,
+          // Stripe-driven transition: record the system actor so the timeline
+          // never shows an unattributed status change.
+          updatedBy: SYSTEM_USER_ID,
           note: 'Payment confirmed — booking confirmed',
         },
       };
@@ -704,9 +707,23 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
       .map((refund) => [String(refund.refundId), refund]),
   );
 
-  const providerRefunds = Array.isArray((charge as any).refunds?.data)
+  // From Stripe API 2022-11-15 a Charge carries `refunds` only when the request
+  // expands it, and webhook payloads cannot. Fetch the authoritative list so a
+  // refund is never missed because the event arrived without the expansion.
+  let providerRefunds = Array.isArray((charge as any).refunds?.data)
     ? (charge as any).refunds.data as any[]
     : [];
+  if (providerRefunds.length === 0 && (charge as any)?.id) {
+    try {
+      const listed = await stripe.refunds.list({ charge: String((charge as any).id), limit: 100 });
+      providerRefunds = listed.data as any[];
+    } catch (error) {
+      console.error(
+        'Stripe refund list fetch failed; falling back to recorded refunds:',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
   const refundIsExtraCost = (providerRefund: any): boolean => {
     const metadataKind =
       providerRefund?.metadata?.refundKind
@@ -988,6 +1005,7 @@ async function handleDisputeClosed(dispute: Stripe.Dispute) {
       booking.statusHistory.push({
         status: 'refunded',
         timestamp: new Date(),
+        updatedBy: SYSTEM_USER_ID,
         note: `Dispute lost (${dispute.reason || 'unknown'}) — booking refunded`,
       });
     }

@@ -981,6 +981,11 @@ export const editQuotation = async (req: Request, res: Response) => {
       ...(serviceLocation ? { serviceLocation } : {}),
     };
 
+    // Capture the state this edit was based on, so the write below cannot
+    // overwrite a concurrent accept/reject/version bump (lost update).
+    const baseStatus = booking.status;
+    const baseVersion = booking.currentQuoteVersion ?? null;
+
     booking.quoteVersions.push(quoteVersion);
     booking.currentQuoteVersion = newVersionNumber;
     booking.status = 'quoted';
@@ -992,7 +997,42 @@ export const editQuotation = async (req: Request, res: Response) => {
       note: `Quotation updated (v${newVersionNumber}): ${changeNote}`
     });
 
-    await booking.save();
+    const savedBooking = await Booking.findOneAndUpdate(
+      {
+        _id: booking._id,
+        status: baseStatus,
+        ...(baseVersion != null
+          ? { currentQuoteVersion: baseVersion }
+          : { $or: [{ currentQuoteVersion: null }, { currentQuoteVersion: { $exists: false } }] }),
+      },
+      {
+        $set: {
+          quotationNumber: booking.quotationNumber,
+          quoteVersions: booking.quoteVersions,
+          currentQuoteVersion: newVersionNumber,
+          status: 'quoted',
+        },
+        $unset: { customerRejectionReason: 1 },
+        $push: {
+          statusHistory: {
+            status: 'quoted',
+            timestamp: now,
+            updatedBy: new mongoose.Types.ObjectId(userId),
+            note: `Quotation updated (v${newVersionNumber}): ${changeNote}`,
+          },
+        },
+      },
+      { new: true },
+    );
+    if (!savedBooking) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'QUOTE_STATE_CONFLICT',
+          message: 'This quotation changed while you were editing it. Reload and try again.',
+        },
+      });
+    }
 
     const customer = booking.customer as any;
     const professional = booking.professional as any;
@@ -1023,7 +1063,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       success: true,
       data: {
         message: `Quotation updated to version ${newVersionNumber}`,
-        booking: bookingForRequest(booking, (req as any).user),
+        booking: bookingForRequest(savedBooking, (req as any).user),
         version: newVersionNumber,
       }
     });

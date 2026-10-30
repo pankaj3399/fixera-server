@@ -569,8 +569,27 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         msg: "One or more RFQ attachments are not valid uploads for this account",
       });
     }
+    // The detail projection classifies an answer as a file from the project
+    // definition, so ownership must be checked the same way: a client that
+    // omits fieldType/type must not slip an unowned upload through.
+    const rfqDefinitions: any[] = (() => {
+      if (bookingType !== "project" || !projectId || !mongoose.Types.ObjectId.isValid(projectId)) return [];
+      return [];
+    })();
+    if (bookingType === "project" && projectId && mongoose.Types.ObjectId.isValid(projectId)) {
+      const projectForAnswers = await Project.findById(projectId).select("rfqQuestions").lean();
+      const definitions = (projectForAnswers as any)?.rfqQuestions;
+      if (Array.isArray(definitions)) rfqDefinitions.push(...definitions);
+    }
+    const definitionFieldType = (answer: any): string | undefined => {
+      const match = rfqDefinitions.find((definition) =>
+        (definition?.questionId && String(definition.questionId) === String(answer?.questionId))
+        || (definition?.question && String(definition.question) === String(answer?.question)),
+      );
+      return match?.type || match?.fieldType;
+    };
     const invalidFileAnswers = (Array.isArray(rfqData?.answers) ? rfqData.answers : []).filter((answer: any) => {
-      const fieldType = answer?.fieldType || answer?.type;
+      const fieldType = answer?.fieldType || answer?.type || definitionFieldType(answer);
       const value = typeof answer?.answer === 'string' ? answer.answer : '';
       if (fieldType !== 'file' && fieldType !== 'attachment') return false;
       return Boolean(value) && !isQuestionAnswerUploadOwnedByUser(value, userId, projectId);
@@ -1473,7 +1492,17 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const visibleBooking = isAdmin
       ? filterRawBookingForAdminArea(bookingWithSignedFiles, adminAccess!)
       : bookingForViewer(bookingWithSignedFiles, viewerRole);
-    const details = await attachBookingDetails(booking, viewerRole, req.user, adminAccess);
+    // Legacy rows can contain null definition/answer entries; a details
+    // projection failure must not take the whole booking read down.
+    const details = await attachBookingDetails(booking, viewerRole, req.user, adminAccess).catch(
+      (detailsError: unknown) => {
+        console.error(
+          'Booking details projection failed; returning the base booking:',
+          detailsError instanceof Error ? detailsError.name : typeof detailsError,
+        );
+        return null;
+      },
+    );
 
     return res.status(200).json({
       success: true,

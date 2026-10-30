@@ -1265,7 +1265,9 @@ export const executeRefund = async (
     throw new RefundError('NO_PAYMENT', 'No payment to refund');
   }
 
-  const totalWithVat = booking.payment?.totalWithVat ?? 0;
+  // Legacy bookings predate totalWithVat; fall back to the captured amount so
+  // they keep a refundable capacity instead of throwing REFUND_EXCEEDS_TOTAL.
+  const totalWithVat = booking.payment?.totalWithVat ?? booking.payment?.amount ?? 0;
   const roundMoneyLocal = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
   // Cash already returned by every actual refund on this base PaymentIntent:
