@@ -4,8 +4,16 @@ import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
 export function parsePostalCity(lastLine: string): { postalCode?: string; city: string } {
+  // Dutch postcodes are canonically spaceless (e.g. "5026SL TILBURG") — match
+  // the 4-digit + 2-letter shape before the generic patterns, which only
+  // accept spaced postcodes and would otherwise lose the postal code.
+  const dutch = lastLine.match(/^(\d{4}\s?[A-Z]{2})\s+(.+)$/i);
+  if (dutch) {
+    return { postalCode: dutch[1].replace(/\s+/, '').toUpperCase(), city: dutch[2].trim() };
+  }
   const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-][\dA-Z]{2,5})?)\s+(.+)$/i)
     || lastLine.match(/^([A-Z]\d[\dA-Z](?:\s[\dA-Z]{2,4})?)\s+(.+)$/i);
   if (match) {
@@ -231,7 +239,9 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
       }
     }
 
-    await user.save();
+    await withAnonymizationWriteFence([user._id], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
     return res.status(200).json({
       success: true,
       msg: "VAT validated and information updated successfully",
@@ -320,7 +330,9 @@ export const updateUserVAT = async (req: Request, res: Response, next: NextFunct
     console.log(`💾 VAT Save: Updating user ${user.email} - VAT: ${formattedVAT || 'REMOVED'}, Verified: ${isVatVerified}`);
     user.vatNumber = formattedVAT || undefined;
     user.isVatVerified = isVatVerified;
-    await user.save();
+    await withAnonymizationWriteFence([user._id], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
     console.log(`✅ VAT Save: User updated successfully`);
 
     // Return updated user data (without password)

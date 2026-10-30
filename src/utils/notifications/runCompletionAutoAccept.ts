@@ -50,7 +50,7 @@ async function getPlatformCommissionPercent() {
  */
 async function finishCompletedBooking(
   finalizedBooking: any,
-  opts: { completionDate: Date; notifyAutoAccept?: boolean; claimId?: string },
+  opts: { completionDate: Date; notifyAutoAccept?: boolean; claimId?: string; actorId?: string },
 ): Promise<FinalizeResult> {
   const marker = getPendingExtraCostRefund(finalizedBooking);
   const claimId = opts.claimId || marker?.claimId;
@@ -144,6 +144,11 @@ async function finishCompletedBooking(
         eventKey: 'professional.completion_confirmed_by_customer',
         entityType: 'booking',
         entityId: String(finalizedBooking._id),
+        // The inbox body and email contain the customer's name.
+        ...(opts.actorId && opts.actorId !== SYSTEM_USER_ID.toString()
+          ? { actorId: opts.actorId }
+          : {}),
+        subjectUserId: String(finalizedBooking.customer),
         context: {
           bookingId: String(finalizedBooking._id),
           customerName: customerUser?.name,
@@ -370,6 +375,7 @@ export async function finalizeBookingCompletion(args: {
     completionDate: finalizedBooking.actualEndDate || completionDate,
     notifyAutoAccept: args.notifyAutoAccept === true,
     claimId: settledClaimId,
+    actorId,
   });
 }
 
@@ -485,6 +491,7 @@ async function recoverPendingCompletionRefund(
     completionDate: settlement.booking.actualEndDate || new Date(),
     notifyAutoAccept: claimedPendingRefund.notifyAutoAccept === true,
     claimId: settlement.claimId,
+    actorId,
   });
 }
 

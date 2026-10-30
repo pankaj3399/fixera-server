@@ -46,8 +46,16 @@ export interface SupportParticipantKpis {
   completedCount: number;
   quotedCount: number;
   disputeCount: number;
-  grossEur: number;
+  /** Recorded-EUR gross. Null when withheld (no access) or multi-currency. */
+  grossEur: number | null;
   refundPercent: number | null;
+  /**
+   * False when the caller lacks payments read access. Front must render
+   * financial fields as Restricted, never zero.
+   */
+  financialAccess: boolean;
+  /** Per-currency recorded gross, never blended into a single EUR figure. */
+  grossByCurrency: Array<{ currency: string; gross: number }>;
 }
 
 export function buildSupportParticipantKpis(input: {
@@ -61,7 +69,17 @@ export function buildSupportParticipantKpis(input: {
   disputeCount: number;
   grossEur: number;
   refundCount: number;
+  /** Per-currency recorded gross buckets. Defaults to a single EUR bucket. */
+  grossByCurrency?: Array<{ currency: string; gross: number }>;
+  /** When false, financial fields are withheld (null), never zeroed. */
+  financialAccess?: boolean;
 }): SupportParticipantKpis {
+  const financialAccess = input.financialAccess !== false;
+  const grossByCurrency = (input.grossByCurrency || [{ currency: "EUR", gross: money2(input.grossEur) }])
+    .map((bucket) => ({ currency: bucket.currency, gross: money2(bucket.gross) }));
+  // A raw cross-currency sum is not a EUR figure. Only expose grossEur when
+  // every recorded bucket is EUR; otherwise report per-currency only.
+  const singleEur = grossByCurrency.length === 1 && grossByCurrency[0].currency === "EUR";
   return {
     level: input.professionalLevel || null,
     reviewCount: input.reviewCount,
@@ -71,7 +89,9 @@ export function buildSupportParticipantKpis(input: {
     completedCount: input.completedCount,
     quotedCount: input.quotedCount,
     disputeCount: input.disputeCount,
-    grossEur: money2(input.grossEur),
-    refundPercent: ratePercent(input.refundCount, input.bookingCount),
+    grossEur: !financialAccess ? null : singleEur ? grossByCurrency[0].gross : null,
+    refundPercent: !financialAccess ? null : ratePercent(input.refundCount, input.bookingCount),
+    financialAccess,
+    grossByCurrency: financialAccess ? grossByCurrency : [],
   };
 }

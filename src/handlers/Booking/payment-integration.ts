@@ -18,8 +18,19 @@ import PointsConfig from '../../models/pointsConfig';
 import PointTransaction from '../../models/pointTransaction';
 import {
   buildProjectScheduleWindow,
+  buildPerResourceBlockedDays,
+  getBookingScheduleOptions,
+  getResourcePolicy,
+  resolveEffectiveScheduleTimeZone,
   validateProjectScheduleSelection,
 } from '../../utils/scheduleEngine';
+import {
+  computeMinExecutionResourceDays,
+  planKeyToDate,
+  rebuildResourcePlanForNewStart,
+  resolveDayModeExecutionDays,
+  toPlanDayKeyInTimeZone,
+} from '../../utils/reschedulePlanning';
 import {
   addWarrantyDuration,
   getBookingWarrantyDuration,
@@ -35,7 +46,7 @@ import { MAX_RESCHEDULES_PER_BOOKING } from '../../constants/booking';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { releaseScheduleSlots } from '../../utils/scheduleRelease';
-import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import {
   resolveScheduleTimeZone,
 } from '../../utils/bookingDetails/capture';
@@ -216,18 +227,145 @@ const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
   }
 };
 
-const buildScheduleUpdatePayload = async ({
+/**
+ * Client bug list #9b (day-mode only): a rescheduled start date overrules
+ * earlier manual planning. All planned dates before the new start date become
+ * unplanned for every resource, planning on/after the new start is kept, and
+ * when the kept plan is shorter than the minimum execution duration
+ * (executionTime + executionTime * (resourceCount - 1) * overlapFraction),
+ * days are added across the assigned resources so the booking duration stays
+ * as short as possible. The professional can still adjust planning afterwards.
+ * Hour-mode bookings are left untouched (owned by another workstream).
+ */
+const applyReschedulePlanReset = async (booking: any, updatedBy: unknown) => {
+  const newStart = booking.scheduledStartDate ? new Date(booking.scheduledStartDate) : null;
+  if (!newStart || Number.isNaN(newStart.getTime())) return;
+
+  // Resolve the professional (and timezone) before deriving the plan day key:
+  // scheduledStartDate is stored as a real local-midnight instant, so the key
+  // must be derived in the professional's timezone — a plain UTC key points at
+  // the previous calendar day for UTC+ timezones.
+  const professionalId = await getProfessionalId(booking);
+  const professional = professionalId
+    ? await User.findById(professionalId).select(
+      'companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo'
+    )
+    : null;
+  const timeZone = resolveEffectiveScheduleTimeZone((professional as any) || undefined);
+  const newStartKey = toPlanDayKeyInTimeZone(newStart, timeZone);
+  if (!newStartKey) return;
+
+  const projectId = (booking.project as any)?._id?.toString?.() || String(booking.project || '');
+  const projectDoc = projectId && mongoose.isValidObjectId(projectId)
+    ? await Project.findById(projectId).select('executionDuration subprojects minResources minOverlapPercentage resources')
+    : null;
+
+  const executionDays = resolveDayModeExecutionDays({
+    scheduleSnapshot: booking.scheduleSnapshot,
+    project: projectDoc,
+    selectedSubprojectIndex: booking.selectedSubprojectIndex,
+  });
+  if (executionDays == null) return;
+
+  const assignedIds = (Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : [])
+    .map((member: any) => (member?._id || member)?.toString?.())
+    .filter((id: unknown): id is string => typeof id === 'string' && mongoose.isValidObjectId(id));
+
+  const policy = projectDoc
+    ? getResourcePolicy(projectDoc)
+    : { minResources: 1, minOverlapPercentage: 90, totalResources: assignedIds.length };
+  const minResourceDays = computeMinExecutionResourceDays({
+    executionDays,
+    resourceCount: Math.max(1, assignedIds.length),
+    overlapFraction: policy.minOverlapPercentage / 100,
+  });
+
+  let blockedByResource: Map<string, Set<string>> | undefined;
+  try {
+    if (professional && assignedIds.length > 0) {
+      const windowFromReal = new Date(newStart);
+      const windowToReal = new Date(newStart.getTime() + (minResourceDays + 60) * 24 * 60 * 60 * 1000);
+      blockedByResource = await buildPerResourceBlockedDays(
+        (projectDoc || { _id: projectId }) as any,
+        professional,
+        assignedIds,
+        windowFromReal,
+        windowToReal,
+        timeZone,
+        String(booking._id),
+        booking.customerBlocks
+      );
+    }
+  } catch (blockedError: any) {
+    console.error('Failed to load blocked days for reschedule plan reset:', blockedError?.message || blockedError);
+  }
+
+  const currentPlan = (Array.isArray(booking.resourcePlan) ? booking.resourcePlan : []).map((entry: any) => ({
+    resourceId: ((entry?.resourceId?._id || entry?.resourceId)?.toString?.()) || '',
+    days: Array.isArray(entry?.days) ? entry.days : [],
+  }));
+
+  const rebuilt = rebuildResourcePlanForNewStart({
+    resourcePlan: currentPlan,
+    newStartKey,
+    assignedResourceIds: assignedIds,
+    blockedByResource,
+    minResourceDays,
+    executionDays,
+    minResourcesPerDay: policy.minResources,
+  });
+
+  if (rebuilt.removedDays === 0 && rebuilt.addedDays.length === 0) return;
+
+  booking.resourcePlan = rebuilt.resourcePlan
+    .filter((entry) => mongoose.isValidObjectId(entry.resourceId))
+    .map((entry) => ({
+      resourceId: new mongoose.Types.ObjectId(entry.resourceId),
+      days: entry.days
+        .map((key) => planKeyToDate(key))
+        .filter((date): date is Date => date instanceof Date),
+    }));
+
+  if (rebuilt.maxDayKey) {
+    const maxPlanned = planKeyToDate(rebuilt.maxDayKey);
+    const currentEnd = booking.scheduledExecutionEndDate ? new Date(booking.scheduledExecutionEndDate) : null;
+    if (maxPlanned && (!currentEnd || Number.isNaN(currentEnd.getTime()) || maxPlanned > currentEnd)) {
+      booking.scheduledExecutionEndDate = maxPlanned;
+      const bufferStart = booking.scheduledBufferStartDate ? new Date(booking.scheduledBufferStartDate) : null;
+      if (bufferStart && !Number.isNaN(bufferStart.getTime()) && maxPlanned >= bufferStart) {
+        // Keep the execution <= buffer invariant (mirrors manual planning,
+        // which clears the buffer when the plan changes).
+        booking.scheduledBufferStartDate = undefined;
+        booking.scheduledBufferEndDate = undefined;
+        booking.scheduledBufferUnit = undefined;
+      }
+    }
+  }
+
+  booking.statusHistory = booking.statusHistory || [];
+  booking.statusHistory.push(
+    createStatusHistoryEntry(
+      'booked',
+      updatedBy,
+      `Planning updated: rescheduled start ${newStartKey} overrules earlier planning (${rebuilt.keptDays} day(s) kept, ${rebuilt.addedDays.length} added)`
+    )
+  );
+};
+
+export const buildScheduleUpdatePayload = async ({
   booking,
   scheduledStartDate,
   scheduledStartTime,
   hasExplicitExtraOptions = false,
   selectedExtraOptions,
+  requestTimeZone,
 }: {
   booking: any;
   scheduledStartDate: string;
   scheduledStartTime?: string;
   hasExplicitExtraOptions?: boolean;
   selectedExtraOptions?: unknown;
+  requestTimeZone?: unknown;
 }): Promise<
   | { success: true; data: Record<string, any> }
   | { success: false; status: number; error: { code: string; message: string } }
@@ -280,19 +418,25 @@ const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = undefined;
       scheduleData.scheduledStartTime = typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined;
       scheduleData.scheduledEndTime = undefined;
+      // Should-fix 4: record the resolved zone even for date-only RFQ
+      // schedules so details/timeline carry it.
+      scheduleData.scheduleTimeZone = resolveScheduleTimeZone(requestTimeZone) || undefined;
       if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
         scheduleData.assignedTeamMembers = booking.assignedTeamMembers;
       }
     } else {
       const excludeBookingId = booking?._id ? String(booking._id) : undefined;
 
+      const scheduleOptions = getBookingScheduleOptions(booking);
       const validation = await validateProjectScheduleSelection({
+        ...scheduleOptions,
         projectId,
         subprojectIndex: resolvedSubprojectIndex,
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
         excludeBookingId,
+        requestTimeZone,
       });
 
       if (!validation.valid) {
@@ -312,7 +456,9 @@ const buildScheduleUpdatePayload = async ({
         startDate: scheduledStartDate,
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
+        ...scheduleOptions,
         excludeBookingId,
+        requestTimeZone,
       });
 
       if (!window) {
@@ -330,6 +476,9 @@ const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = window.scheduledBufferUnit;
       scheduleData.scheduledStartTime = window.scheduledStartTime;
       scheduleData.scheduledEndTime = window.scheduledEndTime;
+      // Should-fix 4: persist the engine-resolved conversion zone so the
+      // details/timeline carry it even when the client sends no timeZone.
+      scheduleData.scheduleTimeZone = window.timeZone || undefined;
       if (window.assignedTeamMembers?.length) {
         scheduleData.assignedTeamMembers = window.assignedTeamMembers;
       } else if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
@@ -364,6 +513,7 @@ const buildScheduleUpdatePayload = async ({
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
       scheduledEndTime: booking.scheduledEndTime,
       assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
+      scheduleTimeZone: resolveScheduleTimeZone(requestTimeZone) || undefined,
     },
   };
 };
@@ -514,7 +664,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
             }
           : {}),
       };
-      const updatedBooking = await Booking.findOneAndUpdate(
+      const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
         { _id: booking._id, status: 'quoted', ...versionGuard },
         {
           $set: rejectFields,
@@ -529,8 +679,12 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
             },
           },
         },
-        { new: true, ...(versionArrayFilter ? { arrayFilters: versionArrayFilter } : {}) },
-      );
+        {
+          new: true,
+          ...(versionArrayFilter ? { arrayFilters: versionArrayFilter } : {}),
+          ...(session ? { session } : {}),
+        },
+      ));
       if (!updatedBooking) {
         return res.status(400).json({
           success: false,
@@ -550,7 +704,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
         acceptedFields.acceptedQuoteVersion = Number(currentVersion.version);
         acceptedFields.acceptedQuotationNumber = currentVersion.quotationNumber;
       }
-      const updatedBooking = await Booking.findOneAndUpdate(
+      const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
         { _id: booking._id, status: 'quoted', ...versionGuard },
         {
           $set: { status: 'quote_accepted', ...acceptedFields },
@@ -563,8 +717,8 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
             },
           },
         },
-        { new: true },
-      );
+        { new: true, ...(session ? { session } : {}) },
+      ));
       if (!updatedBooking) {
         return res.status(400).json({
           success: false,
@@ -742,7 +896,9 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
-        await booking.save();
+        await withAnonymizationWriteFence([userIdStr], async (session) => {
+          await booking.save(session ? { session } : undefined);
+        });
 
         if (!finalizeResult.alreadyCompleted) {
           // Process referral completion for the customer
@@ -842,7 +998,9 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
-        await booking.save();
+        await withAnonymizationWriteFence([userIdStr], async (session) => {
+          await booking.save(session ? { session } : undefined);
+        });
 
         // Process referral completion for the customer
         try {
@@ -931,7 +1089,14 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       );
     }
 
-    await booking.save();
+    // Fence the updater: a tombstoned requester cannot write. The target
+    // professional/customer is intentionally not fenced because booking
+    // lifecycle and settlement must remain possible after a counterparty
+    // tombstone; the personalized notification below fences the named subject
+    // separately. The status/history fields written here contain no target PII.
+    await withAnonymizationWriteFence([userIdStr], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
@@ -953,10 +1118,15 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       const customerId =
         booking.customer?._id?.toString?.() || booking.customer?.toString?.();
       if (customerId) {
-        let professionalName = 'Your professional';
+        // The body/email names the professional, not necessarily the user who
+        // changed the status (customer or admin). Keep the trusted subject id
+        // that produced the name, and never infer it from the caller input.
+        let professionalName: string | undefined;
+        let professionalSubjectId: string | undefined;
         try {
           const professionalId = await getProfessionalId(booking);
           if (professionalId) {
+            professionalSubjectId = String(professionalId);
             const professionalUser = await User.findById(professionalId)
               .select('name username businessInfo')
               .lean();
@@ -972,9 +1142,11 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           eventKey: 'customer.booking_started',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userIdStr,
+          ...(professionalSubjectId ? { subjectUserId: professionalSubjectId } : {}),
           context: {
             bookingId: String(booking._id),
-            professionalName,
+            ...(professionalName ? { professionalName } : {}),
           },
         });
       }
@@ -1120,8 +1292,8 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
     }
 
     const refreshedBooking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     return res.json({
@@ -1160,8 +1332,8 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!booking) {
@@ -1182,6 +1354,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
       hasExplicitExtraOptions,
       selectedExtraOptions,
+      // Client bug list #23b: convert the wall-clock time in the
+      // professional's effective zone, not silently in UTC.
+      requestTimeZone: (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     });
 
     if (!scheduleUpdate.success) {
@@ -1201,7 +1376,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       booking.rfqData.additionalNotes = additionalNotes;
     }
 
-    const scheduleTimeZone = resolveScheduleTimeZone(
+    // Should-fix 4: persist the engine-resolved conversion zone (the window
+    // already falls back to the request zone), not only a client-sent zone.
+    const scheduleTimeZone = scheduleUpdate.data.scheduleTimeZone || resolveScheduleTimeZone(
       (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     );
     if (scheduleTimeZone) {
@@ -1248,7 +1425,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       });
     }
 
-    const updatedBooking = await withCalendarTransactionIfConnected(async (session) => {
+    const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => {
       await replaceBookingCalendar(candidate as any, session);
       await booking.save(session ? { session } : undefined);
       return booking;
@@ -1264,6 +1441,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
           eventKey: 'professional.booking_scheduled',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userId,
           context: {
             bookingId: String(booking._id),
             customerName: customer?.name,
@@ -1319,8 +1497,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!booking) {
@@ -1354,6 +1532,9 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       booking,
       scheduledStartDate,
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+      // Client bug list #23c: same effective-zone conversion as creation, so
+      // a reschedule to 12:00 lands on the same instant the calendar shows.
+      requestTimeZone: (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     });
 
     if (!proposedSchedule.success) {
@@ -1417,7 +1598,9 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       )
     );
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     try {
       const customer = booking.customer as any;
@@ -1431,6 +1614,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           eventKey: 'customer.reschedule_requested',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userId,
           context: {
             bookingId: String(booking._id),
             professionalName: getProfessionalDisplayName(professional),
@@ -1445,6 +1629,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           eventKey: 'professional.reschedule_requested',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userId,
           context: {
             bookingId: String(booking._id),
             customerName: customer?.name,
@@ -1484,8 +1669,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     }
 
     const loadedBooking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!loadedBooking) {
@@ -1495,6 +1680,19 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
 
     if (booking.customer?._id?.toString?.() !== userId && booking.customer?.toString?.() !== userId) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can respond to a rescheduling request' } });
+    }
+
+    // Client bug list #9c (+ review nit): once the request is disputed,
+    // accept/decline stay rejected with the explicit 409 — checked first so
+    // post-dispute responses never report the generic 400.
+    const openRescheduleDispute = Boolean(
+      booking.dispute && !booking.dispute.resolvedAt && booking.dispute.type === 'reschedule',
+    );
+    if (openRescheduleDispute && normalizedAction !== 'dispute') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'RESCHEDULE_DISPUTED', message: 'This rescheduling request was disputed and can no longer be accepted or declined' },
+      });
     }
 
     if (booking.status !== 'rescheduling_requested' || booking.rescheduleRequest?.status !== 'pending') {
@@ -1556,15 +1754,6 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       }
 
       const proposedSchedule = booking.rescheduleRequest.proposedSchedule || {};
-      const calendarCandidate = {
-        _id: booking._id,
-        professional: (booking.professional as any)?._id || booking.professional,
-        assignedTeamMembers: proposedTeamMembers,
-        resourcePlan: booking.resourcePlan || [],
-        scheduledStartDate: proposedSchedule.scheduledStartDate,
-        scheduledExecutionEndDate: proposedSchedule.scheduledExecutionEndDate,
-        scheduledBufferEndDate: proposedSchedule.scheduledBufferEndDate,
-      };
       // Prepare the document before the transaction. The driver may replay the
       // callback after a transient conflict; only the save may re-run, so the
       // additive status-history entry is created exactly once.
@@ -1573,12 +1762,24 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       if (responseNote !== undefined) booking.rescheduleRequest!.responseNote = responseNote;
       booking.rescheduleRequest!.status = 'accepted';
       applyScheduleFields(booking, proposedSchedule || {});
+      // Client bug list #9b: the new start date overrules earlier manual
+      // planning (day-mode only; hour-mode planning stays untouched).
+      await applyReschedulePlanReset(booking, (req as any).user._id);
+      const calendarCandidate = {
+        _id: booking._id,
+        professional: (booking.professional as any)?._id || booking.professional,
+        assignedTeamMembers: proposedTeamMembers,
+        resourcePlan: booking.resourcePlan || [],
+        scheduledStartDate: proposedSchedule.scheduledStartDate,
+        scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
+        scheduledBufferEndDate: booking.scheduledBufferEndDate,
+      };
       booking.status = 'booked';
       booking.statusHistory = booking.statusHistory || [];
       booking.statusHistory.push(
         createStatusHistoryEntry('booked', (req as any).user._id, 'Customer accepted the rescheduling request')
       );
-      booking = await withCalendarTransactionIfConnected(async (session) => {
+      booking = await withAnonymizationWriteFence([userId], async (session) => {
         await replaceBookingCalendar(calendarCandidate as any, session);
         await booking.save(session ? { session } : undefined);
         return booking;
@@ -1637,7 +1838,9 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       );
       releaseScheduleSlots(booking, (req as any).user._id);
     } else if (normalizedAction === 'dispute') {
-      booking.rescheduleRequest!.status = 'declined';
+      // Review follow-up: the live subdoc must agree with the history entry
+      // and response DTO on the terminal 'disputed' state (never 'declined').
+      booking.rescheduleRequest!.status = 'disputed';
       const disputeReason = typeof reason === 'string' && reason.trim()
         ? reason.trim()
         : 'Reschedule dispute';
@@ -1670,14 +1873,16 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       note: booking.rescheduleRequest!.note,
       previousSchedule: booking.rescheduleRequest!.previousSchedule,
       proposedSchedule: booking.rescheduleRequest!.proposedSchedule,
-      status: normalizedAction === 'accept' ? 'accepted' : 'declined',
+      status: normalizedAction === 'accept' ? 'accepted' : normalizedAction === 'dispute' ? 'disputed' : 'declined',
       respondedAt: booking.rescheduleRequest!.respondedAt,
       respondedBy: booking.rescheduleRequest!.respondedBy,
       responseNote: booking.rescheduleRequest!.responseNote,
     } as any);
     booking.rescheduleRequest = undefined;
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {
@@ -1723,6 +1928,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
                 : 'professional.reschedule_declined',
             entityType: 'booking',
             entityId: String(booking._id),
+            actorId: userId,
             context: {
               bookingId: String(booking._id),
               responseNote: typeof note === 'string' ? note.trim() : undefined,
@@ -1775,8 +1981,8 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!booking) {
@@ -1867,7 +2073,7 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
     booking.statusHistory = booking.statusHistory || [];
     booking.statusHistory.push(statusEntry);
 
-    const updatedBooking = await withCalendarTransactionIfConnected(async (session) => {
+    const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => {
       await replaceBookingCalendar(candidate as any, session);
       await booking.save(session ? { session } : undefined);
       return booking;

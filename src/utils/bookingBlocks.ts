@@ -8,6 +8,10 @@ type BookingBlockedRange = {
   reason?: string;
   bookingId?: string;
   bookingNumber?: string;
+  // Frontend calendar colours booking ranges by status (pending/in-progress/
+  // completed). Additive only; no private data is exposed here.
+  status?: string;
+  title?: string | null;
   customerName?: string;
   location?: {
     address?: string;
@@ -50,7 +54,7 @@ export const buildBookingBlockedRanges = async (
 
   const bookings = await Booking.find(bookingFilter)
     .select(
-      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer resourcePlan"
+      "status scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer rfqData.serviceType resourcePlan assignedTeamMembers"
     )
     .populate("customer", "name");
 
@@ -58,6 +62,13 @@ export const buildBookingBlockedRanges = async (
 
   bookings.forEach((booking) => {
     const customerName = (booking.customer as any)?.name;
+    // Additive display fields for the frontend calendar: booking lifecycle
+    // status for tier/colour rendering plus a human-readable title. The title
+    // falls back to the booked service type; no private data is added.
+    const bookingStatus = (booking as any).status ? String((booking as any).status) : undefined;
+    const bookingTitle = (booking as any).rfqData?.serviceType
+      ? String((booking as any).rfqData.serviceType)
+      : null;
     // Legacy field fallbacks are kept for older bookings until data is normalized.
     const scheduledExecutionEndDate =
       booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
@@ -68,6 +79,24 @@ export const buildBookingBlockedRanges = async (
 
     const plan: any[] = Array.isArray((booking as any).resourcePlan) ? (booking as any).resourcePlan : [];
     const hasPlan = plan.some((e: any) => Array.isArray(e?.days) && e.days.length > 0);
+    const assignedIds: string[] = Array.isArray((booking as any).assignedTeamMembers)
+      ? (booking as any).assignedTeamMembers.map((m: any) => ((m?._id ?? m)?.toString?.() ?? String(m)))
+      : [];
+
+    // Client bug list #24b: a booking blocks only the resources that attend
+    // it. When explicit attendees are recorded, the professional field alone
+    // must not block (otherwise an uninvolved resource gets a double
+    // booking). Legacy rows without attendees keep the professional fallback.
+    const hasExplicitAttendees = assignedIds.length > 0 || hasPlan;
+    if (hasExplicitAttendees && !assignedIds.includes(userIdString)) {
+      const ownEntry = plan.find(
+        (e: any) => ((e?.resourceId?._id || e?.resourceId)?.toString?.()) === userIdString
+      );
+      const ownDays: any[] = ownEntry && Array.isArray(ownEntry.days) ? ownEntry.days : [];
+      if (ownDays.length === 0) {
+        return;
+      }
+    }
 
     if (hasPlan) {
       const entry = plan.find(
@@ -94,6 +123,8 @@ export const buildBookingBlockedRanges = async (
             reason: "booking",
             bookingId: String(booking._id),
             bookingNumber: booking.bookingNumber,
+            status: bookingStatus,
+            title: bookingTitle,
             customerName,
             location: booking.location,
           });
@@ -115,6 +146,8 @@ export const buildBookingBlockedRanges = async (
           reason: "booking",
           bookingId: String(booking._id),
           bookingNumber: booking.bookingNumber,
+          status: bookingStatus,
+          title: bookingTitle,
           customerName,
           location: booking.location,
         });
@@ -137,6 +170,8 @@ export const buildBookingBlockedRanges = async (
           reason: "booking-buffer",
           bookingId: String(booking._id),
           bookingNumber: booking.bookingNumber,
+          status: bookingStatus,
+          title: bookingTitle,
           customerName,
           location: booking.location,
         });

@@ -4,6 +4,7 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import mongoose from 'mongoose';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 // Change password for team members and other users
 export const changePassword = async (req: Request, res: Response, next: NextFunction) => {
@@ -34,6 +35,12 @@ export const changePassword = async (req: Request, res: Response, next: NextFunc
             return res.status(404).json({
                 success: false,
                 msg: "User not found"
+            });
+        }
+        if (user.deletedAt || user.isAnonymized || !user.password) {
+            return res.status(403).json({
+                success: false,
+                msg: "This account is no longer available"
             });
         }
 
@@ -79,7 +86,9 @@ export const changePassword = async (req: Request, res: Response, next: NextFunc
         
         // Update password
         user.password = hashedNewPassword;
-        await user.save();
+        await withAnonymizationWriteFence([user._id], async (session) => {
+          await user.save(session ? { session } : undefined);
+        });
 
         console.log(`✅ PASSWORD: Password changed successfully for ${user.email} (${user.role})`);
 
@@ -130,7 +139,7 @@ export const resetEmployeePassword = async (req: Request, res: Response, next: N
         await connecToDatabase();
         const professional = await User.findById(decoded.id);
 
-        if (!professional) {
+        if (!professional || professional.deletedAt || professional.isAnonymized) {
             return res.status(404).json({
                 success: false,
                 msg: "Professional not found"
@@ -166,6 +175,8 @@ export const resetEmployeePassword = async (req: Request, res: Response, next: N
         const employee = await User.findOne({
             _id: employeeId,
             role: 'employee',
+            deletedAt: null,
+            isAnonymized: { $ne: true },
             'employee.companyId': (professional._id as mongoose.Types.ObjectId).toString()
         }).select('+password');
 

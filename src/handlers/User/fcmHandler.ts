@@ -2,13 +2,17 @@ import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import MarketingSuppression from '../../models/marketingSuppression';
-import { syncPendingBrevoResubscribes, enablePromotionalEmail } from '../../utils/marketing/audience';
+import MarketingLead from '../../models/marketingLead';
+import { syncPendingBrevoResubscribes, enablePromotionalEmail, refreshSubscriberProfileFromUser } from '../../utils/marketing/audience';
+import { normalizeEmail } from '../../utils/marketing/normalizeEmail';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
 } from '../../utils/fcmTokenUtils';
-import { MARKETING_LOCALES, isMarketingLocale } from '../../utils/marketing/marketingCatalog';
+import { MARKETING_LOCALES, isMarketingLocale, resolveSubscriberLocale, subscriberCountryFromUser } from '../../utils/marketing/marketingCatalog';
 import { isPromotionalEmailEnabled } from '../../utils/marketing/promotionalConsent';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { UserFacingError } from '../../utils/appErrors';
 
 // ------------------------------------------------------------------
 // Register / Unregister FCM tokens
@@ -58,7 +62,7 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
     );
 
     // Atomic update: preserve other-origin tokens, dedupe within origin, cap total.
-    await User.findByIdAndUpdate(userId, [
+    await withAnonymizationWriteFence([userId], async (session) => User.findByIdAndUpdate(userId, [
       {
         $set: {
           fcmTokens: {
@@ -100,11 +104,15 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
           },
         },
       },
-    ]);
+    ], session ? { session } : undefined));
 
     res.status(200).json({ success: true, msg: 'FCM token registered' });
   } catch (err) {
     console.error('registerFcmToken error:', err);
+    if (err instanceof UserFacingError) {
+      res.status(err.status).json({ success: false, msg: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ success: false, msg: "We couldn't register push notifications on this device. Please try again." });
   }
 };
@@ -128,13 +136,20 @@ export const unregisterFcmToken = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    await User.findByIdAndUpdate(userId, {
-      $pull: { fcmTokens: { token: token.trim() } },
-    });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      User.findByIdAndUpdate(
+        userId,
+        { $pull: { fcmTokens: { token: token.trim() } } },
+        session ? { session } : undefined,
+      ));
 
     res.status(200).json({ success: true, msg: 'FCM token removed' });
   } catch (err) {
     console.error('unregisterFcmToken error:', err);
+    if (err instanceof UserFacingError) {
+      res.status(err.status).json({ success: false, msg: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ success: false, msg: "We couldn't update push notification settings. Please try again." });
   }
 };
@@ -158,7 +173,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
     }
 
     const user = await User.findById(userId).select(
-      'notificationPreferences marketingConsentAt marketingLocale marketingLocaleSource',
+      'notificationPreferences marketingConsentAt marketingLocale marketingLocaleSource preferredLocale locale language location companyAddress businessInfo',
     );
     if (!user) {
       res.status(404).json({ success: false, msg: 'User not found' });
@@ -171,9 +186,14 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
       email: isPromotionalEmailEnabled(preferences),
     };
 
+    // Display-only default: explicit stored choice always wins; otherwise
+    // resolve from legacy fields/country (NL -> nl, BE stays neutral en).
+    // Never written back and never treated as consent/opt-in.
+    const resolved = resolveSubscriberLocale(user.toObject(), subscriberCountryFromUser(user.toObject()));
+
     res.status(200).json({
       success: true,
-      data: { ...preferences, marketingLocale: user.marketingLocale, marketingLocaleSource: user.marketingLocaleSource },
+      data: { ...preferences, marketingLocale: user.marketingLocale, marketingLocaleSource: user.marketingLocaleSource, resolvedMarketingLocale: resolved.locale, resolvedMarketingLocaleSource: resolved.source },
     });
   } catch (err) {
     console.error('getNotificationPreferences error:', err);
@@ -211,15 +231,19 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     // Language-only updates are intentionally supported by the same preference
     // endpoint used for channel toggles.
     if (marketingLocale !== undefined && type === undefined && channel === undefined && enabled === undefined) {
-      const updatedUser = await User.findByIdAndUpdate(
-        userId,
-        { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
-        { new: true },
-      ).select('_id');
+      const updatedUser = await withAnonymizationWriteFence([userId], async (session) =>
+        User.findByIdAndUpdate(
+          userId,
+          { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
+          { new: true, ...(session ? { session } : {}) },
+        ).select(
+          '_id email role name serviceCategories location companyAddress businessInfo marketingLocale preferredLocale locale language',
+        ));
       if (!updatedUser) {
         res.status(404).json({ success: false, msg: 'User not found' });
         return;
       }
+      await refreshSubscriberProfileFromUser(updatedUser);
       res.status(200).json({ success: true, msg: 'Marketing language updated' });
       return;
     }
@@ -254,18 +278,20 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
         userUpdate.$unset = { marketingConsentAt: 1 };
       }
     }
-    const updatedUser = await User.findByIdAndUpdate(userId, userUpdate, {
-      new: true,
-    }).select(
-      'email role name serviceCategories location companyAddress businessInfo marketingLocale preferredLocale locale language',
-    );
+    const updatedUser = await withAnonymizationWriteFence([userId], async (session) =>
+      User.findByIdAndUpdate(userId, userUpdate, {
+        new: true,
+        ...(session ? { session } : {}),
+      }).select(
+        'email role name serviceCategories location companyAddress businessInfo marketingLocale preferredLocale locale language',
+      ));
     if (!updatedUser) {
       res.status(404).json({ success: false, msg: 'User not found' });
       return;
     }
 
     if (type === 'promotions' && channel === 'email') {
-      const normalizedEmail = updatedUser.email.toLowerCase().trim();
+      const normalizedEmail = normalizeEmail(updatedUser.email);
       const consentUpdatedAt = new Date();
       if (enabled) {
         await MarketingSuppression.deleteOne({ emailNormalized: normalizedEmail, reason: 'unsubscribe' });
@@ -288,12 +314,43 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
             $unset: { consentVerifiedAt: 1 },
           },
         );
+        // A lead re-import must not bypass this opt-out. $setOnInsert keeps an
+        // existing provider/admin reason stronger than a local unsubscribe.
+        try {
+          await MarketingSuppression.findOneAndUpdate(
+            { emailNormalized: normalizedEmail },
+            {
+              $setOnInsert: {
+                emailNormalized: normalizedEmail,
+                reason: 'unsubscribe',
+                source: 'subscriber',
+              },
+            },
+            { upsert: true, setDefaultsOnInsert: true },
+          );
+        } catch (error: unknown) {
+          if ((error as { code?: unknown })?.code !== 11000) throw error;
+        }
+        // The mailbox opted out; keep imported lead rows opted out too. Do not
+        // clear this on a later subscriber re-opt-in.
+        await MarketingLead.updateMany(
+          { emailNormalized: normalizedEmail, status: 'active', unsubscribedAt: null },
+          { $set: { unsubscribedAt: consentUpdatedAt } },
+        );
       }
+    }
+
+    if (marketingLocale !== undefined) {
+      await refreshSubscriberProfileFromUser(updatedUser);
     }
 
     res.status(200).json({ success: true, msg: 'Preference updated' });
   } catch (err) {
     console.error('updateNotificationPreferences error:', err);
+    if (err instanceof UserFacingError) {
+      res.status(err.status).json({ success: false, msg: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ success: false, msg: "We couldn't save notification preferences. Please try again." });
   }
 };

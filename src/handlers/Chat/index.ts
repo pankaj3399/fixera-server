@@ -10,9 +10,44 @@ import type { IChatAttachment } from "../../models/chatMessage";
 import { notifyAsync } from "../../utils/notifications/notify";
 import { params } from "../../utils/requestParams";
 import { assertSupportChatWriteAllowed } from "../../utils/support/settings";
+import { maskAnonymizedUser, maskChatMessageForAnonymizedSender } from "../../utils/accountAnonymity";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
+
+const plainObject = <T>(value: T): T =>
+  (value && typeof (value as any).toObject === "function"
+    ? (value as any).toObject()
+    : value);
+
+const maskConversationForRead = (conversation: any): any => {
+  if (!conversation) return conversation;
+  const plain = plainObject(conversation);
+  for (const field of [
+    "customerId",
+    "professionalId",
+    "supportAdminId",
+    "supportTargetUserId",
+  ]) {
+    if (plain[field] && typeof plain[field] === "object") {
+      plain[field] = maskAnonymizedUser(plain[field]);
+    }
+  }
+  return plain;
+};
+
+const maskMessageForRead = (message: any): any => {
+  if (!message) return message;
+  const plain = maskChatMessageForAnonymizedSender(plainObject(message));
+  if (plain.replyTo?.senderId && typeof plain.replyTo.senderId === "object") {
+    plain.replyTo = {
+      ...plain.replyTo,
+      senderId: maskAnonymizedUser(plain.replyTo.senderId),
+    };
+  }
+  return plain;
+};
 
 const getRequestUserId = (req: Request): string | null => {
   const userIdRaw = req.user?._id;
@@ -152,16 +187,16 @@ export const createOrGetConversation = async (
   };
 
   const populateFields = [
-    { path: "customerId", select: "name email username businessInfo profileImage" },
-    { path: "professionalId", select: "name email username businessInfo profileImage" },
+    { path: "customerId", select: "name email username businessInfo profileImage isAnonymized deletedAt" },
+    { path: "professionalId", select: "name email username businessInfo profileImage isAnonymized deletedAt" },
   ];
 
   let conversation = await Conversation.findOne(pairQuery)
-    .populate("customerId", "name email username businessInfo profileImage")
-    .populate("professionalId", "name email username businessInfo profileImage");
+    .populate("customerId", "name email username businessInfo profileImage isAnonymized deletedAt")
+    .populate("professionalId", "name email username businessInfo profileImage isAnonymized deletedAt");
 
   if (conversation) {
-    return res.status(200).json({ success: true, conversation });
+    return res.status(200).json({ success: true, conversation: maskConversationForRead(conversation) });
   }
 
   try {
@@ -181,7 +216,7 @@ export const createOrGetConversation = async (
 
   await conversation.populate(populateFields);
 
-  return res.status(201).json({ success: true, conversation });
+  return res.status(201).json({ success: true, conversation: maskConversationForRead(conversation) });
 };
 
 export const listMyConversations = async (
@@ -243,10 +278,10 @@ export const listMyConversations = async (
 
   const [conversations, total] = await Promise.all([
     Conversation.find(baseQuery)
-      .populate("customerId", "name email username businessInfo profileImage")
-      .populate("professionalId", "name email username businessInfo profileImage")
+      .populate("customerId", "name email username businessInfo profileImage isAnonymized deletedAt")
+      .populate("professionalId", "name email username businessInfo profileImage isAnonymized deletedAt")
       .populate("supportAdminId", "name email")
-      .populate("supportTargetUserId", "name email")
+      .populate("supportTargetUserId", "name email isAnonymized deletedAt")
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -257,7 +292,7 @@ export const listMyConversations = async (
   return res.status(200).json({
     success: true,
     data: {
-      conversations,
+      conversations: conversations.map(maskConversationForRead),
       pagination: {
         page,
         limit,
@@ -346,10 +381,10 @@ export const getConversationMessages = async (
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 30;
 
   const conversation = await Conversation.findById(conversationId)
-    .populate("customerId", "name email username businessInfo profileImage")
-    .populate("professionalId", "name email username businessInfo profileImage")
+    .populate("customerId", "name email username businessInfo profileImage isAnonymized deletedAt")
+    .populate("professionalId", "name email username businessInfo profileImage isAnonymized deletedAt")
     .populate("supportAdminId", "name email")
-    .populate("supportTargetUserId", "name email");
+    .populate("supportTargetUserId", "name email isAnonymized deletedAt");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -368,11 +403,11 @@ export const getConversationMessages = async (
   }
 
   const messagesDesc = await ChatMessage.find(messageQuery)
-    .populate("senderId", "name email username businessInfo profileImage role")
+    .populate("senderId", "name email username businessInfo profileImage role isAnonymized deletedAt")
     .populate({
       path: "replyTo",
       select: "text senderId images createdAt",
-      populate: { path: "senderId", select: "name username businessInfo" },
+      populate: { path: "senderId", select: "name username businessInfo isAnonymized deletedAt" },
     })
     .sort({ _id: -1 })
     .limit(limit);
@@ -423,8 +458,8 @@ export const getConversationMessages = async (
   return res.status(200).json({
     success: true,
     data: {
-      conversation,
-      messages,
+      conversation: maskConversationForRead(conversation),
+      messages: messages.map(maskMessageForRead),
       pagination: {
         limit,
         hasMore,
@@ -524,6 +559,25 @@ export const sendMessage = async (req: Request, res: Response) => {
   const professionalId = getIdString(conversation.professionalId);
   const customerId = getIdString(conversation.customerId);
   const supportAdminId = getIdString(conversation.supportAdminId);
+  const supportTargetId = getIdString(conversation.supportTargetUserId);
+  const otherParticipantIds = (
+    conversation.type === "support"
+      ? [supportAdminId, supportTargetId]
+      : [professionalId, customerId]
+  ).filter((participantId) => participantId && participantId !== userId);
+  if (otherParticipantIds.length > 0) {
+    const unavailable = await User.countDocuments({
+      _id: { $in: otherParticipantIds },
+      $or: [{ deletedAt: { $type: "date" } }, { isAnonymized: true }],
+    });
+    if (unavailable > 0) {
+      return res.status(409).json({
+        success: false,
+        msg: "This conversation is no longer available.",
+        code: "CONFLICT",
+      });
+    }
+  }
   let senderRole: "professional" | "customer" | "admin";
   if (conversation.type === "support" && userId === supportAdminId) {
     senderRole = "admin";
@@ -551,45 +605,53 @@ export const sendMessage = async (req: Request, res: Response) => {
     validatedReplyTo = replyToRaw;
   }
 
-  const message = await ChatMessage.create({
-    conversationId: toObjectId(conversationId),
-    senderId: toObjectId(userId),
-    senderRole,
-    text,
-    images,
-    attachments,
-    readBy: [{ userId: toObjectId(userId), readAt: new Date() }],
-    ...(validatedReplyTo ? { replyTo: toObjectId(validatedReplyTo) } : {}),
-  });
-
-  const preview = buildMessagePreview(text, images, attachments);
   const targetUserId = getIdString(conversation.supportTargetUserId);
   const isUserSenderInSupport = conversation.type === "support" && userId === targetUserId;
   const isCustomerSender =
     conversation.type === "support" ? isUserSenderInSupport : customerId === userId;
 
-  const updateSet: Record<string, unknown> = {
-    lastMessageAt: new Date(),
-    lastMessagePreview: preview,
-    lastMessageSenderId: toObjectId(userId),
-  };
-  const updateInc: Record<string, number> = {};
+  const message = await withAnonymizationWriteFence(
+    [userId, ...otherParticipantIds],
+    async (session) => {
+      const [created] = await ChatMessage.create([{
+        conversationId: toObjectId(conversationId),
+        senderId: toObjectId(userId),
+        senderRole,
+        text,
+        images,
+        attachments,
+        readBy: [{ userId: toObjectId(userId), readAt: new Date() }],
+        ...(validatedReplyTo ? { replyTo: toObjectId(validatedReplyTo) } : {}),
+      }], { session });
 
-  if (isCustomerSender) {
-    updateSet.customerUnreadCount = 0;
-    updateInc.professionalUnreadCount = 1;
-  } else {
-    updateSet.professionalUnreadCount = 0;
-    updateInc.customerUnreadCount = 1;
-  }
+      const preview = buildMessagePreview(text, images, attachments);
 
-  await Conversation.findByIdAndUpdate(conversation._id, {
-    $set: updateSet,
-    $inc: updateInc,
-    $unset: { unreadChatReminderLastSentAt: '' },
-  });
+      const updateSet: Record<string, unknown> = {
+        lastMessageAt: new Date(),
+        lastMessagePreview: preview,
+        lastMessageSenderId: toObjectId(userId),
+      };
+      const updateInc: Record<string, number> = {};
 
-  await message.populate("senderId", "name email username businessInfo profileImage role");
+      if (isCustomerSender) {
+        updateSet.customerUnreadCount = 0;
+        updateInc.professionalUnreadCount = 1;
+      } else {
+        updateSet.professionalUnreadCount = 0;
+        updateInc.customerUnreadCount = 1;
+      }
+
+      await Conversation.findByIdAndUpdate(conversation._id, {
+        $set: updateSet,
+        $inc: updateInc,
+        $unset: { unreadChatReminderLastSentAt: '' },
+      }, { session });
+
+      return created;
+    },
+  );
+
+  await message.populate("senderId", "name email username businessInfo profileImage role isAnonymized deletedAt");
 
   // --- Fire push notification to the recipient (non-blocking) ---
   let recipientId: string;
@@ -605,6 +667,7 @@ export const sendMessage = async (req: Request, res: Response) => {
 
     notifyAsync({
       userId: recipientId,
+      actorId: userId,
       eventKey: 'user.chat_message',
       entityType: 'conversation',
       entityId: conversationId,
@@ -778,10 +841,10 @@ export const getConversationInfo = async (req: Request, res: Response) => {
   }
 
   const conversation = await Conversation.findById(conversationId)
-    .populate("customerId", "name email username businessInfo profileImage createdAt")
-    .populate("professionalId", "name email username businessInfo profileImage createdAt")
+    .populate("customerId", "name email username businessInfo profileImage createdAt isAnonymized deletedAt")
+    .populate("professionalId", "name email username businessInfo profileImage createdAt isAnonymized deletedAt")
     .populate("supportAdminId", "name email")
-    .populate("supportTargetUserId", "name email");
+    .populate("supportTargetUserId", "name email isAnonymized deletedAt");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -795,7 +858,7 @@ export const getConversationInfo = async (req: Request, res: Response) => {
     return res.status(200).json({
       success: true,
       data: {
-        conversation,
+        conversation: maskConversationForRead(conversation),
         stats: null,
       },
     });
@@ -959,7 +1022,7 @@ export const getConversationInfo = async (req: Request, res: Response) => {
   return res.status(200).json({
     success: true,
     data: {
-      conversation,
+      conversation: maskConversationForRead(conversation),
       stats: {
         totalBookings: stats.totalBookings,
         completedBookings: stats.completedBookings,
@@ -1007,9 +1070,19 @@ export const toggleStar = async (req: Request, res: Response) => {
   const isStarred = conversation.starredBy.some((id) => id.toString() === userId);
 
   if (isStarred) {
-    await Conversation.findByIdAndUpdate(conversationId, { $pull: { starredBy: userOid } });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      Conversation.findByIdAndUpdate(
+        conversationId,
+        { $pull: { starredBy: userOid } },
+        session ? { session } : undefined,
+      ));
   } else {
-    await Conversation.findByIdAndUpdate(conversationId, { $addToSet: { starredBy: userOid } });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      Conversation.findByIdAndUpdate(
+        conversationId,
+        { $addToSet: { starredBy: userOid } },
+        session ? { session } : undefined,
+      ));
   }
 
   return res.status(200).json({ success: true, starred: !isStarred });
@@ -1034,9 +1107,19 @@ export const toggleArchive = async (req: Request, res: Response) => {
   const isArchived = conversation.archivedBy.some((id) => id.toString() === userId);
 
   if (isArchived) {
-    await Conversation.findByIdAndUpdate(conversationId, { $pull: { archivedBy: userOid } });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      Conversation.findByIdAndUpdate(
+        conversationId,
+        { $pull: { archivedBy: userOid } },
+        session ? { session } : undefined,
+      ));
   } else {
-    await Conversation.findByIdAndUpdate(conversationId, { $addToSet: { archivedBy: userOid } });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      Conversation.findByIdAndUpdate(
+        conversationId,
+        { $addToSet: { archivedBy: userOid } },
+        session ? { session } : undefined,
+      ));
   }
 
   return res.status(200).json({ success: true, archived: !isArchived });
@@ -1067,31 +1150,32 @@ export const addLabel = async (req: Request, res: Response) => {
   if (color) newLabelObj.color = color;
 
   // Atomic: filter out existing label with same name for this user, then append the new one
-  await Conversation.findByIdAndUpdate(conversationId, [
-    {
-      $set: {
-        labels: {
-          $concatArrays: [
-            {
-              $filter: {
-                input: { $ifNull: ["$labels", []] },
-                as: "l",
-                cond: {
-                  $not: {
-                    $and: [
-                      { $eq: ["$$l.userId", userOid] },
-                      { $eq: ["$$l.label", trimmed] },
-                    ],
+  await withAnonymizationWriteFence([userId], async (session) =>
+    Conversation.findByIdAndUpdate(conversationId, [
+      {
+        $set: {
+          labels: {
+            $concatArrays: [
+              {
+                $filter: {
+                  input: { $ifNull: ["$labels", []] },
+                  as: "l",
+                  cond: {
+                    $not: {
+                      $and: [
+                        { $eq: ["$$l.userId", userOid] },
+                        { $eq: ["$$l.label", trimmed] },
+                      ],
+                    },
                   },
                 },
               },
-            },
-            [newLabelObj],
-          ],
+              [newLabelObj],
+            ],
+          },
         },
       },
-    },
-  ]);
+    ], session ? { session } : undefined));
 
   return res.status(200).json({ success: true, msg: "Label added" });
 };
@@ -1111,9 +1195,12 @@ export const removeLabel = async (req: Request, res: Response) => {
     return res.status(403).json({ success: false, msg: "Not allowed" });
   }
 
-  await Conversation.findByIdAndUpdate(conversationId, {
-    $pull: { labels: { userId: toObjectId(userId), label } },
-  });
+  await withAnonymizationWriteFence([userId], async (session) =>
+    Conversation.findByIdAndUpdate(
+      conversationId,
+      { $pull: { labels: { userId: toObjectId(userId), label } } },
+      session ? { session } : undefined,
+    ));
 
   return res.status(200).json({ success: true, msg: "Label removed" });
 };
@@ -1147,13 +1234,14 @@ export const reportMessage = async (req: Request, res: Response) => {
   }
 
   try {
-    await ChatReport.create({
-      messageId: toObjectId(messageId),
-      conversationId: message.conversationId,
-      reportedBy: toObjectId(userId),
-      reason: reason as any,
-      description: description?.trim().slice(0, 500),
-    });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      ChatReport.create([{
+        messageId: toObjectId(messageId),
+        conversationId: message.conversationId,
+        reportedBy: toObjectId(userId),
+        reason: reason as any,
+        description: description?.trim().slice(0, 500),
+      }], session ? { session } : undefined));
   } catch (error: any) {
     if (error?.code === 11000) {
       return res.status(409).json({ success: false, msg: "You already reported this message" });
@@ -1187,13 +1275,13 @@ export const searchMessages = async (req: Request, res: Response) => {
     conversationId: toObjectId(conversationId),
     $text: { $search: q },
   })
-    .populate("senderId", "name businessInfo profileImage")
+    .populate("senderId", "name businessInfo profileImage isAnonymized deletedAt")
     .sort({ _id: -1 })
     .limit(50)
     .lean();
 
   return res.status(200).json({
     success: true,
-    data: { results, total: results.length },
+    data: { results: results.map(maskMessageForRead), total: results.length },
   });
 };

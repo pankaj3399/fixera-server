@@ -33,6 +33,7 @@ export interface IRenovationPlanning {
 export interface IMedia {
   images: string[];
   video?: string;
+  videos?: string[];
 }
 
 export interface IPricing {
@@ -41,6 +42,7 @@ export interface IPricing {
   priceRange?: { min: number; max: number };
   minOrderQuantity?: number; // Unit pricing: minimum order quantity
   unit?: string; // Real service unit for unit pricing (m², hour, room...). Persisted from service config.
+  durationBasis?: "per_booking" | "per_unit";
 }
 
 export interface IIncludedItem {
@@ -231,7 +233,7 @@ export interface IProject extends Document {
 
   // Step 8: Review & Status
   // Project lifecycle status
-  status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
+  status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended" | "archived";
   // Booking lifecycle status (only applicable when project is published and has active bookings)
   bookingStatus?:
   | "rfq"
@@ -246,7 +248,13 @@ export interface IProject extends Document {
   adminFeedback?: string;
   submittedAt?: Date;
   approvedAt?: Date;
+  onHoldAt?: Date;
   approvedBy?: string;
+
+  // Soft archive: unpublishes + hides from overview/search/new bookings.
+  // Never a delete; existing bookings and details stay readable.
+  archivedAt?: Date;
+  statusBeforeArchive?: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
 
   // Change tracking for smart reapproval
   previousSnapshot?: Record<string, any>;
@@ -335,6 +343,7 @@ const RenovationPlanningSchema = new Schema<IRenovationPlanning>({
 const MediaSchema = new Schema<IMedia>({
   images: [{ type: String }],
   video: { type: String },
+  videos: [{ type: String }],
 });
 
 // Pricing Schema
@@ -347,6 +356,7 @@ const PricingSchema = new Schema<IPricing>({
   },
   minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
   unit: { type: String, maxlength: 50 },
+  durationBasis: { type: String, enum: ["per_booking", "per_unit"] },
 });
 
 // Included Item Schema
@@ -606,7 +616,7 @@ const ProjectSchema = new Schema<IProject>(
     // Project lifecycle status
     status: {
       type: String,
-      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended"],
+      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended", "archived"],
       default: "draft",
     },
     // Booking lifecycle status
@@ -628,7 +638,15 @@ const ProjectSchema = new Schema<IProject>(
     adminFeedback: { type: String },
     submittedAt: { type: Date },
     approvedAt: { type: Date },
+    onHoldAt: { type: Date },
     approvedBy: { type: String },
+
+    // Soft archive: unpublishes + hides from overview/search/new bookings.
+    archivedAt: { type: Date },
+    statusBeforeArchive: {
+      type: String,
+      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended"],
+    },
 
     // Change tracking for smart reapproval
     previousSnapshot: { type: Schema.Types.Mixed },

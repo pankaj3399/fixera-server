@@ -36,9 +36,18 @@ export async function assertSupportChatTargetEligible(targetUserId: unknown): Pr
   if (typeof targetUserId !== "string" || !/^[a-f\d]{24}$/i.test(targetUserId)) {
     throw new UserFacingError(403, "Support chat is only available for professionals.", "FORBIDDEN");
   }
-  const target = await User.findById(targetUserId).select("role").lean();
-  if (!target || (target as { role?: string }).role !== "professional") {
-    throw new UserFacingError(403, "Support chat is only available for professionals.", "FORBIDDEN");
+  const target = await User.findById(targetUserId).select("role deletedAt isAnonymized").lean();
+  if (
+    !target
+    || (target as { role?: string }).role !== "professional"
+    || (target as { deletedAt?: Date }).deletedAt
+    || (target as { isAnonymized?: boolean }).isAnonymized
+  ) {
+    throw new UserFacingError(
+      403,
+      "Support chat is only available for active professional accounts.",
+      "FORBIDDEN",
+    );
   }
 }
 

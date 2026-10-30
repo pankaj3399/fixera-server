@@ -11,6 +11,7 @@ export type ActorDto = {
   role: 'customer' | 'professional' | 'admin' | 'system' | 'unknown';
   name: string | null;
   email?: string | null;
+  isAnonymized?: boolean;
   source: 'recorded' | 'inferred_route' | 'system_job' | 'provider_webhook' | 'not_recorded';
 };
 
@@ -108,6 +109,7 @@ export type BookingOverviewDto = {
     role: 'customer' | 'professional';
     name: string | null;
     companyName: string | null;
+    isAnonymized?: boolean;
   };
   quote: {
     quotationNumber: string | null;
@@ -159,6 +161,7 @@ export type PartiesDto = {
     vatNumber: string | null;
     address: { city: string | null; country: string | null; postalCode: string | null } | null;
     timeZone: string | null;
+    isAnonymized?: boolean;
   };
   professional: {
     id: string;
@@ -171,6 +174,7 @@ export type PartiesDto = {
     website: string | null;
     address: { city: string | null; country: string | null; postalCode: string | null } | null;
     timeZone: string | null;
+    isAnonymized?: boolean;
   };
   recordedAt: string | null;
   source: 'booking_snapshot' | 'current_profile';
@@ -211,6 +215,7 @@ export type BookingSnapshotDto = {
     preferredStartTime: string | null;
     scheduledStartDate: string | null;
     scheduledStartTime: string | null;
+    scheduledEndTime: string | null;
     scheduledExecutionEndDate: string | null;
     scheduledBufferStartDate: string | null;
     scheduledBufferEndDate: string | null;
@@ -333,6 +338,7 @@ export type BookingWizardDto = {
   scheduleSelection: {
     startDate: string | null;
     startTime: string | null;
+    endTime: string | null;
     executionEndDate: string | null;
     bufferEndDate: string | null;
     timeZone: string | null;
@@ -539,6 +545,15 @@ export type MilestonePaymentDto = {
   paidAt: string | null;
   customerChargeTotalWithVat: number | null;
   paymentRowPresent: boolean;
+  /**
+   * Client bug list #19b: expected customer charge for this milestone from the
+   * shared charge plan (recorded commission, selected options in full on the
+   * first milestone). Null when no commission was recorded for the booking.
+   * The frontend's milestone/option UI must render this instead of splitting
+   * options proportionally across milestones.
+   */
+  expectedCustomerCharge: number | null;
+  includesSelectedOptions: boolean;
 };
 
 export type RefundDto = {
@@ -666,7 +681,9 @@ export type RescheduleHistoryDto = {
   reason: string;
   description: string | null;
   note: string | null;
-  status: 'accepted' | 'declined' | 'auto_cancelled';
+  status: 'pending' | 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
+  /** False once the request is disputed/terminal — the UI must disable accept/decline. */
+  canRespond: boolean;
   respondedAt: string | null;
   respondedBy: ActorDto | null;
   responseNote: string | null;
@@ -681,6 +698,7 @@ export type CancellationRequestDto = {
   status: 'pending' | 'processing' | 'negotiating' | 'escalated' | 'approved' | 'denied';
   reasonCategory: string | null;
   reason: string;
+  adminResolutionNote?: string | null;
   evidence: AttachmentDto[];
   requestedBy: ActorDto | null;
   requestedRole: 'customer' | 'professional';

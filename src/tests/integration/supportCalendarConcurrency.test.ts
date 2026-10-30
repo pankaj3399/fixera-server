@@ -243,6 +243,25 @@ import { cancelMeeting } from '../../handlers/Meeting';
 import { extendBookingExecution } from '../../handlers/Booking/payment-integration';
 
 const professionalId = new Types.ObjectId('507f1f77bcf86cd799439012');
+
+const ensureFenceUser = async () => {
+  try {
+    await User.collection.insertOne({
+      _id: professionalId,
+      name: 'Piet Professional',
+      email: 'piet-calendar@example.com',
+      phone: '+32470000000',
+      password: 'calendar-test-password-hash',
+      role: 'professional',
+      professionalStatus: 'approved',
+      accountStatus: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  } catch (error) {
+    if ((error as { code?: unknown })?.code !== 11000) throw error;
+  }
+};
 const otherUserId = new Types.ObjectId('507f1f77bcf86cd799439013');
 const adminId = new Types.ObjectId('507f1f77bcf86cd799439014');
 
@@ -464,6 +483,7 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     sendRescheduled.mockResolvedValue(true);
     sendCancelled.mockResolvedValue(true);
     await clearCollections();
+    await ensureFenceUser();
   });
 
   afterEach(async () => {
@@ -550,14 +570,19 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
   });
 
   it('finds support, Meeting and legacy-request conflicts only for the assigned member and uses the source timezone', async () => {
-    await User.collection.insertOne({
-      _id: professionalId,
-      name: 'Piet',
-      email: 'piet@example.com',
-      role: 'professional',
-      timeZone: 'Europe/Brussels',
-      businessInfo: { timezone: 'Europe/Brussels' },
-    });
+    await User.collection.updateOne(
+      { _id: professionalId },
+      {
+        $set: {
+          name: 'Piet',
+          email: 'piet@example.com',
+          role: 'professional',
+          timeZone: 'Europe/Brussels',
+          businessInfo: { timezone: 'Europe/Brussels' },
+        },
+      },
+      { upsert: true },
+    );
     await User.collection.insertOne({
       _id: otherUserId,
       name: 'Other',
@@ -645,14 +670,19 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
   });
 
   it('makes the project schedule engine reject a window occupied by a support meeting', async () => {
-    await User.collection.insertOne({
-      _id: professionalId,
-      name: 'Piet',
-      email: 'piet@example.com',
-      role: 'professional',
-      timeZone: 'Europe/Brussels',
-      businessInfo: { timezone: 'Europe/Brussels' },
-    });
+    await User.collection.updateOne(
+      { _id: professionalId },
+      {
+        $set: {
+          name: 'Piet',
+          email: 'piet@example.com',
+          role: 'professional',
+          timeZone: 'Europe/Brussels',
+          businessInfo: { timezone: 'Europe/Brussels' },
+        },
+      },
+      { upsert: true },
+    );
     const projectId = new Types.ObjectId('507f1f77bcf86cd799439041');
     await Project.collection.insertOne({
       _id: projectId,
@@ -1084,6 +1114,7 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     const saveSpy = vi.spyOn(Meeting.prototype, 'save');
     let saveCalls = 0;
     try {
+      await ensureFenceUser();
       await setCommitFailure(1, ['TransientTransactionError']);
       const res = mockRes();
       await cancelMeeting({
@@ -1114,12 +1145,17 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     if (!commitFailpointsAvailable) {
       context.skip('MongoDB test commands (enableTestCommands=1) are not enabled');
     }
-    await User.collection.insertOne({
-      _id: professionalId,
-      name: 'Piet',
-      email: 'piet@example.com',
-      role: 'professional',
-    });
+    await User.collection.updateOne(
+      { _id: professionalId },
+      {
+        $set: {
+          name: 'Piet',
+          email: 'piet@example.com',
+          role: 'professional',
+        },
+      },
+      { upsert: true },
+    );
     const bookingId = new Types.ObjectId();
     const originalStart = new Date('2030-12-03T09:00:00.000Z');
     const originalEnd = new Date('2030-12-03T10:00:00.000Z');
@@ -1224,6 +1260,7 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     const saveSpy = vi.spyOn(Meeting.prototype, 'save');
     let saveCalls = 0;
     try {
+      await ensureFenceUser();
       await setCommitFailure(1, ['UnknownTransactionCommitResult']);
       const res = mockRes();
       await cancelMeeting({
@@ -1940,7 +1977,7 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     })).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' });
   });
 
-  it('anonymizes support content, notes and reservations while keeping the redacted history', async () => {
+  it('anonymizes support content and reservations while retaining admin notes', async () => {
     const userId = new Types.ObjectId('507f1f77bcf86cd799439031');
     await User.collection.insertOne({
       _id: userId,
@@ -1998,7 +2035,8 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     expect(stored?.attachment).toBeUndefined();
     expect(stored?.meeting?.status).toBe('cancelled');
     expect(stored?.meeting?.slotKeys).toBeUndefined();
-    expect(await SupportTicketInternalNote.countDocuments({ ticketId: ticket._id })).toBe(0);
+    const retainedNote = await SupportTicketInternalNote.findOne({ ticketId: ticket._id }).lean();
+    expect(retainedNote?.body).toBe('PRIVATE NOTE');
     expect(await CalendarReservation.countDocuments({ sourceId: ticket._id })).toBe(0);
     expect(deleteS3).toHaveBeenCalledWith(attachmentKey);
     const user = await User.findById(userId).lean();

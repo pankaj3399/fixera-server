@@ -6,6 +6,7 @@ import SupportTicket, { type ISupportTicket } from "../../models/supportTicket";
 import type { IUser } from "../../models/user";
 import { UserFacingError } from "../../utils/appErrors";
 import { sendHandlerError } from "../../utils/handlerErrors";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 import {
   buildLegacyMeetingRequestFilter,
   buildSupportTicketFilter,
@@ -161,8 +162,8 @@ export const replySupportItem = async (req: Request, res: Response) => {
     const query = kind === "ticket"
       ? { _id: id, userId: user._id, kind: { $ne: "meeting" } }
       : { _id: id, userId: user._id, kind: "meeting" };
-    const ticket = await SupportTicket.findOne(query);
-    if (!ticket) {
+    const existing = await SupportTicket.findOne(query);
+    if (!existing) {
       if (kind === "meeting") {
         const legacy = await MeetingRequest.findOne({ _id: id, userId: user._id }).select("_id").lean();
         if (legacy) {
@@ -175,7 +176,7 @@ export const replySupportItem = async (req: Request, res: Response) => {
       }
       throw new UserFacingError(404, "Support item not found.", "NOT_FOUND");
     }
-    if (ticket.status === "closed") {
+    if (existing.status === "closed") {
       throw new UserFacingError(
         400,
         "This support request is closed. Open a new request if you need more help.",
@@ -183,13 +184,30 @@ export const replySupportItem = async (req: Request, res: Response) => {
       );
     }
 
-    ticket.replies.push({
-      authorId: user._id,
-      authorRole: user.role === "professional" ? "professional" : "customer",
-      body,
-      createdAt: new Date(),
+    // The fenced re-read is the authoritative one: a request that passed
+    // authentication before the tombstone must not append a reply afterwards.
+    const ticket = await withAnonymizationWriteFence([user._id], async (session) => {
+      const current = await SupportTicket.findOne(query).session(session ?? null);
+      if (!current) return null;
+      if (current.status === "closed") {
+        throw new UserFacingError(
+          400,
+          "This support request is closed. Open a new request if you need more help.",
+          "VALIDATION",
+        );
+      }
+      current.replies.push({
+        authorId: user._id,
+        authorRole: user.role === "professional" ? "professional" : "customer",
+        body,
+        createdAt: new Date(),
+      });
+      await current.save(session ? { session } : undefined);
+      return current;
     });
-    await ticket.save();
+    if (!ticket) {
+      throw new UserFacingError(404, "Support item not found.", "NOT_FOUND");
+    }
 
     return res.status(200).json({
       success: true,

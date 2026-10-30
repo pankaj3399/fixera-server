@@ -18,11 +18,11 @@ import {
 const BOOKING_DETAIL_POPULATE = [
   {
     path: 'customer',
-    select: 'name username email phone customerType location vatNumber totalSpent timeZone businessName',
+    select: 'name username email phone customerType location vatNumber totalSpent timeZone businessName isAnonymized deletedAt',
   },
   {
     path: 'professional',
-    select: 'name username email phone businessInfo vatNumber timeZone role',
+    select: 'name username email phone businessInfo vatNumber timeZone role isAnonymized deletedAt',
   },
   {
     path: 'project',

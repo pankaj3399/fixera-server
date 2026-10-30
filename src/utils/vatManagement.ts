@@ -119,6 +119,95 @@ export const parseFlexibleNumber = (value: unknown): number => {
 export const isB2BSameAsB2CCountry = (country?: string | null): boolean =>
   B2B_SAME_AS_B2C_COUNTRIES.has(normalizeVatCountry(country));
 
+/**
+ * Rejection message when a professional submits a VAT rate outside the
+ * allowed quotation options. Under reverse charge the only allowed rate is
+ * 0%, so the message must not tell the professional to select Standard or
+ * Reduced. Pure for testability.
+ */
+export const vatRateRejectionMessage = (
+  options: VatRateOption[],
+  invalidRate: number | string,
+): string => {
+  const reverseChargeOnly = options.length > 0 && options.every((option) => option.reverseCharge);
+  if (reverseChargeOnly) {
+    return (
+      `VAT rate ${invalidRate}% is not available for this booking. ` +
+      `Reverse charge applies: every line must use 0% (${options[0]?.label || REVERSE_CHARGE_LABEL}).`
+    );
+  }
+  return (
+    `VAT rate ${invalidRate}% is not available for this booking. ` +
+    `Allowed rates: ${options.map((option) => `${option.rate}%`).join(', ') || 'none'}. ` +
+    `Select Standard or Reduced only.`
+  );
+};
+
+export type CustomerVatDeterminationView = {
+  customerType: "B2C" | "B2B";
+  /**
+   * Article 47 class shown only for B2B (null otherwise). The exempt variant
+   * is the Belgian-only branch: immovable work that stays out of reverse
+   * charge because the service is flagged exempt.
+   */
+  article47Class:
+    | "Movable"
+    | "Immovable"
+    | "Immovable but exempt from Belgian reverse charge"
+    | null;
+  vatAddressType: "Booking address" | "Customer business address";
+  vatCountry: string;
+  reverseCharge: boolean;
+};
+
+/**
+ * Parameters that determined the quotation VAT, exposed so the professional
+ * can see why a rate (or reverse charge) applies. Pure: pass the already
+ * resolved customer-leg decision inputs.
+ */
+export const describeCustomerVatDetermination = (params: {
+  customerType?: string;
+  propertyNature?: PropertyNature | null;
+  exemptFromBelgianReverseCharge?: boolean;
+  bookingCountry?: string | null;
+  customerBusinessCountry?: string | null;
+  /** True only when a real company/business address supplied the country. */
+  hasCompanyAddress?: boolean;
+  vatCountry: string;
+  reverseCharge: boolean;
+}): CustomerVatDeterminationView => {
+  const isB2B = params.customerType === "business";
+  const article47Class: CustomerVatDeterminationView["article47Class"] = !isB2B
+    ? null
+    : params.propertyNature === "movable"
+      ? "Movable"
+      : params.propertyNature === "immovable" && params.exemptFromBelgianReverseCharge
+        ? "Immovable but exempt from Belgian reverse charge"
+        : params.propertyNature === "immovable"
+          ? "Immovable"
+          : null;
+  // Movable B2B work is supplied where the customer is established, so the
+  // VAT country comes from the customer's business address — but only when a
+  // real company address supplied it. A generic location fallback still
+  // means the booking (service) address. Every other branch uses booking.
+  const businessCountry = parseVatCountryCode(params.customerBusinessCountry);
+  const vatAddressType: CustomerVatDeterminationView["vatAddressType"] =
+    isB2B &&
+    params.propertyNature === "movable" &&
+    params.hasCompanyAddress === true &&
+    businessCountry &&
+    businessCountry === parseVatCountryCode(params.vatCountry)
+      ? "Customer business address"
+      : "Booking address";
+  return {
+    customerType: isB2B ? "B2B" : "B2C",
+    article47Class,
+    vatAddressType,
+    vatCountry: parseVatCountryCode(params.vatCountry),
+    reverseCharge: params.reverseCharge,
+  };
+};
+
 const isTruthyAnswer = (value: unknown): boolean => {
   if (value === true) return true;
   if (typeof value === "number") return value === 1;
@@ -545,9 +634,13 @@ export const getVatRateOptionsFromConfig = async (params: {
 
 /**
  * Quotation tier-only options (Standard/Reduced).
- * The professional already determines the tier; service-rule eligibility is
- * IGNORED. VAT country is resolved through the flowchart SSOT, then the
- * corresponding country rate is returned. No custom % when country is known.
+ *
+ * The VAT determination diagram applies first: when it resolves to reverse
+ * charge, that is the shown/determined VAT for every quotation line and the
+ * professional gets no rate choice (single 0% reverse-charge option). Only
+ * when the determination is the service configuration may the professional
+ * select Standard/Reduced; service-rule eligibility is then IGNORED and the
+ * professional's tier choice overrides the admin's configured rate.
  */
 export const getQuotationTierRateOptionsFromConfig = async (params: {
   serviceConfigurationId?: string;
@@ -584,6 +677,36 @@ export const getQuotationTierRateOptionsFromConfig = async (params: {
         : normalizeArticle47Classification(vat?.article47Classification),
       professionalAnswers: params.professionalAnswers,
     });
+  const exemptFromBelgianReverseCharge =
+    params.exemptFromBelgianReverseCharge ?? Boolean(vat?.exemptFromBelgianReverseCharge);
+
+  // Determination first: reverse charge wins over any tier choice.
+  const determination = await resolveVatDecisionFromConfig({
+    serviceConfigurationId: params.serviceConfigurationId,
+    category: params.category,
+    service: params.service,
+    areaOfWork: params.areaOfWork,
+    country: params.country,
+    bookingCountry: params.bookingCountry || params.country,
+    businessCountry: params.businessCountry,
+    customerType: params.customerType,
+    vatNumber: params.vatNumber,
+    isVatVerified: params.isVatVerified,
+    professionalAnswers: params.professionalAnswers,
+    propertyNature,
+    exemptFromBelgianReverseCharge,
+  });
+  if (determination.reverseCharge) {
+    const country = determination.country || parseVatCountryCode(params.country);
+    return [{
+      rate: 0,
+      country,
+      label: REVERSE_CHARGE_LABEL,
+      reverseCharge: true,
+      source: "b2b_exempt",
+    }];
+  }
+
   const { country } = flowchartPlaceOfSupplyCountry({
     leg: "customer",
     customerType: params.customerType,
@@ -595,10 +718,9 @@ export const getQuotationTierRateOptionsFromConfig = async (params: {
   const resolvedCountry = country || parseVatCountryCode(params.country);
   if (!resolvedCountry) return [];
 
-  // A quotation's customer-facing VAT tier is selected by the professional.
-  // The customer B2B reverse-charge check belongs to the separate
-  // professional/platform self-billing leg, which is resolved when the
-  // supplier invoice is generated.
+  // Service-configuration mode (no reverse charge): the professional
+  // selects Standard/Reduced; service-rule eligibility is ignored and the
+  // choice overrides the admin's configured rate.
   const rules = [...(vat?.logicRules || [])]
     .filter((r) => r.isActive !== false && parseVatCountryCode(r.country) === resolvedCountry)
     .sort((a, b) => (a.priority || 0) - (b.priority || 0));
@@ -841,10 +963,18 @@ export const withArticle47ProfessionalQuestion = <T extends {
     isRequired: boolean;
   }>;
 }>(vat: T): NonNullable<T["professionalVatQuestions"]> => {
-  const existing = vat.professionalVatQuestions || [];
+  // The served question list always reflects the CURRENT classification: a
+  // previously persisted reserved Article 47 question is filtered out first,
+  // then re-injected only when the current classification is project
+  // dependent. Stored answers/snapshots on existing projects and bookings are
+  // never rewritten here — pruning of stale answers happens at the write
+  // boundary (project draft save / booking creation) and at VAT decision
+  // time the reserved answer is ignored unless currently project dependent.
+  const existing = (vat.professionalVatQuestions || []).filter(
+    (question) => question?.fieldName !== ARTICLE_47_FIELD_NAME,
+  );
   const classification = resolveArticle47Classification(vat.article47Classification);
   if (classification !== "project_dependent") return existing;
-  if (existing.some((question) => question.fieldName === ARTICLE_47_FIELD_NAME)) return existing;
   return [
     {
       question: ARTICLE_47_QUESTION,
@@ -854,4 +984,23 @@ export const withArticle47ProfessionalQuestion = <T extends {
     },
     ...existing,
   ];
+};
+
+/**
+ * Drop a stale reserved Article 47 answer unless the CURRENT service-config
+ * classification is project dependent. All unrelated answers are preserved.
+ * Historical booking/invoice snapshots and past VAT decisions are untouched —
+ * this applies only to the current project draft / new booking authority.
+ */
+export const pruneStaleArticle47ProfessionalAnswers = <T extends { fieldName?: unknown }>(
+  answers: T[] | undefined | null,
+  article47Classification: unknown,
+): T[] => {
+  if (!Array.isArray(answers)) return [];
+  const classification =
+    typeof article47Classification === 'string'
+      ? resolveArticle47Classification(article47Classification)
+      : undefined;
+  if (classification === "project_dependent") return answers;
+  return answers.filter((answer) => answer?.fieldName !== ARTICLE_47_FIELD_NAME);
 };

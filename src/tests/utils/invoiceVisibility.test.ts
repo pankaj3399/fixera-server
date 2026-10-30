@@ -6,6 +6,7 @@ import {
   resolveBookingViewerRole,
   sanitizePaymentForViewer,
   stripPeppolDispatchDiagnostics,
+  stripProPayoutSummaryForCustomer,
 } from "../../utils/invoiceVisibility";
 
 const payment = {
@@ -343,5 +344,29 @@ describe("viewer role with Mongo ObjectIds", () => {
     expect(
       resolveBookingViewerRole({ _id: otherId, role: "professional" }, booking)
     ).toBe("professional");
+  });
+});
+
+describe("pro payout summary stripping", () => {
+  it("strips transfer facts for customers while keeping own totals and refunds", () => {
+    const payment = {
+      status: "completed",
+      currency: "EUR",
+      totalWithVat: 1210,
+      professionalPayout: 1089,
+      transferredAt: new Date("2026-04-01T00:00:00.000Z"),
+      transferStatus: "succeeded",
+      refunds: [{ amount: 100, currency: "EUR" }],
+      invoiceNumber: "FIX-1",
+      supplierInvoiceNumber: "SUP-1",
+    };
+    const stripped = stripProPayoutSummaryForCustomer({ ...payment });
+    expect(stripped.professionalPayout).toBeUndefined();
+    expect(stripped.transferredAt).toBeUndefined();
+    expect(stripped.transferStatus).toBeUndefined();
+    expect(stripped.supplierInvoiceNumber).toBeUndefined();
+    expect(stripped.totalWithVat).toBe(1210);
+    expect(stripped.refunds).toHaveLength(1);
+    expect(stripped.invoiceNumber).toBe("FIX-1");
   });
 });

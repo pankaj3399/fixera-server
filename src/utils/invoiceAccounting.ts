@@ -34,6 +34,12 @@ export type SupplierInvoiceBasisInput = {
   selectedExtraOptions?: Array<{ bookedPrice?: number } | number>;
   repeatBuyerDiscount?: number;
   extraCostTotal?: number;
+  /**
+   * The quoted amount already contains the selected extra options (legacy
+   * checkout folded them into quote.amount). Without a checkout snapshot the
+   * options must not be added a second time.
+   */
+  quoteIncludesSelectedOptions?: boolean;
 };
 
 const money = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -88,10 +94,110 @@ export const calculateSupplierInvoiceNet = (input: SupplierInvoiceBasisInput): n
   const quotedAmount = Number(input.quoteAmount) || 0;
   const serviceNet = hasSnapshot
     ? snapshotBase + snapshotExtras
-    : quotedAmount + selectedOptions;
+    : quotedAmount + (input.quoteIncludesSelectedOptions ? 0 : selectedOptions);
   const repeatBuyerDiscount = Math.max(0, Number(input.repeatBuyerDiscount) || 0);
   const extraCosts = Math.max(0, Number(input.extraCostTotal) || 0);
   return money(Math.max(0, serviceNet - repeatBuyerDiscount + extraCosts));
+};
+
+/**
+ * Scale factor that maps persisted extra-cost lines to the resolved extra-cost
+ * total. After an admin dispute resolution the booking's `extraCostTotal` is
+ * authoritative (reduced or zeroed) while `extraCosts[]` still carries the
+ * originally requested amounts; both invoice sides must render the resolved
+ * amount instead of the stale lines.
+ */
+export const resolveExtraCostScale = (
+  extraCosts: Array<{ amount?: unknown }> | undefined,
+  extraCostTotal: unknown,
+): number => {
+  const rawTotal = (extraCosts || []).reduce(
+    (sum, cost) => sum + (Number(cost?.amount) || 0),
+    0,
+  );
+  const resolved = Number(extraCostTotal);
+  if (!Number.isFinite(resolved)) return 1;
+  if (rawTotal === 0) return resolved > 0 ? 1 : 0;
+  return resolved / rawTotal;
+};
+
+export type PostRefundInvoicePayment = {
+  netAmount: number;
+  vatAmount: number;
+  totalWithVat: number;
+  platformCommission: number;
+  professionalPayout: number;
+  /** Share of the refund taken from the net amount (proportional split). */
+  refundNet: number;
+  /** Share of the refund taken from the VAT amount (proportional split). */
+  refundVat: number;
+  /** Factor the supplier-side service lines must be scaled by. */
+  supplierScale: number;
+};
+
+/**
+ * Post-refund invoice basis for a partially refunded booking. The refund is
+ * split proportionally across net/VAT (mirroring how it was charged) and the
+ * platform commission is recalculated on the remaining net amount. Pure: the
+ * caller decides whether to persist the result or keep it in memory.
+ */
+export const computePostRefundInvoicePayment = (input: {
+  netAmount: number;
+  vatAmount: number;
+  totalWithVat: number;
+  platformCommission?: number;
+  professionalPayout?: number;
+  refundAmount: number;
+  commissionPercent: number;
+}): PostRefundInvoicePayment => {
+  const total = Math.max(0, Number(input.totalWithVat) || 0);
+  const refund = Math.min(Math.max(0, Number(input.refundAmount) || 0), total);
+  const net = Math.max(0, Number(input.netAmount) || 0);
+  const vat = Math.max(0, Number(input.vatAmount) || 0);
+  const netPlusVat = net + vat;
+  const refundNet = netPlusVat > 0 ? money((refund * net) / netPlusVat) : 0;
+  const refundVat = money(refund - refundNet);
+  const remainingNet = money(net - refundNet);
+  const remainingTotal = money(total - refund);
+  const commissionPercent = Math.max(0, Number(input.commissionPercent) || 0);
+  const platformCommission = money((remainingNet * commissionPercent) / 100);
+  const professionalPayout = money(Math.max(0, remainingNet - platformCommission));
+  return {
+    netAmount: remainingNet,
+    vatAmount: money(vat - refundVat),
+    totalWithVat: remainingTotal,
+    platformCommission,
+    professionalPayout,
+    refundNet,
+    refundVat,
+    supplierScale: total > 0 ? remainingTotal / total : 1,
+  };
+};
+
+/**
+ * VAT rate (2 decimals) that reproduces a fixed VAT amount from a fixed net
+ * amount under the UBL/PDF per-line rule `round(net × rate)`. A partial
+ * refund's gross is exact but rarely factorable at the nominal rate (e.g.
+ * €21.00 at 21% has no exact cent split), so the credit carries the effective
+ * rate of its own amounts and both documents reconcile to the cent. A small
+ * search around the nominal ratio absorbs remainder rounding; the fallback is
+ * the nominal ratio itself.
+ */
+export const effectiveVatRateForCredit = (
+  netAmount: unknown,
+  vatAmount: unknown,
+  fallbackRate: unknown = 0,
+): number => {
+  const net = Number(netAmount) || 0;
+  const vat = Number(vatAmount) || 0;
+  if (!(net > 0) || !(vat > 0)) return 0;
+  const raw = (vat / net) * 100;
+  for (const delta of [0, 0.01, -0.01, 0.02, -0.02, 0.03, -0.03, 0.04, -0.04, 0.05, -0.05, 0.1, -0.1]) {
+    const candidate = money(raw + delta);
+    if (candidate < 0 || candidate > 100) continue;
+    if (money((net * candidate) / 100) === money(vat)) return candidate;
+  }
+  return money(raw || Number(fallbackRate) || 0);
 };
 
 /**

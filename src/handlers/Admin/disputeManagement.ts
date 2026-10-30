@@ -6,6 +6,15 @@ import CancellationRequest, { CANCELLATION_REASON_LABELS } from '../../models/ca
 import Conversation from '../../models/conversation';
 import { captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
+import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { resolveDisputeEmailAmount } from '../../utils/disputeFinalCharge';
+import {
+  ensureRefundInvoices,
+  isBookingStarted,
+  leavesBillableRemainder,
+  pruneFutureResourcePlanDays,
+  retainPastBookingCalendar,
+} from '../../utils/refundFinalization';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
@@ -19,7 +28,7 @@ import {
 import { auditLog } from '../../utils/auditLogger';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { presignS3Url } from '../../utils/s3Upload';
-import { buildProjectScheduleWindow } from '../../utils/scheduleEngine';
+import { buildProjectScheduleWindow, getBookingScheduleOptions } from '../../utils/scheduleEngine';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import {
   findBookingCalendarConflictsForSchedule,
@@ -28,6 +37,13 @@ import {
 } from '../../utils/support/bookingCalendar';
 import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
 import { UserFacingError } from '../../utils/appErrors';
+import {
+  isAnonymizedAccount,
+  maskAnonymizedUser,
+  maskBookingForAnonymizedParties,
+  maskCancellationRequestForAnonymizedParties,
+  maskWarrantyClaimForAnonymizedParties,
+} from '../../utils/accountAnonymity';
 import { param, params } from '../../utils/requestParams';
 import { notify } from '../../utils/notifications/notify';
 
@@ -76,16 +92,18 @@ class DisputeResolutionConflictError extends Error {}
 type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked' | 'professional_completed';
 const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked', 'professional_completed'];
 
-const buildDisputeFilter = (status?: string) => {
+export const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
     return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': { $ne: null } };
   }
 
   if (status === 'open') {
-    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
+    return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
   }
 
-  return { 'dispute.raisedAt': { $exists: true } };
+  // Client bug list #7: the overview must only contain bookings whose status
+  // is 'dispute' — never plain extra-cost requests or resolved history.
+  return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true } };
 };
 
 const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {
@@ -186,20 +204,21 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
   const [warrantyClaims, refundRequests] = await Promise.all([
     WarrantyClaim.find({ status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } })
       .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
-      .populate('customer', 'name email')
-      .populate('professional', 'name email username')
+      .populate('customer', 'name email isAnonymized deletedAt')
+      .populate('professional', 'name email username isAnonymized deletedAt')
       .sort({ openedAt: -1 })
       .limit(50)
       .lean(),
     CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
       .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
-      .populate('requestedBy', 'name email')
+      .populate('requestedBy', 'name email isAnonymized deletedAt')
       .sort({ escalatedAt: -1 })
       .limit(50)
       .lean(),
   ]);
 
-  const warrantyRows = warrantyClaims.map((claim: any) => {
+  const warrantyRows = warrantyClaims.map((rawClaim: any) => {
+    const claim = maskWarrantyClaimForAnonymizedParties(rawClaim);
     const booking = claim.booking || {};
     const hasProposal = !!claim.proposal?.proposedAt;
     return {
@@ -232,7 +251,8 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
     };
   });
 
-  const refundRows = refundRequests.map((request: any) => {
+  const refundRows = refundRequests.map((rawRequest: any) => {
+    const request = maskCancellationRequestForAnonymizedParties(rawRequest);
     const booking = request.booking || {};
     const reasonCategoryLabel = request.reasonCategory
       ? CANCELLATION_REASON_LABELS[request.reasonCategory as keyof typeof CANCELLATION_REASON_LABELS]
@@ -253,7 +273,10 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       scheduledStartDate: booking.scheduledStartDate,
       cancellation: {
         ...(booking.cancellation || {}),
-        reason: reasonCategoryLabel ?? booking.cancellation?.reason,
+        reason: reasonCategoryLabel
+          ?? (isAnonymizedAccount(request.requestedBy)
+            ? '[deleted]'
+            : booking.cancellation?.reason),
       },
       dispute: {
         raisedBy: request.requestedBy?._id || request.requestedBy,
@@ -282,8 +305,8 @@ export const getDisputes = async (req: Request, res: Response) => {
 
     const [disputes, total] = await Promise.all([
       Booking.find(filter)
-        .populate('customer', 'name email phone')
-        .populate('professional', 'name email username')
+        .populate('customer', 'name email phone isAnonymized deletedAt')
+        .populate('professional', 'name email username isAnonymized deletedAt')
         .populate('project', 'title category service')
         .select(
           'bookingNumber status customer professional project payment extraCosts extraCostTotal extraCostStatus completionAttestation dispute createdAt actualEndDate actualStartDate scheduledStartDate scheduledEndTime scheduledStartTime scheduledExecutionEndDate rescheduleRequest warrantyCoverage cancellation'
@@ -309,8 +332,12 @@ export const getDisputes = async (req: Request, res: Response) => {
     return res.json({
       success: true,
       data: {
-        disputes,
-        externalDisputes: externalRows,
+        disputes: disputes.map((dispute) => maskBookingForAnonymizedParties(dispute)),
+        externalDisputes: externalRows.map((row) => ({
+          ...row,
+          customer: maskAnonymizedUser(row.customer),
+          professional: maskAnonymizedUser(row.professional),
+        })),
         pagination: {
           page: pageNum,
           limit: limitNum,
@@ -333,8 +360,8 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
     const { bookingId } = params(req.params);
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title category service extraOptions termsConditions subprojects');
 
     if (!booking) {
@@ -359,7 +386,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { booking: bookingObj }
+      data: { booking: maskBookingForAnonymizedParties(bookingObj) }
     });
   } catch (error: any) {
     console.error('Error fetching dispute details:', error);
@@ -377,6 +404,9 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
   let resolvedBooking: any = null;
   let finalExtraCostAmount = 0;
+  // Original extra-cost total captured before the resolution write, so the
+  // post-resolution email can scale the persisted charge to the final amount.
+  let originalExtraCostTotalForEmail: number | undefined;
   let targetStatus: BookingStatus = COMPLETED_BOOKING_STATUS;
   let disputeType: string = 'extra_costs';
   let isExtraCostsDispute = true;
@@ -458,6 +488,8 @@ export const resolveDispute = async (req: Request, res: Response) => {
         });
       }
       const window = await buildProjectScheduleWindow({
+        ...getBookingScheduleOptions(booking),
+        customerBlocks: booking.customerBlocks,
         projectId,
         subprojectIndex: typeof booking.selectedSubprojectIndex === 'number' ? booking.selectedSubprojectIndex : undefined,
         startDate: forcedStartDate.trim(),
@@ -569,6 +601,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     if (isExtraCostsDispute) {
       originalExtraCostStatus = (booking as any).extraCostStatus;
       originalExtraCostTotal = booking.extraCostTotal;
+      originalExtraCostTotalForEmail = Number(booking.extraCostTotal);
       originalAdminAdjustedAmount = (booking.dispute as any)?.adminAdjustedAmount;
       const originalExtraCostAmount = Number(booking.extraCostTotal || 0);
       setFields.extraCostStatus = 'confirmed';
@@ -665,7 +698,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
           }
         ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
         try {
-          await releaseBookingCalendar(booking._id);
+          const refundTotal = Number(resolvedBooking.payment?.totalWithVat) || 0;
+          // Partial dispute refunds keep the remainder billable: invoices are
+          // generated from the remaining amount, and on a started booking only
+          // future days are unplanned while past days stay blocked.
+          if (leavesBillableRemainder(refundTotal, refundResult.amount)) {
+            if (isBookingStarted(resolvedBooking)) {
+              pruneFutureResourcePlanDays(resolvedBooking);
+              await Booking.updateOne(
+                { _id: resolvedBooking._id },
+                { $set: { resourcePlan: resolvedBooking.resourcePlan } },
+              ).catch((pruneWriteError) => console.error('Failed to prune future planned days after dispute refund:', pruneWriteError));
+              await retainPastBookingCalendar(resolvedBooking);
+            }
+            void ensureRefundInvoices(String(resolvedBooking._id));
+          } else {
+            await releaseBookingCalendar(booking._id);
+          }
         } catch (releaseError) {
           console.error('Dispute refunded but calendar reservation release failed:', releaseError);
         }
@@ -784,6 +833,16 @@ export const resolveDispute = async (req: Request, res: Response) => {
         } else if (isExtraCostsDispute) {
           await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
         }
+        // An admin-forced completion must leave the same FIX/SUP artifacts as
+        // a customer-confirmed one. Idempotent: existing invoices are kept.
+        try {
+          await ensureBookingInvoiceArtifacts(resolvedBooking._id.toString());
+        } catch (invoiceError) {
+          console.error(
+            'Failed to generate booking invoice artifacts after dispute resolution:',
+            invoiceError instanceof Error ? invoiceError.message : invoiceError,
+          );
+        }
       }
     } catch (e) {
       console.error('Post-resolve Stripe step failed:', e);
@@ -847,13 +906,21 @@ export const resolveDispute = async (req: Request, res: Response) => {
         User.findById(resolvedBooking.customer).select('_id email name').lean(),
         proId ? User.findById(proId).select('_id email name username businessInfo').lean() : null,
       ]);
+      // The email shows the final amount to be paid (VAT, commission and
+      // discount included), never the bare net delta or a platform percentage.
+      // An uncomputable amount is omitted, never replaced by the bare net.
+      let disputeFinalAmount: number | undefined;
+      if (isExtraCostsDispute && typeof finalExtraCostAmount === 'number') {
+        disputeFinalAmount = await resolveDisputeEmailAmount(
+          resolvedBooking,
+          Number(originalExtraCostTotalForEmail) || 0,
+          finalExtraCostAmount,
+        );
+      }
       const disputeContext = {
         bookingId: String(resolvedBooking._id),
         resolution,
-        adjustedAmount:
-          isExtraCostsDispute && typeof finalExtraCostAmount === 'number'
-            ? finalExtraCostAmount
-            : undefined,
+        adjustedAmount: disputeFinalAmount,
         currency: (resolvedBooking as any).payment?.currency || 'EUR',
       };
       if (customerUser?._id) {

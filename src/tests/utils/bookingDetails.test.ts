@@ -381,9 +381,10 @@ describe('quote provenance and totals', () => {
       professionalNetAmount: 100,
       customerNetAmount: 110,
       amountBeforeDiscounts: 110,
-      vatAmount: 21,
-      totalWithVat: 131,
-      totalAmount: 131,
+      // VAT is charged on the price after commission: 21% of 110.00.
+      vatAmount: 23.1,
+      totalWithVat: 133.1,
+      totalAmount: 133.1,
       currency: 'EUR',
     });
   });
@@ -1888,6 +1889,68 @@ describe('attachment ownership', () => {
   it('returns no signed URL for an unowned legacy attachment', async () => {
     const result = await presignOwnedUrl(other, [customerId], ['rfq-attachments']);
     expect(result).toMatchObject({ url: null, signed: false, unavailableReason: 'not_owned' });
+  });
+});
+
+describe('reschedule details', () => {
+  it('returns the pending request and every recorded history entry, not only the latest', async () => {
+    const base = booking({
+      rescheduleRequest: {
+        status: 'pending',
+        requestedBy: customerId,
+        requestedAt: new Date('2026-02-07T10:00:00.000Z'),
+        reason: 'New date needed',
+        description: 'The building access moved',
+        previousSchedule: {
+          scheduledStartDate: new Date('2026-02-10T09:00:00.000Z'),
+          scheduledExecutionEndDate: new Date('2026-02-10T17:00:00.000Z'),
+          scheduledStartTime: '09:00',
+          scheduledEndTime: '17:00',
+        },
+        proposedSchedule: {
+          scheduledStartDate: new Date('2026-02-12T09:00:00.000Z'),
+          scheduledExecutionEndDate: new Date('2026-02-12T17:00:00.000Z'),
+          scheduledStartTime: '09:00',
+          scheduledEndTime: '17:00',
+        },
+      },
+      rescheduleHistory: [
+        {
+          requestedBy: professionalId,
+          requestedAt: new Date('2026-02-01T10:00:00.000Z'),
+          reason: 'Material delay',
+          description: 'Supplier delay',
+          status: 'accepted',
+          respondedAt: new Date('2026-02-01T11:00:00.000Z'),
+          respondedBy: customerId,
+          responseNote: 'Accepted',
+          previousSchedule: {
+            scheduledStartDate: new Date('2026-02-03T09:00:00.000Z'),
+            scheduledExecutionEndDate: new Date('2026-02-03T17:00:00.000Z'),
+          },
+          proposedSchedule: {
+            scheduledStartDate: new Date('2026-02-04T09:00:00.000Z'),
+            scheduledExecutionEndDate: new Date('2026-02-04T17:00:00.000Z'),
+          },
+        },
+      ],
+    });
+    const details = await buildDetails('customer', { booking: base });
+    expect(details.booking.schedule.reschedulePending).toBe(true);
+    expect(details.reschedules).toHaveLength(2);
+    expect(details.reschedules.map((entry) => entry.status)).toEqual(['accepted', 'pending']);
+    expect(details.reschedules[0]).toMatchObject({
+      reason: 'Material delay',
+      description: 'Supplier delay',
+      actorRecorded: true,
+      respondedAt: '2026-02-01T11:00:00.000Z',
+    });
+    expect(details.reschedules[1]).toMatchObject({
+      reason: 'New date needed',
+      description: 'The building access moved',
+      respondedAt: null,
+    });
+    expect(details.activity.items.some((item) => item.type === 'reschedule_requested')).toBe(true);
   });
 });
 

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { Types } from "mongoose";
+import { DateTime } from "luxon";
 import User from "../../models/user";
 import Project from "../../models/project";
 import ProfessionalLevelConfig from "../../models/professionalLevelConfig";
@@ -34,13 +35,38 @@ const getCachedLevelConfig = async (): Promise<IProfessionalLevelConfig> => {
     });
   return cachedLevelConfigPromise;
 };
-import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposalsWithData, resolveEffectiveScheduleTimeZone } from "../../utils/scheduleEngine";
 
 export { getPopularServices } from "./getPopularServices";
 export { getPopularProjects } from "./getPopularProjects";
 export { aggregateRatings, aggregateProfessionalRatings, aggregateProjectRatings } from "./aggregateRatings";
 
 import { aggregateProfessionalRatings, aggregateProjectRatings } from "./aggregateRatings";
+import {
+  normalizeSearchValue,
+  parseDateOnly,
+  parsePriceBound,
+  projectMatchesDimensions,
+  projectMatchesPrice,
+  type ProjectSearchDimensions,
+} from "../../utils/search/projectFilters";
+import { isRelevanceSort, sortProjectsByRelevance } from "../../utils/search/projectRelevance";
+import PlatformSettings from "../../models/platformSettings";
+import LoyaltyConfig from "../../models/loyaltyConfig";
+import { getCurrentTier } from "../../utils/loyaltySystem";
+import { getCountryCode } from "../../utils/geocoding";
+
+const escapeSearchRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const SEARCH_BATCH_SIZE = 500;
+const aggregateProjectRatingsInBatches = async (ids: any[]) => {
+  const ratings = new Map<string, { avgRating: number; totalReviews: number }>();
+  for (let index = 0; index < ids.length; index += SEARCH_BATCH_SIZE) {
+    const batch = await aggregateProjectRatings(ids.slice(index, index + SEARCH_BATCH_SIZE));
+    for (const [id, rating] of batch) ratings.set(id, rating);
+  }
+  return ratings;
+};
 
 /**
  * Unified search endpoint for professionals and projects
@@ -56,6 +82,13 @@ const parseCsv = (value: unknown): string[] => {
 
 export const search = async (req: Request, res: Response) => {
   try {
+    const scalarFields = ["q", "loc", "type", "priceMin", "priceMax", "category", "availability", "customerLat", "customerLon", "customerCountry", "customerState", "customerCity", "customerAddress", "page", "limit", "sortBy", "professionalLevels", "adminTags", "minRating", "services", "geographicArea", "priceModel", "projectTypes", "includedItems", "areaOfWork", "startDateFrom", "startDateTo"];
+    for (const field of scalarFields) {
+      const value = req.query[field];
+      if (value !== undefined && (typeof value !== "string" || value.length > (field === "q" ? 300 : 3000))) {
+        return res.status(400).json({ error: `Invalid search parameter: ${field}` });
+      }
+    }
     const {
       q = "", // search query
       loc = "", // location
@@ -76,12 +109,49 @@ export const search = async (req: Request, res: Response) => {
       professionalLevels,
       adminTags,
       minRating,
+      services,
+      geographicArea,
+      priceModel,
+      projectTypes,
+      includedItems,
+      areaOfWork,
+      startDateFrom,
+      startDateTo,
     } = req.query;
 
     const levelsList = parseCsv(professionalLevels);
     const tagsList = parseCsv(adminTags);
     const minRatingNum = typeof minRating === "string" ? parseFloat(minRating) : NaN;
     const minRatingValue = Number.isFinite(minRatingNum) && minRatingNum > 0 ? minRatingNum : 0;
+    if (type === "projects" && minRating !== undefined && (!Number.isInteger(minRatingNum) || minRatingNum < 0 || minRatingNum > 5)) {
+      return res.status(400).json({ error: "Minimum project rating must be between 1 and 5, or 0 for Any" });
+    }
+    const priceMinBound = parsePriceBound(priceMin);
+    const priceMaxBound = parsePriceBound(priceMax);
+    if (priceMinBound.invalid || priceMaxBound.invalid || (priceMinBound.value !== undefined && priceMaxBound.value !== undefined && priceMinBound.value > priceMaxBound.value)) {
+      return res.status(400).json({ error: "Price bounds must be finite, non-negative numbers with minimum no greater than maximum" });
+    }
+    const startDateFromValue = startDateFrom === undefined ? undefined : parseDateOnly(startDateFrom);
+    const startDateToValue = startDateTo === undefined ? undefined : parseDateOnly(startDateTo);
+    if ((startDateFrom !== undefined && !startDateFromValue) || (startDateTo !== undefined && !startDateToValue)) {
+      return res.status(400).json({ error: "Dates must use YYYY-MM-DD format" });
+    }
+    if (startDateFromValue && startDateToValue && startDateFromValue > startDateToValue) {
+      return res.status(400).json({ error: "Start date must be before or equal to end date" });
+    }
+    // Optional authentication supplies the principal; public query discounts are ignored.
+    let loyaltyPercentValue = 0;
+    let loyaltyMaxValue: number | undefined;
+    if (type === "projects" && (priceMinBound.value !== undefined || priceMaxBound.value !== undefined) && req.user?.role === "customer") {
+      const config = await LoyaltyConfig.getCurrentConfig();
+      const tiers = config.tiers.filter(tier => tier.isActive !== false);
+      if (tiers.length > 0) {
+        const preferred = req.user.manualCustomerLevelOverride || req.user.loyaltyLevel;
+        const tier = tiers.find(tier => tier.name === preferred) || getCurrentTier(tiers, req.user.totalSpent || 0);
+        loyaltyPercentValue = tier.discountPercentage || 0;
+        loyaltyMaxValue = tier.maxDiscountAmount;
+      }
+    }
     const sortByValue = typeof sortBy === "string" ? sortBy : undefined;
 
     const parsedPage = parseInt(page as string, 10);
@@ -128,6 +198,16 @@ export const search = async (req: Request, res: Response) => {
         customerAddress as string | undefined,
         levelsList,
         tagsList,
+        parseCsv(services),
+        typeof geographicArea === "string" ? geographicArea : undefined,
+        parseCsv(priceModel),
+        parseCsv(projectTypes),
+        parseCsv(includedItems),
+        parseCsv(areaOfWork),
+        startDateFromValue,
+        startDateToValue,
+        loyaltyPercentValue,
+        loyaltyMaxValue,
         minRatingValue,
         sortByValue,
         skip,
@@ -164,6 +244,8 @@ async function searchProfessionals(
     const filter: any = {
       role: "professional",
       professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
     };
 
     if (professionalLevels.length > 0) {
@@ -176,7 +258,7 @@ async function searchProfessionals(
 
     // Search query - search in name, company name, and service categories
     if (query && query.trim()) {
-      const searchRegex = new RegExp(query.trim(), "i");
+      const searchRegex = new RegExp(escapeSearchRegex(query.trim()), "i");
       filter.$or = [
         { name: searchRegex },
         { username: searchRegex },
@@ -187,7 +269,7 @@ async function searchProfessionals(
 
     // Location filter - exact match first, then broader match
     if (location && location.trim()) {
-      const locationRegex = new RegExp(location.trim(), "i");
+      const locationRegex = new RegExp(escapeSearchRegex(location.trim()), "i");
       filter.$and = filter.$and || [];
       filter.$and.push({
         $or: [
@@ -395,6 +477,16 @@ async function searchProjects(
   customerAddress: string | undefined,
   professionalLevels: string[],
   adminTags: string[],
+  services: string[],
+  geographicArea: string | undefined,
+  priceModels: string[],
+  projectTypes: string[],
+  includedItems: string[],
+  areasOfWork: string[],
+  startDateFrom: Date | undefined,
+  startDateTo: Date | undefined,
+  loyaltyDiscountPercent: number,
+  loyaltyDiscountMax: number | undefined,
   minRating: number,
   sortBy: string | undefined,
   skip: number,
@@ -402,45 +494,24 @@ async function searchProjects(
 ) {
   try {
     // Build the filter object
+    const activeProfessionalIds = await User.distinct("_id", {
+      role: "professional",
+      professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
+    });
     const filter: any = {
       status: "published",
+      professionalId: { $in: activeProfessionalIds },
     };
 
-    if (professionalLevels.length > 0 || adminTags.length > 0) {
-      const MAX_MATCHED_PROS = 1000;
-      const proFilter: any = { role: "professional", professionalStatus: "approved" };
-      if (professionalLevels.length > 0) proFilter.professionalLevel = { $in: professionalLevels };
-      if (adminTags.length > 0) proFilter.adminTags = { $in: adminTags };
-      const matchedProsCount = await User.countDocuments(proFilter);
-      if (matchedProsCount === 0) {
-        return res.json({
-          results: [],
-          pagination: { total: 0, page: Math.ceil(skip / limit) + 1, limit, totalPages: 0 },
-        });
-      }
-      if (matchedProsCount > MAX_MATCHED_PROS) {
-        console.warn(
-          `[Search Performance] Project professional pre-filter matched ${matchedProsCount} users ` +
-          `(exceeds MAX_MATCHED_PROS=${MAX_MATCHED_PROS}). Short-circuiting to empty result. ` +
-          `Narrow the professionalLevels/adminTags filters or denormalize these fields onto Project.`
-        );
-        return res.json({
-          results: [],
-          pagination: { total: 0, page: Math.ceil(skip / limit) + 1, limit, totalPages: 0 },
-          warning: "Professional filter matched too many users; please narrow the filters.",
-        });
-      }
-      const matchedPros = await User.find(proFilter).distinct("_id");
-      filter.professionalId = { $in: matchedPros };
-    }
-
     const isPopularitySort = sortBy === "popularity";
-    const needsFullSet = minRating > 0 || isPopularitySort;
-    const PROJECT_CAP = 500;
+    // Rating, availability and exact facets all operate on the complete candidate set.
+    const needsFullSet = true;
 
     // Search query - search in title, description, category, and service
     if (query && query.trim()) {
-      const searchRegex = new RegExp(query.trim(), "i");
+      const searchRegex = new RegExp(escapeSearchRegex(query.trim()), "i");
       filter.$or = [
         { title: searchRegex },
         { description: searchRegex },
@@ -449,52 +520,26 @@ async function searchProjects(
       ];
     }
 
-    // Category filter
-    if (category && category.trim()) {
-      filter.category = new RegExp(category.trim(), "i");
-    }
 
-    // Price range filter - handle different pricing types
-    if (priceMin !== undefined || priceMax !== undefined) {
-      const priceConditions: any[] = [];
-
-      if (priceMin && priceMax) {
-        // Check if fixed price is in range
-        priceConditions.push({
-          "pricing.type": "fixed",
-          "pricing.amount": { $gte: parseFloat(priceMin), $lte: parseFloat(priceMax) },
-        });
-        // Check if price range overlaps
-        priceConditions.push({
-          "pricing.type": "unit",
-          $or: [
-            {
-              "pricing.priceRange.min": { $lte: parseFloat(priceMax) },
-              "pricing.priceRange.max": { $gte: parseFloat(priceMin) },
-            },
-          ],
-        });
-      } else if (priceMin) {
-        priceConditions.push({
-          $or: [
-            { "pricing.type": "fixed", "pricing.amount": { $gte: parseFloat(priceMin) } },
-            { "pricing.type": "unit", "pricing.priceRange.max": { $gte: parseFloat(priceMin) } },
-          ],
-        });
-      } else if (priceMax) {
-        priceConditions.push({
-          $or: [
-            { "pricing.type": "fixed", "pricing.amount": { $lte: parseFloat(priceMax) } },
-            { "pricing.type": "unit", "pricing.priceRange.min": { $lte: parseFloat(priceMax) } },
-          ],
-        });
-      }
-
-      if (priceConditions.length > 0) {
-        filter.$and = filter.$and || [];
-        filter.$and.push({ $or: priceConditions });
-      }
-    }
+    const priceMinValue = priceMin === undefined || priceMin === "" ? undefined : Number(priceMin);
+    const priceMaxValue = priceMax === undefined || priceMax === "" ? undefined : Number(priceMax);
+    const platformSettings = priceMinValue !== undefined || priceMaxValue !== undefined
+      ? await PlatformSettings.getCurrentConfig()
+      : null;
+    const dimensions: ProjectSearchDimensions = {
+      services,
+      geographicArea,
+      priceModels,
+      projectTypes,
+      includedItems,
+      areasOfWork,
+      priceMin: priceMinValue,
+      priceMax: priceMaxValue,
+      commissionPercent: platformSettings?.commissionPercent || 0,
+      loyaltyDiscountPercent,
+      loyaltyDiscountMax,
+      category,
+    };
 
     const normalizeValue = (value?: string | null) =>
       value ? value.trim().toLowerCase() : "";
@@ -522,6 +567,35 @@ async function searchProjects(
 
     const escapeRegExp = (value: string) =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // Country gate shared by the geo and address-fallback branches: a
+    // noBorders project serves only its own country. The customer value may be
+    // a name ("belgium") or a code ("be"); both are accepted against the
+    // project's ISO countryCode, falling back to address matching when the
+    // project has no code recorded.
+    const projectPassesCountryGate = (distance: any, customerCountryParam: string): boolean => {
+      if (!Boolean(distance?.noBorders) || !customerCountryParam) return true;
+      const projectCountryCode = typeof distance?.countryCode === "string" ? distance.countryCode : null;
+      const customerUpper = customerCountryParam.toUpperCase();
+      if (projectCountryCode) {
+        if (projectCountryCode === customerUpper) return true;
+        const mapped = getCountryCode(customerCountryParam);
+        return mapped != null && projectCountryCode === mapped;
+      }
+      const projectAddress = normalizeValue(distance?.address);
+      return Boolean(projectAddress) && projectAddress.includes(customerCountryParam);
+    };
+
+    // Address predicate shared by the non-geo branch and the geo fallback for
+    // projects without geocoded coordinates (client bug list #20).
+    const projectMatchesCustomerAddress = (project: any, parts: string[], customerCountryParam: string): boolean => {
+      const distance = project.distance || {};
+      if (!projectPassesCountryGate(distance, customerCountryParam)) return false;
+      const projectAddress = normalizeValue(distance.address);
+      if (!projectAddress) return false;
+      if (parts.length === 0) return false;
+      return parts.some((part) => projectAddress.includes(part));
+    };
 
     const customerLatValue = parseCoordinate(customerLat);
     const customerLonValue = parseCoordinate(customerLon);
@@ -551,7 +625,7 @@ async function searchProjects(
     // Execute query with pagination and populate professional info
     console.log('[SEARCH] Project filter:', JSON.stringify(filter, null, 2));
 
-    const baseQuery = Project.find(filter).sort({ createdAt: -1 });
+    const baseQuery = Project.find(filter).sort({ createdAt: -1, _id: 1 });
 
     let projects: any[] = [];
     let total = 0;
@@ -580,9 +654,16 @@ async function searchProjects(
       ];
 
       if (customerCountryValue) {
-        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2)
-        // Fall back to regex on address for backwards compatibility
+        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2).
+        // The customer value may be a name ("belgium") or a code ("be"), so
+        // both spellings are accepted. Fall back to regex on address for
+        // backwards compatibility.
         const countryCodeUpper = customerCountryValue.toUpperCase();
+        const mappedCountryCode = getCountryCode(customerCountryValue);
+        const acceptedCountryCodes =
+          mappedCountryCode && mappedCountryCode !== countryCodeUpper
+            ? [countryCodeUpper, mappedCountryCode]
+            : [countryCodeUpper];
         const countryRegex = new RegExp(escapeRegExp(customerCountryValue), "i");
         // noBorders=true means "don't cross borders" (stay in same country)
         // noBorders=false means project can serve customers across borders
@@ -597,7 +678,7 @@ async function searchProjects(
                   { "distance.noBorders": true },
                   {
                     $or: [
-                      { "distance.countryCode": countryCodeUpper },
+                      { "distance.countryCode": { $in: acceptedCountryCodes } },
                       // Fallback: match address if countryCode not set
                       {
                         $and: [
@@ -617,9 +698,12 @@ async function searchProjects(
       geoPipeline.push({
         $match: {
           $expr: {
+            // Coerce the radius defensively: a non-numeric maxKmRange on any
+            // single project must not fail the whole geo search ($multiply
+            // throws on strings), and numeric strings still match.
             $lte: [
               "$geoDistanceMeters",
-              { $multiply: ["$distance.maxKmRange", 1000] },
+              { $multiply: [{ $convert: { input: "$distance.maxKmRange", to: "double", onError: null, onNull: null } }, 1000] },
             ],
           },
         },
@@ -640,10 +724,11 @@ async function searchProjects(
           $sort: {
             locationExactMatch: -1,
             createdAt: -1,
+            _id: 1,
           },
         });
       } else {
-        geoPipeline.push({ $sort: { createdAt: -1 } });
+        geoPipeline.push({ $sort: { createdAt: -1, _id: 1 } });
       }
 
       geoPipeline.push({
@@ -654,16 +739,47 @@ async function searchProjects(
       });
 
       if (needsFullSet) {
-        geoPipeline.push({ $limit: PROJECT_CAP });
         projects = await Project.aggregate(geoPipeline);
-        total = projects.length;
-        if (projects.length >= PROJECT_CAP) {
-          console.warn(
-            `[Search Performance] Project popularity/rating sort hit the ${PROJECT_CAP}-row cap (geo). ` +
-            `minRating/popularity results beyond this cap are not reflected in pagination. ` +
-            `Consider denormalizing project rating stats.`
+        // $geoNear only sees projects with geocoded coordinates. Projects
+        // without a usable distance.location never match, whatever their
+        // radius is — fall back to the same address matching as the non-geo
+        // path so a small-radius project on the same street is still found
+        // (client bug list #20).
+        try {
+          const unlocated = await Project.find({
+            $and: [
+              filter,
+              {
+                $or: [
+                  { "distance.location": { $exists: false } },
+                  { "distance.location.coordinates.1": { $exists: false } },
+                ],
+              },
+            ],
+          }).lean();
+          const seen = new Set(projects.map((project: any) => String(project._id)));
+          // The radius of an unlocated project cannot be verified, so only a
+          // street-level address match qualifies (city alone is not enough).
+          // Without a street-level part the project stays excluded.
+          const streetPart = locationParts.length > 0 ? locationParts[0] : '';
+          const fallbackMatches = streetPart
+            ? unlocated.filter(
+              (project: any) =>
+                !seen.has(String(project._id)) &&
+                normalizeValue(project.distance?.address).includes(streetPart) &&
+                projectMatchesCustomerAddress(project, locationParts, customerCountryValue)
+            )
+            : [];
+          fallbackMatches.sort(
+            (a: any, b: any) =>
+              new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime() ||
+              String(a._id).localeCompare(String(b._id))
           );
+          projects = [...projects, ...fallbackMatches];
+        } catch (fallbackError) {
+          console.error("Project geo address-fallback failed:", fallbackError);
         }
+        total = projects.length;
       } else {
         geoPipeline.push({
           $facet: {
@@ -687,14 +803,8 @@ async function searchProjects(
         );
       }
     } else if (needsFullSet) {
-      projects = await Project.find(filter).sort({ createdAt: -1 }).limit(PROJECT_CAP).lean();
+      projects = await Project.find(filter).sort({ createdAt: -1, _id: 1 }).lean();
       total = projects.length;
-      if (projects.length >= PROJECT_CAP) {
-        console.warn(
-          `[Search Performance] Project popularity/rating sort hit the ${PROJECT_CAP}-row cap. ` +
-          `Consider denormalizing project rating stats.`
-        );
-      }
     } else {
       [projects, total] = await Promise.all([
         baseQuery.skip(skip).limit(limit).lean(),
@@ -705,35 +815,9 @@ async function searchProjects(
     console.log("[SEARCH] Found", total, "projects, returning", projects.length);
 
     if (hasLocationFilter && !usedGeoSearch) {
-      filteredResults = projects.filter((project: any) => {
-        const distance = project.distance || {};
-        const projectAddress = normalizeValue(distance.address);
-        const projectCountryCode = typeof distance.countryCode === "string" ? distance.countryCode : null;
-        const noBorders = Boolean(distance.noBorders);
-
-        // noBorders=true means "don't cross borders" (stay in same country)
-        // When noBorders is true, only show to customers in matching country
-        if (noBorders && customerCountryValue) {
-          const customerCountryUpper = customerCountryValue.toUpperCase();
-          // Prefer matching by countryCode, fallback to address matching
-          const countryMatches = projectCountryCode
-            ? projectCountryCode === customerCountryUpper
-            : projectAddress?.includes(customerCountryValue);
-          if (!countryMatches) {
-            return false;
-          }
-        }
-
-        if (!projectAddress) {
-          return false;
-        }
-
-        if (locationParts.length === 0) {
-          return false;
-        }
-
-        return locationParts.some((part) => projectAddress.includes(part));
-      });
+      filteredResults = projects.filter((project: any) =>
+        projectMatchesCustomerAddress(project, locationParts, customerCountryValue)
+      );
 
       if (locationValue) {
         const exactMatches = filteredResults.filter((project: any) => {
@@ -748,12 +832,68 @@ async function searchProjects(
       }
     }
 
-    let baseResults: any[] = filteredResults ?? projects;
+    let locationCandidates: any[] = filteredResults ?? projects;
+    const locationProfessionalIds = Array.from(new Set(locationCandidates.map((project: any) => toObjectIdString(project.professionalId)).filter(Boolean)));
+    const professionalsData: any[] = [];
+    for (let index = 0; index < locationProfessionalIds.length; index += SEARCH_BATCH_SIZE) {
+      const professionals = await User.find({ _id: { $in: locationProfessionalIds.slice(index, index + SEARCH_BATCH_SIZE) } })
+        .select("name username email businessInfo.description businessInfo.city businessInfo.country businessInfo.website businessInfo.timezone hourlyRate currency profileImage professionalLevel adminTags createdAt companyAvailability companyBlockedDates companyBlockedRanges")
+        .lean();
+      professionalsData.push(...professionals);
+    }
+    const professionalMap = new Map(professionalsData.map((person: any) => [person._id.toString(), person]));
+    const scheduleResults = new Map<string, { main: any; subprojects: any[]; matchesWindow: boolean }>();
+
+    if (startDateFrom || startDateTo) {
+      const hasDateWindow = true;
+      const chunks: any[][] = [];
+      for (let index = 0; index < locationCandidates.length; index += 8) chunks.push(locationCandidates.slice(index, index + 8));
+      for (const chunk of chunks) {
+        await Promise.all(chunk.map(async (project: any) => {
+          const professionalId = toObjectIdString(project.professionalId);
+          const professional = professionalId ? professionalMap.get(professionalId) : null;
+          if (!professional) return;
+          const timezone = resolveEffectiveScheduleTimeZone(professional);
+          const lowerDate = startDateFrom ? DateTime.fromISO(startDateFrom.toISOString().slice(0, 10), { zone: timezone }).startOf("day") : null;
+          const boundedProfessional = lowerDate && lowerDate.toMillis() > DateTime.now().setZone(timezone).startOf("day").toMillis()
+            ? { ...professional, companyBlockedRanges: [...(professional.companyBlockedRanges || []), { startDate: new Date(), endDate: lowerDate.minus({ milliseconds: 1 }).toUTC().toJSDate(), reason: "search-date-lower-bound" }] }
+            : professional;
+          const packages = Array.isArray(project.subprojects) ? project.subprojects : [];
+          const proposalsFor = async (subprojectIndex?: number) => {
+            const subproject = typeof subprojectIndex === "number" ? packages[subprojectIndex] : null;
+            const minQuantity = Math.max(1, Number(subproject?.pricing?.minOrderQuantity) || 1);
+            const quantity = subproject?.pricing?.type === "unit" && subproject?.pricing?.durationBasis === "per_unit" ? minQuantity : 1;
+            return buildProjectScheduleProposalsWithData(project, boundedProfessional, subprojectIndex, undefined, undefined, quantity);
+          };
+          const mainIndex = !project.executionDuration?.value && packages.length > 0 ? 0 : undefined;
+          const main = await proposalsFor(mainIndex);
+          const subprojectProposals = await Promise.all(packages.map((_subproject: any, index: number) => proposalsFor(index)));
+          const availableDates = packages.length ? subprojectProposals : [main];
+          const matchesDate = availableDates.some((proposal: any) => {
+            if (!proposal?.earliestBookableDate) return false;
+            const localDay = DateTime.fromJSDate(new Date(proposal.earliestBookableDate), { zone: timezone }).toISODate();
+            if (!localDay) return false;
+            const lower = startDateFrom?.toISOString().slice(0, 10);
+            const upper = startDateTo?.toISOString().slice(0, 10);
+            return (!lower || localDay >= lower) && (!upper || localDay <= upper);
+          });
+          if (hasDateWindow && matchesDate) {
+            scheduleResults.set(project._id.toString(), { main, subprojects: subprojectProposals, matchesWindow: true });
+          } else if (hasDateWindow) {
+            scheduleResults.set(project._id.toString(), { main, subprojects: subprojectProposals, matchesWindow: false });
+          }
+        }));
+      }
+      locationCandidates = locationCandidates.filter((project: any) => scheduleResults.get(project._id.toString())?.matchesWindow);
+    }
+
+    const candidateResults = locationCandidates.filter((project: any) => projectMatchesDimensions(project, dimensions));
+    let baseResults: any[] = candidateResults;
     let projectRatingMap: Map<string, { avgRating: number; totalReviews: number }> | null = null;
 
     if (needsFullSet) {
-      const workingIds = baseResults.map((p: any) => p._id).filter(Boolean);
-      projectRatingMap = await aggregateProjectRatings(workingIds);
+      const workingIds = locationCandidates.map((p: any) => p._id).filter(Boolean);
+      projectRatingMap = await aggregateProjectRatingsInBatches(workingIds);
       if (minRating > 0) {
         baseResults = baseResults.filter((p: any) => {
           const r = projectRatingMap!.get(p._id?.toString());
@@ -775,38 +915,141 @@ async function searchProjects(
       }
     }
 
-    const isPaginatedInMemory = Boolean(filteredResults) || needsFullSet;
-    const totalCount = isPaginatedInMemory ? baseResults.length : total;
-    const finalResults = isPaginatedInMemory ? baseResults.slice(skip, skip + limit) : baseResults;
+    const facetDimensions: Array<[keyof ProjectSearchDimensions, string]> = [
+      ["services", "services"], ["geographicArea", "geographicArea"],
+      ["priceModels", "priceModels"], ["projectTypes", "projectTypes"],
+      ["includedItems", "includedItems"], ["areasOfWork", "areasOfWork"],
+      ["priceMin", "price"], ["priceMax", "price"], ["category", "categories"],
+    ];
+    const facetOwnerMatches = (project: any, omit: "levels" | "tags" | null = null, includeRating = true) => {
+      const professional = professionalMap.get(toObjectIdString(project.professionalId));
+      if (!professional) return false;
+      if (includeRating && minRating > 0 && (projectRatingMap?.get(project._id.toString())?.avgRating || 0) < minRating) return false;
+      if (omit !== "levels" && professionalLevels.length && !professionalLevels.some((value) => normalizeSearchValue(value) === normalizeSearchValue(professional.professionalLevel))) return false;
+      if (omit !== "tags" && adminTags.length && !adminTags.some((value) => (professional.adminTags || []).some((tag: string) => normalizeSearchValue(value) === normalizeSearchValue(tag)))) return false;
+      return true;
+    };
+    const facetProjects = new Map<string, any[]>();
+    for (const [dimension, facetName] of facetDimensions) {
+      if (!dimensions[dimension] || (Array.isArray(dimensions[dimension]) && (dimensions[dimension] as string[]).length === 0)) {
+        facetProjects.set(facetName, candidateResults.filter((project: any) => facetOwnerMatches(project)));
+        continue;
+      }
+      const withoutFacet = dimension === "priceMin" || dimension === "priceMax"
+        ? { ...dimensions, priceMin: undefined, priceMax: undefined }
+        : { ...dimensions, [dimension]: undefined };
+      facetProjects.set(facetName, locationCandidates.filter((project: any) => projectMatchesDimensions(project, withoutFacet) && facetOwnerMatches(project)));
+    }
+    const filteredByOwner = candidateResults.filter((project: any) => facetOwnerMatches(project, null, false));
+    baseResults = filteredByOwner.filter((project: any) => minRating === 0 || (projectRatingMap?.get(project._id.toString())?.avgRating || 0) >= minRating);
+    if (isPopularitySort) {
+      baseResults.sort((a: any, b: any) => {
+        const aRating = projectRatingMap?.get(a._id.toString()) || { avgRating: 0, totalReviews: 0 };
+        const bRating = projectRatingMap?.get(b._id.toString()) || { avgRating: 0, totalReviews: 0 };
+        return bRating.totalReviews - aRating.totalReviews || bRating.avgRating - aRating.avgRating || a._id.toString().localeCompare(b._id.toString());
+      });
+    }
 
-    // Batch-load professionals to avoid N+1 queries
-    const professionalIdSet = new Set(
-      finalResults
-        .map((p: any) => toObjectIdString(p.professionalId))
-        .filter(Boolean)
-    );
-    const professionalIds = Array.from(professionalIdSet);
-
-    // Fetch all professionals in a single query
-    const professionalsData = professionalIds.length > 0
-      ? await User.find({ _id: { $in: professionalIds } })
-        .select(
-          "name username email businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency profileImage professionalLevel adminTags createdAt companyAvailability companyBlockedDates companyBlockedRanges"
-        )
-        .lean()
-      : [];
+    const countDistinctProjectValues = (rows: any[], extract: (project: any) => unknown[]) => {
+      const counts: Record<string, number> = {};
+      const labels = new Map<string, string>();
+      for (const project of rows) {
+        const seen = new Set<string>();
+        for (const value of extract(project)) {
+          const label = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+          const key = normalizeSearchValue(label);
+          if (!key) continue;
+          labels.set(key, labels.get(key) || label);
+          seen.add(key);
+        }
+        for (const key of seen) {
+          const label = labels.get(key)!;
+          counts[label] = (counts[label] || 0) + 1;
+        }
+      }
+      return counts;
+    };
+    const facetResults: any = {
+      categories: countDistinctProjectValues(facetProjects.get("categories") || candidateResults, (p) => [p.category]),
+      services: countDistinctProjectValues(facetProjects.get("services") || candidateResults, (p) => [p.service, ...(p.services || []).map((s: any) => s?.name || s?.service || s?.serviceName)]),
+      areasOfWork: countDistinctProjectValues(facetProjects.get("areasOfWork") || candidateResults, (p) => [p.areaOfWork, ...(p.services || []).map((s: any) => s?.areaOfWork)]),
+      priceModels: countDistinctProjectValues(facetProjects.get("priceModels") || candidateResults, (p) => {
+        const packages = p.subprojects?.length ? p.subprojects : [{ pricing: p.pricing || { type: p.priceModel } }];
+        return packages.filter((subproject: any) => projectMatchesPrice({ subprojects: [subproject] }, { ...dimensions, priceModels: undefined })).map((subproject: any) => subproject.pricing?.type);
+      }),
+      projectTypes: countDistinctProjectValues(facetProjects.get("projectTypes") || candidateResults, (p) => (p.subprojects || []).flatMap((s: any) => s?.projectType || [])),
+      includedItems: countDistinctProjectValues(facetProjects.get("includedItems") || candidateResults, (p) => (p.subprojects || []).flatMap((s: any) => (s?.included || []).map((i: any) => i?.name))),
+      professionalLevels: {},
+      adminTags: {},
+      minRating: { any: filteredByOwner.length, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 },
+    };
+    const levelRows = candidateResults.filter((project: any) => facetOwnerMatches(project, "levels"));
+    const tagRows = candidateResults.filter((project: any) => facetOwnerMatches(project, "tags"));
+    facetResults.professionalLevels = countDistinctProjectValues(levelRows, (p) => {
+      const professional = professionalMap.get(toObjectIdString(p.professionalId));
+      return [professional?.professionalLevel];
+    });
+    facetResults.adminTags = countDistinctProjectValues(tagRows, (p) => {
+      const professional = professionalMap.get(toObjectIdString(p.professionalId));
+      return professional?.adminTags || [];
+    });
+    for (const threshold of [1, 2, 3, 4, 5]) {
+      facetResults.minRating[String(threshold)] = filteredByOwner.filter((project: any) => (projectRatingMap?.get(project._id.toString())?.avgRating || 0) >= threshold).length;
+    }
+    const selectedFacetValues: Array<[Record<string, number>, string[]]> = [
+      [facetResults.professionalLevels, professionalLevels], [facetResults.adminTags, adminTags],
+      [facetResults.services, services], [facetResults.areasOfWork, areasOfWork],
+      [facetResults.priceModels, priceModels], [facetResults.projectTypes, projectTypes],
+      [facetResults.includedItems, includedItems], [facetResults.categories, category ? [category] : []],
+    ];
+    for (const [counts, values] of selectedFacetValues) for (const value of values) {
+      if (!Object.keys(counts).some((candidate) => normalizeSearchValue(candidate) === normalizeSearchValue(value))) counts[value] = 0;
+    }
+    if (!isPopularitySort && !usedGeoSearch) {
+      if (isRelevanceSort(sortBy)) {
+        // Client bug list #4a: the default / "Most relevant" sort ranks by a
+        // real relevance score (level, admin tags, keyword/service/category
+        // match, rating, reviews). Any other explicit sort keeps the legacy
+        // newest-first behaviour. Sorting happens before the pagination slice
+        // below, so totals stay consistent.
+        const levelConfig = await getCachedLevelConfig().catch(() => null);
+        const rankByLevelName = new Map(
+          ((levelConfig as any)?.levels || []).map((level: any) => [level.name, Number(level.order) || 0]),
+        );
+        const queryText = typeof query === 'string' ? query : '';
+        const ranked = sortProjectsByRelevance(
+          baseResults.map((project: any) => ({
+            project,
+            professional: professionalMap.get(toObjectIdString(project.professionalId)),
+            rating: projectRatingMap?.get(project._id.toString()),
+          })),
+          {
+            query: queryText,
+            category,
+            services,
+            levelRankOf: (levelName) => (rankByLevelName.get(levelName || '') as number) || 0,
+          },
+        );
+        baseResults = ranked.map(({ project }) => project);
+      } else {
+        baseResults.sort((a: any, b: any) => (new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()) || a._id.toString().localeCompare(b._id.toString()));
+      }
+    }
+    const totalCount = baseResults.length;
+    const finalResults = baseResults.slice(skip, skip + limit);
 
     // Aggregate ratings per project (not per professional)
     if (!projectRatingMap) {
       const projectIds = finalResults.map((p: any) => p._id).filter(Boolean);
-      projectRatingMap = await aggregateProjectRatings(projectIds);
+      projectRatingMap = await aggregateProjectRatingsInBatches(projectIds);
     }
 
-    // Create a lookup map for quick access
-    const professionalMap = new Map(
-      professionalsData.map((p: any) => [p._id.toString(), p])
-    );
     const shouldLogAvailability = process.env.NODE_ENV !== "production";
+    const getSearchQuantity = (project: any, subprojectIndex?: number) => {
+      const subproject = typeof subprojectIndex === "number" ? project.subprojects?.[subprojectIndex] : null;
+      const minQuantity = Math.max(1, Number(subproject?.pricing?.minOrderQuantity) || 1);
+      return subproject?.pricing?.type === "unit" && subproject?.pricing?.durationBasis === "per_unit" ? minQuantity : 1;
+    };
 
     const resultsWithAvailability = await Promise.all(
       finalResults.map(async (project: any) => {
@@ -826,6 +1069,7 @@ async function searchProjects(
           }
 
           const projectIdStr = project._id?.toString?.() || project._id;
+          const cachedSchedule = scheduleResults.get(projectIdStr);
           const projectRatings = projectRatingMap.get(projectIdStr) || { avgRating: 0, totalReviews: 0 };
           const professionalSummary = {
             _id: professional._id,
@@ -844,10 +1088,13 @@ async function searchProjects(
           // Get main project availability - use first subproject
           const hasMainDuration = project.executionDuration?.value;
           const defaultSubprojectIndex = (!hasMainDuration && project.subprojects?.length > 0) ? 0 : undefined;
-          const proposals = await buildProjectScheduleProposalsWithData(
+          const proposals = cachedSchedule?.main ?? await buildProjectScheduleProposalsWithData(
             project,
             professional,
-            defaultSubprojectIndex
+            defaultSubprojectIndex,
+            undefined,
+            undefined,
+            getSearchQuantity(project, defaultSubprojectIndex)
           );
           if (!proposals && shouldLogAvailability) {
             console.warn("[SEARCH] Missing main proposals", {
@@ -862,10 +1109,13 @@ async function searchProjects(
           const subprojectsWithAvailability = await Promise.all(
             (project.subprojects || []).map(async (subproject: any, index: number) => {
               try {
-                const subprojectProposals = await buildProjectScheduleProposalsWithData(
+                const subprojectProposals = cachedSchedule?.subprojects[index] ?? await buildProjectScheduleProposalsWithData(
                   project,
                   professional,
-                  index
+                  index,
+                  undefined,
+                  undefined,
+                  getSearchQuantity(project, index)
                 );
                 if (!subprojectProposals && shouldLogAvailability) {
                   console.warn("[SEARCH] Missing subproject proposals", {
@@ -926,6 +1176,7 @@ async function searchProjects(
 
     res.json({
       results: resultsWithAvailability,
+      facets: facetResults,
       pagination: {
         total: totalCount,
         page: Math.ceil(skip / limit) + 1,
@@ -945,17 +1196,22 @@ async function searchProjects(
 export const autocomplete = async (req: Request, res: Response) => {
   try {
     const { q = "", type = "professionals" } = req.query;
+    if (typeof q !== "string" || q.length > 300 || typeof type !== "string") {
+      return res.status(400).json({ error: "Invalid autocomplete query" });
+    }
 
     if (!q || (q as string).trim().length < 2) {
       return res.json({ suggestions: [] });
     }
 
-    const searchRegex = new RegExp((q as string).trim(), "i");
+    const searchRegex = new RegExp(escapeSearchRegex(q.trim()), "i");
 
     if (type === "professionals") {
       const professionals = await User.find({
         role: "professional",
         professionalStatus: "approved",
+        deletedAt: null,
+        isAnonymized: { $ne: true },
         $or: [
           { name: searchRegex },
           { username: searchRegex },
@@ -975,6 +1231,8 @@ export const autocomplete = async (req: Request, res: Response) => {
       const uniqueCategories = await User.distinct("serviceCategories", {
         role: "professional",
         professionalStatus: "approved",
+        deletedAt: null,
+        isAnonymized: { $ne: true },
         serviceCategories: searchRegex,
       });
 

@@ -11,6 +11,14 @@ import { notifyBookingCancelledAndRefunded } from "../../utils/notifications/not
 import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
 import { notify } from '../../utils/notifications/notify';
+import { maskCancellationRequestForAnonymizedParties } from '../../utils/accountAnonymity';
+import {
+  ensureRefundInvoices,
+  isBookingStarted,
+  leavesBillableRemainder,
+  pruneFutureResourcePlanDays,
+  retainPastBookingCalendar,
+} from "../../utils/refundFinalization";
 
 const VALID_STATUSES = ["pending", "processing", "negotiating", "escalated", "approved", "denied"] as const;
 const ADMIN_ACTIONABLE_STATUSES = ["pending", "escalated"];
@@ -40,19 +48,24 @@ export const listCancellationRequests = async (req: Request, res: Response) => {
           path: "booking",
           select: "bookingNumber status customer professional payment scheduledStartDate",
           populate: [
-            { path: "customer", select: "name email" },
-            { path: "professional", select: "name email" },
+            { path: "customer", select: "name email isAnonymized deletedAt" },
+            { path: "professional", select: "name email isAnonymized deletedAt" },
           ],
         })
-        .populate("requestedBy", "name email")
-        .populate("resolvedBy", "name email")
+        .populate("requestedBy", "name email isAnonymized deletedAt")
+        .populate("resolvedBy", "name email isAnonymized deletedAt")
         .lean(),
       CancellationRequest.countDocuments(filter),
     ]);
 
     return res.json({
       success: true,
-      data: { items, total, page, limit },
+      data: {
+        items: items.map((item) => maskCancellationRequestForAnonymizedParties(item)),
+        total,
+        page,
+        limit,
+      },
     });
   } catch (error: any) {
     console.error("List cancellation requests error:", error);
@@ -70,17 +83,20 @@ export const getCancellationRequest = async (req: Request, res: Response) => {
       .populate({
         path: "booking",
         populate: [
-          { path: "customer", select: "name email" },
-          { path: "professional", select: "name email" },
+          { path: "customer", select: "name email isAnonymized deletedAt" },
+          { path: "professional", select: "name email isAnonymized deletedAt" },
         ],
       })
-      .populate("requestedBy", "name email")
-      .populate("resolvedBy", "name email")
+      .populate("requestedBy", "name email isAnonymized deletedAt")
+      .populate("resolvedBy", "name email isAnonymized deletedAt")
       .lean();
     if (!item) {
       return res.status(404).json({ success: false, msg: "Not found" });
     }
-    return res.json({ success: true, data: item });
+    return res.json({
+      success: true,
+      data: maskCancellationRequestForAnonymizedParties(item),
+    });
   } catch (error: any) {
     console.error("Get cancellation request error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load cancellation request" });
@@ -153,9 +169,8 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       return res.status(404).json({ success: false, msg: "Linked booking not found" });
     }
 
-    const resolvedReason = resolutionNote
-      ? `${cancellation.reason}\n\nAdmin resolution note: ${resolutionNote}`.slice(0, 500)
-      : cancellation.reason;
+    const resolvedReason = cancellation.reason;
+    const adminResolutionNote = resolutionNote?.trim() || undefined;
 
     let refundAmount = 0;
     let refundedAt: Date | undefined;
@@ -177,7 +192,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     if (hasPayment && booking.payment && refundableStatuses.includes(booking.payment.status)) {
       try {
         const result = await executeRefund(String(booking._id), {
-          reason: resolvedReason,
+          reason: adminResolutionNote || 'Cancellation approved by admin',
           ...(customAmount !== undefined ? { amount: customAmount } : {}),
           actorId: adminObjectId,
         });
@@ -206,16 +221,21 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
 
     freshBooking.cancellation = {
       cancelledBy: cancellation.requestedBy,
-      reason: resolvedReason,
+      reason: resolvedReason.slice(0, 500),
       cancelledAt: new Date(),
       refundAmount: refundAmount || undefined,
+      ...(adminResolutionNote ? { adminResolutionNote } : {}),
     } as any;
+
+    const adminStatusNote = (adminResolutionNote
+      ? `Cancellation approved by admin: ${adminResolutionNote}`
+      : 'Cancellation approved by admin').slice(0, 500);
 
     if (freshBooking.status !== "cancelled" && freshBooking.status !== "refunded") {
       await (freshBooking as any).updateStatus(
         "cancelled",
         adminId,
-        `Cancellation approved by admin: ${resolvedReason}`
+        adminStatusNote
       );
     } else {
       freshBooking.statusHistory = freshBooking.statusHistory || [];
@@ -223,22 +243,35 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
         status: freshBooking.status,
         timestamp: new Date(),
         updatedBy: adminId,
-        note: `Cancellation approved by admin: ${resolvedReason}`,
+        note: adminStatusNote,
       } as any);
     }
 
     releaseScheduleSlots(freshBooking, adminId);
+    // A partial refund on a started booking keeps past planned days blocked
+    // and unplans only future days; anything else releases the whole calendar.
+    const partialRefundRemainder = leavesBillableRemainder(totalWithVat, refundAmount);
+    if (partialRefundRemainder && isBookingStarted(freshBooking)) {
+      pruneFutureResourcePlanDays(freshBooking);
+    }
     await freshBooking.save();
     try {
-      await releaseBookingCalendar(freshBooking._id);
+      if (partialRefundRemainder && isBookingStarted(freshBooking)) {
+        await retainPastBookingCalendar(freshBooking);
+      } else {
+        await releaseBookingCalendar(freshBooking._id);
+      }
     } catch (calendarError) {
-      // The cancellation is already effective; a failed release must not leave
-      // the request stuck in `processing`. The booking post-save hook records
-      // `calendarReleasePending` for the scheduled retry.
+      // The cancellation is already effective; a failed calendar update must
+      // not leave the request stuck in `processing`. The booking post-save hook
+      // records `calendarReleasePending` for the scheduled retry.
       console.error(
-        "Calendar release failed after approving cancellation; retry queued",
+        "Calendar update failed after approving cancellation; retry queued",
         calendarError instanceof Error ? calendarError.name : typeof calendarError,
       );
+    }
+    if (partialRefundRemainder) {
+      void ensureRefundInvoices(String(freshBooking._id));
     }
 
     cancellation.status = "approved";
@@ -246,7 +279,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     cancellation.resolvedBy = new mongoose.Types.ObjectId(adminId);
     cancellation.refundAmount = refundAmount || undefined;
     cancellation.refundedAt = refundedAt;
-    if (resolutionNote) cancellation.reason = resolvedReason;
+    cancellation.adminResolutionNote = adminResolutionNote;
     await cancellation.save();
 
     try {
@@ -373,7 +406,7 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
       return res.status(notActionable.code).json({ success: false, msg: notActionable.msg });
     }
 
-    await cancellation.populate("requestedBy", "email name businessInfo username");
+    await cancellation.populate("requestedBy", "email name businessInfo username isAnonymized deletedAt");
 
     try {
       const requester: any = cancellation.requestedBy;

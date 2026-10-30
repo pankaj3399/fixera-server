@@ -17,12 +17,15 @@ import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
   getCustomerExtraCostNet,
+  resolveExtraCostScale,
 } from "../utils/invoiceAccounting";
 import {
   formatVatAnswerWithUnit,
   resolveInvoiceServiceUnit,
   tryNormalizeInvoiceUnit,
 } from "../utils/invoiceUnits";
+import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
+import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
 import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
 import { getInvoicePayment } from "../utils/invoiceSettlement";
@@ -83,6 +86,14 @@ interface InvoiceData {
   discounts?: { label: string; amount: number }[];
   actualStartDate?: Date;
   actualEndDate?: Date;
+  /** Partial-refund facts, rendered as an original-total/refund block. */
+  refund?: {
+    date?: Date | string;
+    amount: number;
+    reason?: string;
+    description?: string;
+    originalTotal?: number;
+  };
   selfBilling?: boolean;
   issuer?: {
     name?: string;
@@ -569,6 +580,35 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         doc.y = rowY + 20;
       }
 
+      // Partial refund: the totals above are already reduced. Show the
+      // original total and the refund facts (date, amount, reason) so the
+      // invoice reads as the current template minus the refund.
+      if (data.refund && data.refund.amount > 0) {
+        ensureSpace(64);
+        rowY = doc.y;
+        doc
+          .text("Original total", 50, rowY)
+          .text(formatCurrency(data.refund.originalTotal ?? 0, data.payment.currency), 450, rowY, { align: "right" });
+        doc.y = rowY + 20;
+        rowY = doc.y;
+        const refundDate = data.refund.date ? new Date(data.refund.date) : undefined;
+        const refundDateLabel = refundDate && !Number.isNaN(refundDate.getTime())
+          ? ` (${refundDate.toLocaleDateString("en-GB")})`
+          : "";
+        const refundLabel = `Refund${data.refund.reason ? `: ${data.refund.reason}` : ""}${refundDateLabel}`;
+        doc
+          .text(refundLabel, 50, rowY)
+          .text(`-${formatCurrency(data.refund.amount, data.payment.currency)}`, 450, rowY, { align: "right" });
+        doc.y = rowY + 20;
+        if (data.refund.description) {
+          ensureSpace(20);
+          rowY = doc.y;
+          doc.fontSize(9).text(data.refund.description, 50, rowY, { width: 500 });
+          doc.fontSize(10);
+          doc.y = rowY + 20;
+        }
+      }
+
       // VAT
       if (data.payment.reverseCharge) {
         ensureSpace(20);
@@ -672,9 +712,17 @@ export async function generateBookingInvoice(
     relatedInvoiceNumber?: string;
     kind?: "customer" | "self_bill";
     manualOverride?: ManualInvoiceOverride;
+    /**
+     * Partial-refund credit: render the override lines and totals verbatim
+     * (no rescaling to the stored payment, no plug/adjustment lines, no
+     * refund block — the credit itself documents the refund). Only used with
+     * manualOverride; the regular manual-correction path is untouched.
+     */
+    exactManualAmounts?: boolean;
   }
 ): Promise<{ invoiceNumber: string; pdfBuffer: Buffer }> {
   const manualOverride = options?.manualOverride;
+  const exactCredit = Boolean(options?.exactManualAmounts && manualOverride);
   if (manualOverride) {
     booking = applyManualInvoicePartyOverrides(booking, manualOverride);
     booking = {
@@ -748,6 +796,12 @@ export async function generateBookingInvoice(
   const invoiceDate = new Date();
   const currentQuote = booking.quoteVersions?.find((quote) => quote.version === booking.currentQuoteVersion)
     || booking.quoteVersions?.[booking.quoteVersions.length - 1];
+  // Commission is needed before the lines are built: milestone bookings bill
+  // the full amount of all milestones + options (the stored payment fields
+  // only carry the last charged milestone), and a partial refund reduces the
+  // service base the lines scale to.
+  const commissionPercent = Number(settings.commissionPercent) || 0;
+  const basis = normalizeInvoiceBasis(booking, commissionPercent);
   const checkoutQuantity = booking.checkoutSnapshot?.pricingType === "unit"
     ? Number(booking.checkoutSnapshot.quantity)
     : undefined;
@@ -772,6 +826,14 @@ export async function generateBookingInvoice(
     pricingOptions: (booking as any).__serviceConfigPricingOptions,
   });
   const manualLines = (booking as any).__manualInvoiceLines as ManualInvoiceLine[] | undefined;
+  const quotePricingLines = currentQuote?.pricingLines?.map((line, index) => ({
+    description: line.description,
+    amount: line.price * sign,
+    vatRate: line.vatRate,
+    ...(index === 0 && Number.isFinite(checkoutQuantity) && Number.isFinite(checkoutUnitPrice)
+      ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, ...(checkoutUnit ? { unit: checkoutUnit } : {}) }
+      : {}),
+  })) || [];
   const quoteLines = manualLines?.length
     ? manualLines.map((line) => ({
         description: line.description,
@@ -782,6 +844,11 @@ export async function generateBookingInvoice(
         unitPrice: line.unitPrice,
         unit: line.unit,
       }))
+    // Milestone bookings: the stored VAT breakdown only covers the last
+    // charged milestone, so the full-scope quote pricing lines describe the
+    // billed service instead.
+    : basis.useQuotePricingLines && quotePricingLines.length > 0
+    ? quotePricingLines
     : booking.payment.vatBreakdown?.length
     ? booking.payment.vatBreakdown.map((line, index) => ({
         description: line.description,
@@ -791,14 +858,7 @@ export async function generateBookingInvoice(
           ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, ...(checkoutUnit ? { unit: checkoutUnit } : {}) }
           : {}),
       }))
-    : currentQuote?.pricingLines?.map((line, index) => ({
-        description: line.description,
-        amount: line.price * sign,
-        vatRate: line.vatRate,
-        ...(index === 0 && Number.isFinite(checkoutQuantity) && Number.isFinite(checkoutUnitPrice)
-          ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, ...(checkoutUnit ? { unit: checkoutUnit } : {}) }
-          : {}),
-      })) || [];
+    : quotePricingLines;
 
   const selectedSubproject =
     typeof booking.selectedSubprojectIndex === "number" &&
@@ -819,25 +879,41 @@ export async function generateBookingInvoice(
       ? booking.payment.reverseCharge
       : fallbackReverseChargeHeuristic;
 
-  const optionLines = (booking.selectedExtraOptions || []).map((option) => {
-    const projectOption = (booking as any).project?.extraOptions?.find(
-      (entry: any, index: number) =>
-        String(entry?._id || index) === String(option.extraOptionId) ||
-        String(index) === String(option.extraOptionId)
-    );
-    return {
-      description: `Option: ${projectOption?.name || option.name || option.extraOptionId || "Extra option"}`,
-      amount: (option.bookedPrice ?? 0) * sign,
-      vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
-    };
-  });
-
+  // Milestone bookings render the full-scope quote pricing lines when
+  // available; the stored breakdown only covers the last charged milestone.
+  // Whether options are appended is decided below by the same net comparison
+  // as for every other booking, so they are never counted twice.
+  // Exact partial-refund credits carry a single self-contained line instead.
+  const optionLines = exactCredit
+    ? []
+    : (booking.selectedExtraOptions || []).map((option) => {
+        const projectOption = (booking as any).project?.extraOptions?.find(
+          (entry: any, index: number) =>
+            String(entry?._id || index) === String(option.extraOptionId) ||
+            String(index) === String(option.extraOptionId)
+        );
+        return {
+          description: `Option: ${projectOption?.name || option.name || option.extraOptionId || "Extra option"}`,
+          amount: (option.bookedPrice ?? 0) * sign,
+          vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
+        };
+      });
   const rawExtraCostTotal = (booking.extraCosts || []).reduce((sum, cost) => sum + (Number(cost.amount) || 0), 0);
-  const customerExtraCostNet = getCustomerExtraCostNet(booking.payment, rawExtraCostTotal);
+  // After an admin dispute resolution `extraCostTotal` is authoritative: the
+  // lines still carry the originally requested amounts, so both invoice sides
+  // render the resolved (possibly reduced or zeroed) amount instead.
+  const resolvedExtraCostScale = manualLines?.length
+    ? 1
+    : resolveExtraCostScale(booking.extraCosts, booking.extraCostTotal);
+  const customerExtraCostNet = roundInvoiceMoney(
+    getCustomerExtraCostNet(booking.payment, rawExtraCostTotal) * resolvedExtraCostScale,
+  );
   // Display extra costs at their price before the customer's loyalty discount;
   // the loyalty discount line carries that reduction so the total still
   // reconciles with the amount actually charged.
-  const extraCostLoyaltyDiscount = Math.max(0, Number(booking.payment.extraCostCustomerDiscount) || 0);
+  const extraCostLoyaltyDiscount = roundInvoiceMoney(
+    Math.max(0, Number(booking.payment.extraCostCustomerDiscount) || 0) * resolvedExtraCostScale,
+  );
   const extraCostDisplayNet = roundInvoiceMoney(
     customerExtraCostNet + (customerExtraCostNet < 0 ? -extraCostLoyaltyDiscount : extraCostLoyaltyDiscount),
   );
@@ -845,7 +921,6 @@ export async function generateBookingInvoice(
   // Extra costs charged per unit (see customerPricing) show each line at its
   // own customer price, so a unit line keeps a whole-cent unit price even next
   // to other extra costs. Earlier charges keep the proportional split.
-  const commissionPercent = Number(settings.commissionPercent) || 0;
   const perLineExtraCosts = (booking.extraCosts || []).map((cost) => commissionedExtraCostAmount(cost as any, commissionPercent));
   const extraCostsChargedPerLine = !manualLines?.length && perLineExtraCosts.length > 0
     && Math.abs(roundInvoiceMoney(perLineExtraCosts.reduce((sum, amount) => sum + amount, 0)) - extraCostDisplayNet) < 0.005;
@@ -860,7 +935,7 @@ export async function generateBookingInvoice(
           ? ` (${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""})`
           : "";
     const quantity = getExtraCostQuantity(cost);
-    return {
+    const line = {
       description: `Extra cost: ${cost.name}${unitDetail}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: (extraCostsChargedPerLine ? perLineExtraCosts[index] : cost.amount * extraCostScale) * sign,
       vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
@@ -870,7 +945,10 @@ export async function generateBookingInvoice(
         : undefined,
       ...(quantity != null && costUnit ? { unit: costUnit } : {}),
     };
-  });
+    // An admin-declined (zeroed) extra cost is excluded entirely, never
+    // printed as a zero line.
+    return Math.abs(line.amount) >= 0.005 ? line : undefined;
+  }).filter((line): line is NonNullable<typeof line> => Boolean(line));
   // VAT is always charged on the discounted amount, matching the charged
   // payment, while the line items render full prices and the discount lines
   // carry the reduction. Manual overrides replace every line, including the
@@ -879,9 +957,11 @@ export async function generateBookingInvoice(
   const extraCostVatRate = reverseCharge ? 0 : booking.payment.vatRate ?? 0;
   const extraCostVat = roundInvoiceMoney(extraCostNet * extraCostVatRate / 100);
   const extraCostGross = booking.payment.extraCostAmount != null
-    ? booking.payment.extraCostAmount * sign
+    ? roundInvoiceMoney(Number(booking.payment.extraCostAmount) * resolvedExtraCostScale) * sign
     : extraCostNet + extraCostVat;
-  const discount = booking.payment.discount;
+  // Milestone bookings recover the full discount from the stored last-slice;
+  // every other booking renders the stored discount as-is.
+  const discount = basis.discount;
   const serviceLoyaltyDiscount = Math.max(0, Number(discount?.loyaltyAmount) || 0);
   // Manual invoice overrides replace the lines wholesale and never render
   // discount lines, so their lines must not be grossed up.
@@ -965,7 +1045,8 @@ export async function generateBookingInvoice(
     quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
     checkoutSnapshot: booking.checkoutSnapshot,
     selectedExtraOptions: booking.selectedExtraOptions,
-    repeatBuyerDiscount: booking.payment.discount?.repeatBuyerAmount,
+    repeatBuyerDiscount: discount?.repeatBuyerAmount,
+    quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking as any),
   });
   const supplierOptionTotal = (booking.selectedExtraOptions || []).reduce(
     (sum, option) => sum + (Number(option.bookedPrice) || 0),
@@ -989,22 +1070,25 @@ export async function generateBookingInvoice(
     );
     return {
       description: `Option: ${projectOption?.name || option.name || option.extraOptionId || "Extra option"}`,
-      amount: (Number(option.bookedPrice) || 0) * sign,
+      amount: (Number(option.bookedPrice) || 0) * basis.supplierScale * sign,
       vatRate: supplierVatRate,
     };
   });
   const supplierExtraCostLines = (booking.extraCosts || []).map((cost) => {
     const supplierCostUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
     const quantity = getExtraCostQuantity(cost);
-    return {
+    const line = {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
-      amount: (Number(cost.amount) || 0) * sign,
+      amount: (Number(cost.amount) || 0) * resolvedExtraCostScale * basis.supplierScale * sign,
       vatRate: supplierVatRate,
       quantity,
-      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) : undefined,
+      unitPrice: Number.isFinite(Number(cost.unitPrice))
+        ? Number(cost.unitPrice) * (resolvedExtraCostScale !== 1 ? resolvedExtraCostScale : 1)
+        : undefined,
       ...(quantity != null && supplierCostUnit ? { unit: supplierCostUnit } : {}),
     };
-  });
+    return Math.abs(line.amount) >= 0.005 ? line : undefined;
+  }).filter((line): line is NonNullable<typeof line> => Boolean(line));
   const supplierLines = manualLines?.length
     ? manualLines.map((line) => ({
         description: line.description,
@@ -1017,7 +1101,7 @@ export async function generateBookingInvoice(
     : [
         {
           description: serviceLabel,
-          amount: (supplierServiceNet - supplierOptionTotal) * sign,
+          amount: (supplierServiceNet - supplierOptionTotal) * basis.supplierScale * sign,
           vatRate: supplierVatRate,
           quantity: hasUnits ? unitQuantity : undefined,
           unitPrice: hasUnitPrice ? unitPrice : undefined,
@@ -1032,11 +1116,17 @@ export async function generateBookingInvoice(
     vatRate: supplierVatRate,
     vatLabel: supplierVatDecision.vatLabel,
   });
-  const customerInvoiceNet = (booking.payment.netAmount ?? 0) * sign + extraCostNet;
-  const customerInvoiceVat = reverseCharge
-    ? 0
-    : (booking.payment.vatAmount ?? 0) * sign + extraCostVat;
-  const customerInvoiceTotal = (booking.payment.totalWithVat ?? 0) * sign + extraCostGross;
+  // The service base already reflects the full milestone scope and any
+  // partial refund (see normalizeInvoiceBasis); extra costs are added on top.
+  // Exact partial-refund credits bypass all of that: the override carries the
+  // credit totals verbatim.
+  const exactPayment = exactCredit && manualOverride ? manualOverride.payment : undefined;
+  const exactNet = Number(exactPayment?.netAmount) || 0;
+  const exactVat = Number(exactPayment?.vatAmount) || 0;
+  const exactTotal = Number(exactPayment?.totalWithVat) || 0;
+  const customerInvoiceNet = exactCredit ? exactNet * sign : basis.serviceNet * sign + extraCostNet;
+  const customerInvoiceVat = exactCredit ? exactVat * sign : basis.serviceVat * sign + extraCostVat;
+  const customerInvoiceTotal = exactCredit ? exactTotal * sign : basis.serviceTotal * sign + extraCostGross;
   const supplierNet = supplierTotals.netAmount;
   const billToCustomer = selfBilling
     ? {
@@ -1118,8 +1208,12 @@ export async function generateBookingInvoice(
 
     lineItems: selfBilling
       ? supplierLines
-      : (() => {
-          const customerServiceNet = Number(booking.payment.netAmount ?? 0) * sign;
+      : exactCredit
+        // Exact partial-refund credits render the override lines verbatim:
+        // no rescaling, no plug or adjustment lines.
+        ? quoteLines.map((line) => ({ ...line }))
+        : (() => {
+          const customerServiceNet = basis.serviceNet * sign;
           const quoteSourceTotal = quoteLines.reduce((sum, line) => sum + Math.abs(Number(line.amount) || 0), 0);
           const sourceIsCustomerNet = Math.abs(quoteSourceTotal - Math.abs(customerServiceNet)) < 0.02;
           const customerScale = sourceIsCustomerNet || supplierServiceNet <= 0
@@ -1176,12 +1270,26 @@ export async function generateBookingInvoice(
     vatExplanation: getVATExplanation(
       {
         vatRate: selfBilling ? supplierTotals.vatRate : (reverseCharge ? 0 : booking.payment.vatRate ?? 0),
-        vatAmount: selfBilling ? supplierTotals.vatAmount : (reverseCharge ? 0 : (booking.payment.vatAmount ?? 0) + extraCostVat),
+        vatAmount: selfBilling
+          ? supplierTotals.vatAmount
+          : exactCredit
+            ? exactVat
+            : (reverseCharge ? 0 : basis.serviceVat) + extraCostVat,
         total: selfBilling ? supplierTotals.totalWithVat : customerInvoiceTotal,
         reverseCharge: selfBilling ? supplierTotals.reverseCharge : reverseCharge,
       },
       selfBilling ? supplierVatCountry : customerCountry
     ),
+    // The credit note itself documents the refund; it carries no refund block.
+    refund: !exactCredit && basis.refund
+      ? {
+          date: basis.refund.date,
+          amount: basis.refund.amount,
+          reason: basis.refund.reason,
+          description: basis.refund.description,
+          originalTotal: roundInvoiceMoney(basis.serviceTotal + basis.refund.amount) + extraCostGross,
+        }
+      : undefined,
   };
 
   // Same rule as the Peppol UBL: settled is fully paid; a paid checkout with

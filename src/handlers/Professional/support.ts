@@ -4,9 +4,11 @@ import SupportTicket from "../../models/supportTicket";
 import MeetingRequest from "../../models/meetingRequest";
 import connectDB from "../../config/db";
 import { IUser } from "../../models/user";
+import { UserFacingError } from "../../utils/appErrors";
 import { params } from "../../utils/requestParams";
 import { createSupportItemForUser } from "../Support/service";
 import { serializeSupportTicketUser } from "../../utils/support/serializers";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 import { sendHandlerError } from "../../utils/handlerErrors";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
@@ -75,26 +77,34 @@ export const replyToMyTicket = async (req: Request, res: Response) => {
     }
 
     await connectDB();
-    const ticket = await SupportTicket.findOne({ _id: id, userId: user._id });
-    if (!ticket) return res.status(404).json({ success: false, msg: "Ticket not found" });
-    if (ticket.status === "closed") {
+    const existing = await SupportTicket.findOne({ _id: id, userId: user._id });
+    if (!existing) return res.status(404).json({ success: false, msg: "Ticket not found" });
+    if (existing.status === "closed") {
       return res.status(400).json({ success: false, msg: "Ticket is closed" });
     }
-
-    ticket.replies.push({
-      authorId: user._id,
-      authorRole: "professional",
-      body,
-      createdAt: new Date(),
+    const ticket = await withAnonymizationWriteFence([user._id], async (session) => {
+      const current = await SupportTicket.findOne({ _id: id, userId: user._id })
+        .session(session ?? null);
+      if (!current) return null;
+      if (current.status === "closed") {
+        throw new UserFacingError(400, "Ticket is closed", "VALIDATION");
+      }
+      current.replies.push({
+        authorId: user._id,
+        authorRole: "professional",
+        body,
+        createdAt: new Date(),
+      });
+      await current.save(session ? { session } : undefined);
+      return current;
     });
-    await ticket.save();
+    if (!ticket) return res.status(404).json({ success: false, msg: "Ticket not found" });
     return res.status(200).json({
       success: true,
       data: await serializeSupportTicketUser(ticket, { requester: requesterFromUser(user) }),
     });
   } catch (error) {
-    console.error("Reply to ticket error:", error);
-    return res.status(500).json({ success: false, msg: "Failed to reply" });
+    return sendHandlerError(res, error, "Failed to reply");
   }
 };
 
@@ -121,17 +131,19 @@ export const createMeetingRequest = async (req: Request, res: Response) => {
     }
 
     await connectDB();
-    const request = await MeetingRequest.create({
-      userId: user._id,
-      topic,
-      preferredTimes,
-      durationMinutes,
+    const request = await withAnonymizationWriteFence([user._id], async (session) => {
+      const [created] = await MeetingRequest.create([{
+        userId: user._id,
+        topic,
+        preferredTimes,
+        durationMinutes,
+      }], session ? { session } : undefined);
+      return created;
     });
 
     return res.status(201).json({ success: true, data: request });
   } catch (error) {
-    console.error("Create meeting request error:", error);
-    return res.status(500).json({ success: false, msg: "Failed to create meeting request" });
+    return sendHandlerError(res, error, "Failed to create meeting request");
   }
 };
 

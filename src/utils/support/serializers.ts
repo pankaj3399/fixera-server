@@ -12,6 +12,7 @@ import {
 } from "../../constants/support";
 import { presignSupportAttachment } from "./attachments";
 import { safeSupportMeetingLink } from "./meetingLink";
+import { ANONYMIZED_TEXT, ANONYMIZED_USER_NAME, isAnonymizedAccount } from "../accountAnonymity";
 
 type AnyDoc = Record<string, any>;
 
@@ -21,6 +22,8 @@ export interface SupportRequester {
   name?: string;
   email?: string;
   role?: string;
+  isAnonymized?: boolean;
+  deletedAt?: Date | string | null;
 }
 
 export interface SerializeSupportOptions {
@@ -45,12 +48,22 @@ export function supportRequesterFromPopulated(
 ): SupportRequester {
   const raw = plain(value);
   const id = raw._id ? String(raw._id) : fallback?._id ?? "";
+  const anonymized = isAnonymizedAccount(raw) || fallback?.isAnonymized === true;
+  const deletedAt = raw.deletedAt || fallback?.deletedAt || null;
   return {
     _id: id,
     id,
-    ...(raw.name || fallback?.name ? { name: raw.name || fallback?.name } : {}),
-    ...(raw.email || fallback?.email ? { email: raw.email || fallback?.email } : {}),
+    ...(anonymized || raw.name || fallback?.name
+      ? { name: anonymized ? ANONYMIZED_USER_NAME : raw.name || fallback?.name }
+      : {}),
+    ...(!anonymized && (raw.email || fallback?.email)
+      ? { email: raw.email || fallback?.email }
+      : {}),
     ...(raw.role || fallback?.role ? { role: raw.role || fallback?.role } : {}),
+    ...(anonymized || raw.isAnonymized === true || fallback?.isAnonymized === true
+      ? { isAnonymized: true }
+      : {}),
+    ...(deletedAt ? { deletedAt } : {}),
   };
 }
 
@@ -99,28 +112,44 @@ async function serializeAttachment(
   };
 }
 
-function serializeReplies(replies: unknown, includeAdminAuthorId: boolean) {
+function serializeReplies(
+  replies: unknown,
+  includeAdminAuthorId: boolean,
+  anonymizedAuthorId?: string | null,
+) {
   if (!Array.isArray(replies)) return [];
   return replies.map((reply) => {
     const raw = plain(reply);
+    const authorId = raw.authorId ? String(raw.authorId) : "";
     const isAdminReply = raw.authorRole === "admin";
     return {
       ...(raw._id ? { _id: String(raw._id) } : {}),
       // Owner-facing payloads must never expose admin user ids.
       authorId:
-        raw.authorId && (includeAdminAuthorId || !isAdminReply)
-          ? String(raw.authorId)
-          : "",
+        authorId && (includeAdminAuthorId || !isAdminReply) ? authorId : "",
       authorRole: raw.authorRole === "admin" ? "admin" : raw.authorRole === "customer" ? "customer" : "professional",
-      body: String(raw.body || ""),
+      body: anonymizedAuthorId && authorId === anonymizedAuthorId
+        ? ANONYMIZED_TEXT
+        : String(raw.body || ""),
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date(0).toISOString(),
     };
   });
 }
 
-function serializeMeeting(ticket: AnyDoc, includeAdminDetails: boolean) {
+function serializeMeeting(
+  ticket: AnyDoc,
+  includeAdminDetails: boolean,
+  requesterAnonymized = false,
+  requesterId = "",
+) {
   const meeting = plain(ticket.meeting);
   if (!meeting || !meeting.scheduledAt || !meeting.status) return null;
+  const cancelledByTarget = Boolean(
+    requesterAnonymized
+      && requesterId
+      && meeting.cancelledBy
+      && String(meeting.cancelledBy) === requesterId,
+  );
   const start = new Date(meeting.scheduledAt);
   const durationMinutes = Number(meeting.durationMinutes) || 30;
   const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
@@ -128,7 +157,7 @@ function serializeMeeting(ticket: AnyDoc, includeAdminDetails: boolean) {
   const assignedAdminName = includeAdminDetails
     ? admin.name || admin.email || null
     : null;
-  const meetingLink = safeSupportMeetingLink(meeting.meetingLink);
+  const meetingLink = requesterAnonymized ? null : safeSupportMeetingLink(meeting.meetingLink);
   return {
     status: meeting.status as SupportMeetingStatus,
     scheduledAt: start.toISOString(),
@@ -138,14 +167,16 @@ function serializeMeeting(ticket: AnyDoc, includeAdminDetails: boolean) {
     meetingLink,
     // Only a scheduled meeting with a persisted real link can be joined.
     // Cancelled/completed rows may keep the historical link, but not as active.
-    linkActive: meeting.status === "scheduled" && Boolean(meetingLink),
+    linkActive: !requesterAnonymized && meeting.status === "scheduled" && Boolean(meetingLink),
     linkAddedAt: meeting.linkAddedAt ? new Date(meeting.linkAddedAt).toISOString() : null,
     linkUpdatedAt: meeting.linkUpdatedAt ? new Date(meeting.linkUpdatedAt).toISOString() : null,
     confirmationEmailSentAt: meeting.linkEmailSentAt
       ? new Date(meeting.linkEmailSentAt).toISOString()
       : null,
     assignedAdminName,
-    cancellationReason: meeting.cancellationReason || null,
+    cancellationReason: cancelledByTarget
+      ? ANONYMIZED_TEXT
+      : meeting.cancellationReason || null,
     cancelledAt: meeting.cancelledAt ? new Date(meeting.cancelledAt).toISOString() : null,
     cancelledBy: meeting.cancelledByRole || null,
     preferredTimes: null,
@@ -164,8 +195,16 @@ async function serializeBase(
   const reasonLabel = supportReasonLabel(reasonId);
   const userType = resolveUserType(ticket, requester);
   const booking = serializeBooking(plain(ticket.booking));
-  const attachment = await serializeAttachment(plain(ticket.attachment), options.presign !== false);
-  const meeting = serializeMeeting(ticket, options.includeAdminDetails === true);
+  const requesterAnonymized = requester.isAnonymized === true;
+  const attachment = requesterAnonymized
+    ? null
+    : await serializeAttachment(plain(ticket.attachment), options.presign !== false);
+  const meeting = serializeMeeting(
+    ticket,
+    options.includeAdminDetails === true,
+    requesterAnonymized,
+    requester._id,
+  );
   const ticketStatus = (ticket.status || "open") as SupportTicketStatus;
   const displayStatus = ticket.kind === "meeting" && meeting?.status
     ? meeting.status
@@ -177,8 +216,8 @@ async function serializeBase(
     id,
     kind: ticket.kind === "meeting" ? "meeting" : "ticket",
     ticketNumber: ticket.ticketNumber || null,
-    subject: String(ticket.subject || ""),
-    description: String(ticket.description || ""),
+    subject: requesterAnonymized ? ANONYMIZED_TEXT : String(ticket.subject || ""),
+    description: requesterAnonymized ? ANONYMIZED_TEXT : String(ticket.description || ""),
     reason: reasonId,
     reasonLabel,
     status: displayStatus,
@@ -188,12 +227,18 @@ async function serializeBase(
       id: requester._id,
       ...(requester.name ? { name: requester.name } : {}),
       ...(requester.email ? { email: requester.email } : {}),
+      ...(requester.isAnonymized ? { isAnonymized: true } : {}),
+      ...(requester.deletedAt ? { deletedAt: requester.deletedAt } : {}),
     },
     requesterRole: userType,
     booking,
     attachments: attachment ? [attachment] : [],
     attachment,
-    replies: serializeReplies(ticket.replies, options.includeAdminDetails === true),
+    replies: serializeReplies(
+      ticket.replies,
+      options.includeAdminDetails === true,
+      requesterAnonymized ? requester._id : null,
+    ),
     meeting,
     tags: {
       reason: reasonId,
@@ -248,6 +293,8 @@ export async function serializeSupportTicketAdmin(
       ...(requester.name ? { name: requester.name } : {}),
       ...(requester.email ? { email: requester.email } : {}),
       role: requester.role || base.requesterRole,
+      ...(requester.isAnonymized ? { isAnonymized: true } : {}),
+      ...(requester.deletedAt ? { deletedAt: requester.deletedAt } : {}),
     },
     userId: {
       _id: requester._id,
@@ -255,6 +302,8 @@ export async function serializeSupportTicketAdmin(
       ...(requester.name ? { name: requester.name } : {}),
       ...(requester.email ? { email: requester.email } : {}),
       role: requester.role || base.requesterRole,
+      ...(requester.isAnonymized ? { isAnonymized: true } : {}),
+      ...(requester.deletedAt ? { deletedAt: requester.deletedAt } : {}),
     },
     meetingAdmin: adminUser,
     assignedAdmin: adminUser,
@@ -302,13 +351,14 @@ export function serializeLegacyMeetingRequest(
     : "pending";
   const ticketStatus: SupportTicketStatus =
     storedStatus === "cancelled" || storedStatus === "declined" ? "closed" : "open";
+  const requesterAnonymized = requester.isAnonymized === true;
 
   return {
     _id: id,
     id,
     kind: "meeting",
     ticketNumber: null,
-    subject: String(request.topic || ""),
+    subject: requesterAnonymized ? ANONYMIZED_TEXT : String(request.topic || ""),
     description: "",
     reason: null,
     reasonLabel: null,
@@ -319,6 +369,8 @@ export function serializeLegacyMeetingRequest(
       id: requester._id,
       ...(requester.name ? { name: requester.name } : {}),
       ...(requester.email ? { email: requester.email } : {}),
+      ...(requester.isAnonymized ? { isAnonymized: true } : {}),
+      ...(requester.deletedAt ? { deletedAt: requester.deletedAt } : {}),
     },
     requesterRole: "professional",
     booking: null,
@@ -340,7 +392,7 @@ export function serializeLegacyMeetingRequest(
       cancellationReason: null,
       cancelledAt: null,
       cancelledBy: null,
-      preferredTimes: request.preferredTimes || null,
+      preferredTimes: requesterAnonymized ? null : request.preferredTimes || null,
       adminResponse: request.adminResponse || null,
       legacy: true,
     },
@@ -360,10 +412,19 @@ export function serializeLegacyMeetingRequest(
 export function serializeLegacyMeetingRequestAdmin(input: IMeetingRequest | AnyDoc): AnyDoc {
   const base = serializeLegacyMeetingRequest(input);
   const requester = base.requester as AnyDoc;
+  const party = {
+    _id: requester._id,
+    id: requester._id,
+    name: requester.name,
+    email: requester.email,
+    role: "professional",
+    ...(requester.isAnonymized ? { isAnonymized: true } : {}),
+    ...(requester.deletedAt ? { deletedAt: requester.deletedAt } : {}),
+  };
   return {
     ...base,
-    user: { _id: requester._id, id: requester._id, name: requester.name, email: requester.email, role: "professional" },
-    userId: { _id: requester._id, id: requester._id, name: requester.name, email: requester.email, role: "professional" },
+    user: party,
+    userId: party,
     meetingAdmin: null,
     assignedAdmin: null,
     replyCount: 0,

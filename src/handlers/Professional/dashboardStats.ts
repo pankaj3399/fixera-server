@@ -6,6 +6,7 @@ import WarrantyClaim from '../../models/warrantyClaim';
 import ProfileView from '../../models/profileView';
 import { escapeCsv } from '../../utils/csv';
 import { buildSettledTransferExpression } from '../../utils/paymentSafety';
+import { maskAnonymizedUser } from '../../utils/accountAnonymity';
 
 type RangeKey = 'month' | '3months' | '12months' | 'all';
 
@@ -373,29 +374,32 @@ export const getProfessionalDashboardBookings = async (req: Request, res: Respon
       .sort({ createdAt: -1 })
       .limit(limit)
       .populate('project', 'title')
-      .populate('customer', 'name email')
+      .populate('customer', 'name email isAnonymized deletedAt')
       .select('bookingNumber status createdAt scheduledStartDate scheduledExecutionEndDate actualEndDate payment rfqData project customer')
       .lean();
 
-    const rows = bookings.map((b: any) => ({
-      bookingNumber: b.bookingNumber || b._id?.toString(),
-      createdAt: b.createdAt,
-      status: b.status,
-      service: b.rfqData?.serviceType || '',
-      project: b.project?.title || '',
-      customer: b.customer?.name || '',
-      scheduledStart: b.scheduledStartDate || null,
-      scheduledEnd: b.scheduledExecutionEndDate || null,
-      completedAt: b.actualEndDate || null,
-      gross: Math.round(((b.payment?.amount || 0)) * 100) / 100,
-      net: Math.round(((b.payment?.professionalPayout || 0)) * 100) / 100,
-      paymentStatus: b.payment?.status || '',
-      overdue:
-        b.status === 'completed' &&
-        b.actualEndDate &&
-        b.scheduledExecutionEndDate &&
-        new Date(b.actualEndDate) > new Date(b.scheduledExecutionEndDate),
-    }));
+    const rows = bookings.map((b: any) => {
+      const customer = maskAnonymizedUser(b.customer);
+      return {
+        bookingNumber: b.bookingNumber || b._id?.toString(),
+        createdAt: b.createdAt,
+        status: b.status,
+        service: b.rfqData?.serviceType || '',
+        project: b.project?.title || '',
+        customer: customer?.name || '',
+        scheduledStart: b.scheduledStartDate || null,
+        scheduledEnd: b.scheduledExecutionEndDate || null,
+        completedAt: b.actualEndDate || null,
+        gross: Math.round(((b.payment?.amount || 0)) * 100) / 100,
+        net: Math.round(((b.payment?.professionalPayout || 0)) * 100) / 100,
+        paymentStatus: b.payment?.status || '',
+        overdue:
+          b.status === 'completed' &&
+          b.actualEndDate &&
+          b.scheduledExecutionEndDate &&
+          new Date(b.actualEndDate) > new Date(b.scheduledExecutionEndDate),
+      };
+    });
 
     if (format === 'csv') {
       const headers = [

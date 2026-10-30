@@ -1,5 +1,7 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { protect as authMiddleware } from "../../middlewares/auth";
+import { generateCopy } from "../../handlers/Project/generateCopy";
 import {
   seedData,
   getCategories,
@@ -12,6 +14,8 @@ import {
   duplicateProject,
   deleteProject,
   updateProjectStatus,
+  archiveProject,
+  restoreProject,
   getProjectsMaster,
 } from "../../handlers/Project";
 import {
@@ -26,6 +30,13 @@ import {
 } from "../../handlers/Project/admin";
 
 const router = Router();
+const projectCopyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, code: "AI_RATE_LIMITED" },
+});
 
 // Seed service categories (development only)
 router.route("/seed").post(seedData);
@@ -37,6 +48,7 @@ router
   .get(authMiddleware, getCategoryServices);
 
 // Project management routes
+router.route("/generate-copy").post(authMiddleware, projectCopyLimiter, generateCopy);
 router.route("/draft").post(authMiddleware, createOrUpdateDraft);
 router.route("/drafts").get(authMiddleware, getDrafts);
 router.route("/all").get(authMiddleware, getAllProjects);
@@ -46,6 +58,8 @@ router.route("/:id/submit").post(authMiddleware, submitProject);
 router.route("/:id/duplicate").post(authMiddleware, duplicateProject);
 router.route("/:id").delete(authMiddleware, deleteProject);
 router.route("/:id/status").patch(authMiddleware, updateProjectStatus);
+router.route("/:id/archive").post(authMiddleware, archiveProject);
+router.route("/:id/restore").post(authMiddleware, restoreProject);
 
 // Admin routes
 router.route("/admin/:id/changes").get(authMiddleware, getProjectChanges);

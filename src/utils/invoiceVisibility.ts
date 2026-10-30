@@ -1,3 +1,5 @@
+import { maskBookingForAnonymizedParties } from "./accountAnonymity";
+
 export type InvoiceViewerRole = "admin" | "customer" | "professional";
 
 /**
@@ -100,6 +102,35 @@ const stripFields = (payment: Record<string, any>, fields: readonly string[]) =>
   for (const field of fields) {
     if (field in payment) payment[field] = undefined;
   }
+};
+
+/**
+ * Pro-specific payout summary fields. These describe the platform→supplier
+ * transfer and are only ever visible to the professional (and entitled
+ * admins). Customer-own totals, statuses, and refund records are NOT part of
+ * this set and must stay intact in participant payloads.
+ */
+const PRO_PAYOUT_SUMMARY_FIELDS = [
+  "professionalPayout",
+  "transferredAt",
+  "transferStatus",
+] as const;
+
+/**
+ * Strip the pro-specific payout summary (transfer date/amount/status) from a
+ * booking.payment payload before it reaches a customer. Applied to the new
+ * shared bookings-table list payload only; existing payment-history and
+ * details endpoints keep their established shapes so legitimate
+ * customer-own refund details are never removed.
+ */
+export const stripProPayoutSummaryForCustomer = <T extends Record<string, any>>(
+  payment: T
+): T => {
+  if (!payment || typeof payment !== "object") return payment;
+  const clean: Record<string, any> = { ...payment };
+  stripFields(clean, PRO_PAYOUT_SUMMARY_FIELDS);
+  stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+  return clean as T;
 };
 
 /**
@@ -256,10 +287,13 @@ export const filterInvoiceFieldsByRole = (booking: any, viewerRole: InvoiceViewe
  * documents or lean objects and returns a plain object safe for the viewer.
  */
 export const bookingForViewer = (booking: any, viewerRole: InvoiceViewerRole) => {
-  if (!booking || typeof booking !== "object" || viewerRole === "admin") return booking;
+  if (!booking || typeof booking !== "object") return booking;
 
   const source = typeof booking.toObject === "function" ? booking.toObject() : { ...booking };
-  const visible = filterInvoiceFieldsByRole(source, viewerRole);
+  const safeSource = maskBookingForAnonymizedParties(source);
+  if (viewerRole === "admin") return safeSource;
+
+  const visible = filterInvoiceFieldsByRole(safeSource, viewerRole);
 
   // Internal booking notes and admin-only dispute internals are not part of
   // any participant payload. They must be removed here as well as in details,

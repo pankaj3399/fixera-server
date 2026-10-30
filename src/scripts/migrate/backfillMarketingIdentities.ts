@@ -1,30 +1,39 @@
-import dotenv from 'dotenv';
-import path from 'path';
-import connectDB from '../../config/db';
+import mongoose from 'mongoose';
+import { connectMarketingMigration } from './marketingMigration';
 import MarketingCampaign from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
-import ServiceConfiguration from '../../models/serviceConfiguration';
 import { normalizeEmail } from '../../utils/marketing/normalizeEmail';
+import { normalizeMarketingCountry } from '../../utils/marketing/canonical';
+import { normalizeMarketingLanguage } from '../../utils/marketing/marketingCatalog';
+import {
+  canonicalizeServiceValues,
+  indexMarketingServiceOptions,
+  loadMarketingServiceOptions,
+  resolveMarketingService,
+} from '../../utils/marketing/serviceCatalog';
 
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
-function serviceKey(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
-
+/**
+ * Repair legacy marketing identities with the same canonicalizers used by the
+ * live sync, opt-in toggle, profile update and lead import.
+ *
+ *   npx tsx src/scripts/migrate/backfillMarketingIdentities.ts --dry-run
+ *   npx tsx src/scripts/migrate/backfillMarketingIdentities.ts --apply
+ *
+ * Requires MIGRATION_MONGO_URI. Safe to re-run. Default is read-only;
+ * pass --apply to write. No application startup/index helpers run.
+ */
 async function main(): Promise<void> {
-  await connectDB();
-  const services = await ServiceConfiguration.find({ isActive: true }).select('service').lean();
-  const serviceMap = new Map<string, string>();
-  for (const service of services) {
-    const label = String(service.service || '').trim();
-    if (label) serviceMap.set(label.toLowerCase(), serviceKey(label));
-  }
-  const serviceKeys = new Set(serviceMap.values());
+  const dryRun = await connectMarketingMigration();
+
+  const services = await loadMarketingServiceOptions();
+  const serviceIndex = indexMarketingServiceOptions(services);
 
   const unresolved: Array<{ collection: string; id: string; value: string }> = [];
   const subscriberEmails = new Map<string, string[]>();
-  const subscribers = await MarketingSubscriber.find().select('email emailNormalized interestedServices serviceKeys').lean();
+  const subscribers = await MarketingSubscriber.find()
+    .select('email emailNormalized region locale interestedServices serviceKeys')
+    .lean();
   for (const subscriber of subscribers) {
     const emailNormalized = normalizeEmail(subscriber.emailNormalized || subscriber.email);
     const ids = subscriberEmails.get(emailNormalized) || [];
@@ -41,44 +50,81 @@ async function main(): Promise<void> {
     );
   }
 
+  let subscribersChanged = 0;
   for (const subscriber of subscribers) {
     const emailNormalized = normalizeEmail(subscriber.emailNormalized || subscriber.email);
-    const legacyServices = Array.isArray(subscriber.interestedServices) ? subscriber.interestedServices : [];
-    const existingKeys = Array.isArray(subscriber.serviceKeys) ? subscriber.serviceKeys : [];
-    const mappedLegacy = legacyServices.map((value) => {
-      const raw = String(value).trim();
-      const mapped = serviceMap.get(raw.toLowerCase()) || (serviceKeys.has(raw) ? raw : undefined);
-      if (!mapped && raw) unresolved.push({ collection: 'MarketingSubscriber', id: String(subscriber._id), value: raw });
-      return mapped;
-    }).filter((value): value is string => Boolean(value));
-    const mappedKeys = Array.from(new Set([...existingKeys.map(String), ...mappedLegacy]));
-    await MarketingSubscriber.updateOne({ _id: subscriber._id }, { $set: { emailNormalized, serviceKeys: mappedKeys } });
+    const region = normalizeMarketingCountry(subscriber.region);
+    const locale = normalizeMarketingLanguage(subscriber.locale);
+    const rawServices = [
+      ...(Array.isArray(subscriber.interestedServices) ? subscriber.interestedServices : []),
+      ...(Array.isArray(subscriber.serviceKeys) ? subscriber.serviceKeys : []),
+    ].map(String);
+    const canonical = canonicalizeServiceValues(rawServices, serviceIndex, region);
+    for (const value of rawServices) {
+      const raw = value.trim();
+      if (!raw) continue;
+      if (!resolveMarketingService(raw, region, serviceIndex).option) {
+        unresolved.push({ collection: 'MarketingSubscriber', id: String(subscriber._id), value: raw });
+      }
+    }
+
+    const set: Record<string, unknown> = {
+      emailNormalized,
+      serviceKeys: canonical.serviceKeys,
+      interestedServices: canonical.interestedServices,
+    };
+    if (region) set.region = region;
+    if (locale) set.locale = locale;
+
+    const changed =
+      subscriber.emailNormalized !== emailNormalized ||
+      (region && subscriber.region !== region) ||
+      (locale && subscriber.locale !== locale) ||
+      JSON.stringify(subscriber.serviceKeys || []) !== JSON.stringify(canonical.serviceKeys) ||
+      JSON.stringify(subscriber.interestedServices || []) !== JSON.stringify(canonical.interestedServices);
+    if (!changed) continue;
+    subscribersChanged += 1;
+    if (!dryRun) {
+      await MarketingSubscriber.updateOne({ _id: subscriber._id }, { $set: set });
+    }
   }
 
+  let campaignsChanged = 0;
   const campaigns = await MarketingCampaign.find().select('audience').lean();
   for (const campaign of campaigns) {
-    const audience = campaign.audience || {};
-    const legacyServices = Array.isArray(audience.interestedServices) ? audience.interestedServices : [];
-    const existingKeys = Array.isArray(audience.serviceKeys) ? audience.serviceKeys : [];
-    const mappedLegacy = legacyServices.map((value) => {
-      const raw = String(value).trim();
-      const mapped = serviceMap.get(raw.toLowerCase()) || (serviceKeys.has(raw) ? raw : undefined);
-      if (!mapped && raw) unresolved.push({ collection: 'MarketingCampaign', id: String(campaign._id), value: raw });
-      return mapped;
-    }).filter((value): value is string => Boolean(value));
-    const mappedKeys = Array.from(new Set([...existingKeys.map(String), ...mappedLegacy]));
-    await MarketingCampaign.updateOne({ _id: campaign._id }, { $set: { 'audience.serviceKeys': mappedKeys } });
+    const audience = campaign.audience || ({} as any);
+    const rawServices = [
+      ...(Array.isArray(audience.interestedServices) ? audience.interestedServices : []),
+      ...(Array.isArray(audience.serviceKeys) ? audience.serviceKeys : []),
+    ].map(String);
+    const canonical = canonicalizeServiceValues(rawServices, serviceIndex);
+    const set: Record<string, unknown> = {
+      'audience.serviceKeys': canonical.serviceKeys,
+      'audience.interestedServices': canonical.interestedServices,
+    };
+    const changed =
+      JSON.stringify(audience.serviceKeys || []) !== JSON.stringify(canonical.serviceKeys) ||
+      JSON.stringify(audience.interestedServices || []) !== JSON.stringify(canonical.interestedServices);
+    if (!changed) continue;
+    campaignsChanged += 1;
+    if (!dryRun) {
+      await MarketingCampaign.updateOne({ _id: campaign._id }, { $set: set });
+    }
   }
 
   console.log(JSON.stringify({
+    dryRun,
+    servicesConfigured: services.length,
     subscribersProcessed: subscribers.length,
+    subscribersChanged,
     campaignsProcessed: campaigns.length,
+    campaignsChanged,
     unresolvedServices: unresolved,
     emailCollisions: collisions.length,
   }, null, 2));
 }
 
-main().then(() => process.exit(0)).catch((error) => {
+main().then(() => mongoose.disconnect()).catch((error) => {
   console.error('Marketing identity backfill failed:', error);
   process.exit(1);
 });

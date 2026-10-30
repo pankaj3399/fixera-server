@@ -327,6 +327,7 @@ export const TRUSTED_S3_HOST_RE = new RegExp(
 
 export const ALLOWED_KEY_PREFIXES = [
   'profile-images/',
+  'id-proof/',
   'id-proofs/',
   'certifications/',
   'project-images/',
@@ -343,6 +344,7 @@ export const ALLOWED_KEY_PREFIXES = [
   'dispute-attachments/',
   'dispute-resolutions/',
   'support-attachments/',
+  'chat/',
   'invoices/',
 ];
 

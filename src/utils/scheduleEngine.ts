@@ -4,6 +4,7 @@ import Booking from "../models/booking";
 import Project from "../models/project";
 import User from "../models/user";
 import { DEFAULT_AVAILABILITY, resolveAvailability } from "./availabilityHelpers";
+import { BUSINESS_COUNTRY_PRIMARY_TIMEZONES, primaryTimeZoneForCountry } from "./hourScheduleRepair";
 import { DateTime } from "luxon";
 import { loadSharedCalendarBusy } from "./support/calendarBusy";
 
@@ -54,13 +55,13 @@ type CustomerBlocks = {
   }>;
 };
 
-// Multi-resource availability types
-type MemberBlockedData = {
+// Multi-resource availability types (exported for planning-board consumers).
+export type MemberBlockedData = {
   blockedDates: Set<string>;
   blockedRanges: Array<{ start: Date; end: Date; reason?: string }>;
 };
 
-type PerMemberBlockedData = Map<string, MemberBlockedData>;
+export type PerMemberBlockedData = Map<string, MemberBlockedData>;
 
 export type ResourcePolicy = {
   minResources: number;
@@ -81,6 +82,26 @@ export const DAY_KEYS = [
 ];
 
 export const PARTIAL_BLOCK_THRESHOLD_HOURS = 4;
+
+/**
+ * Day-mode availability rule (client bug list #2): a day counts as available
+ * for planning only when at least this many hours are free within the working
+ * schedule. A day with only 2 free hours is therefore blocked.
+ */
+export const MIN_FREE_HOURS_FOR_DAY_AVAILABILITY = 3;
+
+/**
+ * Day-mode day-blocked rule shared by availability and planning: the day is
+ * blocked when the free time left inside the working schedule drops below
+ * MIN_FREE_HOURS_FOR_DAY_AVAILABILITY.
+ */
+export const isDayBlockedByCoveredMinutes = (
+  coveredMinutes: number,
+  scheduleMinutes: number
+): boolean => {
+  if (!Number.isFinite(coveredMinutes) || !(scheduleMinutes > 0)) return true;
+  return scheduleMinutes - coveredMinutes < MIN_FREE_HOURS_FOR_DAY_AVAILABILITY * 60;
+};
 
 /**
  * Safely convert string IDs to MongoDB ObjectIds, filtering out invalid IDs.
@@ -326,29 +347,66 @@ export type DurationOverride = {
   buffer?: { value: number; unit: 'hours' | 'days' };
 };
 
-const getProjectDurations = (project: any, subprojectIndex?: number, override?: DurationOverride) => {
+export const resolveProjectScheduleQuantity = (project: any, subprojectIndex: number | undefined, rawQuantity: unknown) => {
+  const subproject = typeof subprojectIndex === 'number' ? project?.subprojects?.[subprojectIndex] : undefined;
+  if (subproject?.pricing?.type !== 'unit') return { valid: true as const, quantity: 1 };
+  if (rawQuantity != null && typeof rawQuantity !== 'number' && typeof rawQuantity !== 'string') {
+    return { valid: false as const, error: 'Quantity must be a single number' };
+  }
+  const quantity = rawQuantity == null ? 1 : Number(rawQuantity);
+  const minimum = Number(subproject.pricing.minOrderQuantity) > 0 ? Number(subproject.pricing.minOrderQuantity) : 1;
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity < minimum) {
+    return { valid: false as const, error: `Quantity must be a positive number of at least ${minimum}` };
+  }
+  return { valid: true as const, quantity };
+};
+
+/** Persisted duration overrides are already scaled; missing prep/buffer means zero. */
+export const getBookingScheduleOptions = (booking: any): { quantity: number; durationOverride?: DurationOverride } => {
+  const quantity = Number(booking.scheduleSnapshot?.quantity ?? booking.checkoutSnapshot?.quantity) || 1;
+  const snapshot = booking.scheduleSnapshot;
+  if (!snapshot?.executionDuration) return { quantity };
+  return {
+    quantity,
+    durationOverride: {
+      execution: snapshot.executionDuration,
+      preparation: snapshot.preparationDuration || { value: 0, unit: 'hours' },
+      buffer: snapshot.bufferDuration || { value: 0, unit: 'hours' },
+    },
+  };
+};
+
+export const getProjectDurations = (project: any, subprojectIndex?: number, override?: DurationOverride, quantity = 1) => {
   const subproject =
     typeof subprojectIndex === "number" &&
     Array.isArray(project.subprojects) &&
     project.subprojects[subprojectIndex]
       ? project.subprojects[subprojectIndex]
       : null;
+  const unitPricing = subproject?.pricing?.type === 'unit';
+  const unit = String(subproject?.pricing?.unit || '').toLowerCase();
+  const scalesDuration = unitPricing && subproject?.pricing?.durationBasis === 'per_unit';
+  const customerDeterminedHours = scalesDuration && /^(h|hr|hrs|hour|hours|hur)$/.test(unit);
+  if (unitPricing && (!Number.isFinite(quantity) || quantity <= 0)) return null;
 
   const hasValidExecutionOverride =
     override?.execution &&
     typeof override.execution.value === 'number' &&
     override.execution.value > 0 &&
     (override.execution.unit === 'hours' || override.execution.unit === 'days');
-  const execution = hasValidExecutionOverride
+  let execution = hasValidExecutionOverride
     ? override!.execution
+    : customerDeterminedHours
+    ? { value: quantity, unit: 'hours' }
     : (subproject?.executionDuration || project.executionDuration);
   const isRfqPackage = subproject?.pricing?.type === "rfq";
-  const executionValue =
+  let executionValue =
     typeof execution?.value === "number" && execution.value > 0
       ? execution.value
       : isRfqPackage
       ? execution?.range?.max || execution?.range?.min
       : execution?.range?.min || execution?.range?.max;
+  if (scalesDuration && !customerDeterminedHours && !hasValidExecutionOverride && typeof executionValue === 'number' && executionValue > 0) executionValue *= quantity;
 
   if (!isRfqPackage && (!execution || typeof executionValue !== "number" || executionValue <= 0)) {
     return null;
@@ -363,7 +421,7 @@ const getProjectDurations = (project: any, subprojectIndex?: number, override?: 
   const hasValidBufferOverride =
     override?.buffer &&
     typeof override.buffer.value === 'number' &&
-    override.buffer.value > 0 &&
+    override.buffer.value >= 0 &&
     (override.buffer.unit === 'hours' || override.buffer.unit === 'days');
   const buffer = hasValidBufferOverride
     ? override!.buffer
@@ -373,7 +431,7 @@ const getProjectDurations = (project: any, subprojectIndex?: number, override?: 
   const overridePrep =
     override?.preparation &&
     typeof override.preparation.value === "number" &&
-    override.preparation.value > 0 &&
+    override.preparation.value >= 0 &&
     (override.preparation.unit === 'hours' || override.preparation.unit === 'days')
       ? override.preparation
       : null;
@@ -766,8 +824,9 @@ const assignBookingBlocks = (
  * Build blocked data per individual team member for multi-resource availability.
  * Returns a Map keyed by member ID with each member's blocked dates and ranges.
  * Composes collectCompanyBlocks, collectTeamMemberBlocks, and assignBookingBlocks.
+ * Exported for the planning board's hour-mode attendance checks.
  */
-const buildPerMemberBlockedData = async (
+export const buildPerMemberBlockedData = async (
   project: any,
   professional: any,
   timeZone: string,
@@ -937,7 +996,8 @@ const isMemberDayBlocked = (
   }
 
   totalMinutes += (currentEnd - currentStart) / (1000 * 60);
-  return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
+  const scheduleMinutes = (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
+  return isDayBlockedByCoveredMinutes(totalMinutes, scheduleMinutes);
 };
 
 /**
@@ -1172,8 +1232,9 @@ const countAvailableResourcesForWindow = (
 
 /**
  * Check if a specific member is available during a time window.
+ * Exported for the planning board's hour-mode attendance checks.
  */
-const isMemberAvailableForWindow = (
+export const isMemberAvailableForWindow = (
   memberData: MemberBlockedData | undefined,
   availability: Record<string, any>,
   startUtc: Date,
@@ -1366,6 +1427,122 @@ const forEachSubset = (
   return walk(0);
 };
 
+export type DayAssignment = {
+  dayKey: string;
+  zonedDay: Date;
+  resourceIds: string[];
+};
+
+export type CoveringAssignment = {
+  assignment: DayAssignment[];
+  endZonedDay: Date;
+  assignedResourceIds: string[];
+};
+
+/**
+ * Resources available on a zoned day (day-mode), in pool order.
+ */
+const getAvailableMembersForZonedDay = (
+  perMemberBlocked: PerMemberBlockedData,
+  availability: Record<string, any>,
+  zonedDay: Date,
+  timeZone: string,
+  resourceIds: string[]
+): string[] => {
+  if (!isWorkingDay(availability, zonedDay)) return [];
+  return resourceIds.filter((id) => {
+    const memberData = perMemberBlocked.get(id);
+    return memberData ? !isMemberDayBlocked(memberData, availability, zonedDay, timeZone) : false;
+  });
+};
+
+/**
+ * Per-day resource substitution walk (client bug list #22a, day-mode only).
+ *
+ * Covers `executionDays` working days starting at `startZoned`. For each day
+ * that misses the overlap with the running subset, another available assigned
+ * resource is substituted for that day (e.g. Michal on 6 Nov) instead of
+ * prolonging the booking. Days with no available resource at all are skipped.
+ *
+ * Solo-day semantics match advanceWorkingDays: when minOverlapPercentage < 100,
+ * up to executionDays - ceil(executionDays * overlap / 100) days may be
+ * covered by a single available resource.
+ *
+ * Returns the per-day assignment plus the union of resources used, or null
+ * when the window cannot be covered within the iteration cap.
+ */
+export const findCoveringAssignmentForDays = ({
+  perMemberBlocked,
+  availability,
+  startZoned,
+  executionDays,
+  minResources,
+  minOverlapPercentage,
+  resourceIds,
+  timeZone,
+  maxIterations = 366 * 2,
+}: {
+  perMemberBlocked: PerMemberBlockedData;
+  availability: Record<string, any>;
+  startZoned: Date;
+  executionDays: number;
+  minResources: number;
+  minOverlapPercentage: number;
+  resourceIds: string[];
+  timeZone: string;
+  maxIterations?: number;
+}): CoveringAssignment | null => {
+  if (!Number.isFinite(executionDays) || executionDays <= 0) return null;
+  if (!Number.isFinite(minResources) || minResources <= 0) return null;
+  if (!Array.isArray(resourceIds) || resourceIds.length === 0) return null;
+
+  const allowedSoloDays =
+    minOverlapPercentage < 100
+      ? Math.max(0, executionDays - Math.ceil((executionDays * minOverlapPercentage) / 100))
+      : 0;
+  let soloDaysUsed = 0;
+
+  const assignment: DayAssignment[] = [];
+  let previousSubset: string[] = [];
+  let cursor = startZoned;
+  let iterations = 0;
+
+  while (assignment.length < executionDays && iterations < maxIterations) {
+    iterations++;
+    const available = getAvailableMembersForZonedDay(
+      perMemberBlocked,
+      availability,
+      cursor,
+      timeZone,
+      resourceIds
+    );
+
+    if (available.length >= minResources) {
+      // Prefer continuity: keep as much of the previous day's subset as possible.
+      const subset: string[] = [];
+      for (const id of previousSubset) {
+        if (subset.length >= minResources) break;
+        if (available.includes(id)) subset.push(id);
+      }
+      for (const id of available) {
+        if (subset.length >= minResources) break;
+        if (!subset.includes(id)) subset.push(id);
+      }
+      previousSubset = subset;
+      assignment.push({ dayKey: formatDateKey(cursor), zonedDay: cursor, resourceIds: [...subset] });
+    } else if (available.length >= 1 && soloDaysUsed < allowedSoloDays) {
+      soloDaysUsed++;
+      previousSubset = [...available];
+      assignment.push({ dayKey: formatDateKey(cursor), zonedDay: cursor, resourceIds: [...available] });
+    }
+    cursor = addDaysZoned(cursor, 1);
+  }
+
+  if (assignment.length < executionDays) return null;
+  const assignedResourceIds = Array.from(new Set(assignment.flatMap((day) => day.resourceIds)));
+  return { assignment, endZonedDay: assignment[assignment.length - 1].zonedDay, assignedResourceIds };
+};
+
 const findFirstEligibleSubsetForDays = (
   perMemberBlocked: PerMemberBlockedData,
   availability: Record<string, any>,
@@ -1517,6 +1694,62 @@ const isMultiResourceMode = (project: any): boolean => {
   return totalResources > 0;
 };
 
+/**
+ * Client bug list #23b/c (hour mode): a wall-clock time picked by the customer
+ * ("14:00") must become a UTC instant in the professional's real zone.
+ * `businessInfo.timezone` is the authority, but nothing in the product writes
+ * it today, so most rows persist the schema default `'UTC'`. A stored `'UTC'`
+ * is therefore treated as unset (none of the mapped business countries
+ * BE/NL/LU/FR/DE observes UTC, so no genuine-UTC pro is mis-zoned; unmapped
+ * countries still resolve to UTC below). Without this, converting in UTC
+ * silently stores wall-as-UTC and every consumer renders +offset (14:00 shows
+ * as 15:00 in Brussels). The same engine path serves booking creation and
+ * rescheduling, hence the same +1h after a reschedule to 12:00.
+ *
+ * Resolve the effective scheduling zone in this single place: a real stored
+ * professional zone, then an explicitly passed request zone, then the
+ * business-country primary zone, then UTC as a last resort. Callers must
+ * never add their own compensating offsets.
+ */
+export const isValidScheduleTimeZone = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Country mapping lives in hourScheduleRepair (kept light: no model imports).
+export { BUSINESS_COUNTRY_PRIMARY_TIMEZONES, primaryTimeZoneForCountry } from "./hourScheduleRepair";
+
+export const resolveEffectiveScheduleTimeZone = (
+  professional:
+    | {
+        businessInfo?: {
+          timezone?: string | null;
+          country?: string | null;
+        } | null;
+      }
+    | null
+    | undefined,
+  requestTimeZone?: unknown
+): string => {
+  const stored = professional?.businessInfo?.timezone;
+  // A stored 'UTC' is the untouched schema default, not evidence of a London
+  // professional: fall through to the request zone, then the country zone.
+  if (isValidScheduleTimeZone(stored) && (stored as string).trim().toUpperCase() !== 'UTC') {
+    return (stored as string).trim();
+  }
+  if (isValidScheduleTimeZone(requestTimeZone)) {
+    return (requestTimeZone as string).trim();
+  }
+  const mapped = primaryTimeZoneForCountry(professional?.businessInfo?.country);
+  if (mapped) return mapped;
+  return 'UTC';
+};
+
 const loadProjectAndProfessional = async (projectId: string) => {
   const project = await Project.findOne({
     _id: projectId,
@@ -1527,9 +1760,14 @@ const loadProjectAndProfessional = async (projectId: string) => {
     return { project: null, professional: null };
   }
 
-  const professional = await User.findById(project.professionalId).select(
-    "companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone"
-  );
+  // NOTE: lean on purpose. A full document would materialize the schema
+  // default `businessInfo.timezone: 'UTC'`, hiding a missing zone from
+  // resolveEffectiveScheduleTimeZone (client bug list #23b/c).
+  const professional = await User.findById(project.professionalId)
+    .select(
+      "companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo.timezone businessInfo.country"
+    )
+    .lean();
 
   return { project, professional: professional || null };
 };
@@ -1560,13 +1798,17 @@ const isWorkingDay = (availability: Record<string, any>, zonedDate: Date) => {
 /**
  * Check if a day is blocked (strict intersection mode - all resources must be free).
  * This is the original behavior when minResources <= 1.
+ * Day-mode callers use the MIN_FREE_HOURS_FOR_DAY_AVAILABILITY rule by default.
+ * Pass useLegacyThreshold=true only for the hours-mode buffer accumulation in
+ * addWorkingHours, whose behaviour is owned by another workstream.
  */
 const isDayBlocked = (
   availability: Record<string, any>,
   zonedDate: Date,
   blockedDates: Set<string>,
   blockedRanges: Array<{ start: Date; end: Date }>,
-  timeZone: string
+  timeZone: string,
+  useLegacyThreshold = false
 ) => {
   const dateKey = formatDateKey(zonedDate);
   if (blockedDates.has(dateKey)) return true;
@@ -1620,7 +1862,11 @@ const isDayBlocked = (
 
   totalMinutes += (currentEnd - currentStart) / (1000 * 60);
 
-  return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
+  if (useLegacyThreshold) {
+    return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
+  }
+  const scheduleMinutes = (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
+  return isDayBlockedByCoveredMinutes(totalMinutes, scheduleMinutes);
 };
 
 /**
@@ -2117,7 +2363,8 @@ const addWorkingHours = (
   while (remainingMinutes > 0 && iterations < maxIterations) {
     iterations += 1;
     const dayStart = startOfDayZoned(cursor);
-    if (isDayBlocked(availability, dayStart, blockedDates, blockedRanges, timeZone)) {
+    // Hours-mode buffer accumulation keeps the legacy absolute threshold.
+    if (isDayBlocked(availability, dayStart, blockedDates, blockedRanges, timeZone, true)) {
       cursor = addDaysZoned(dayStart, 1);
       continue;
     }
@@ -2223,13 +2470,15 @@ export const buildProjectScheduleProposalsWithData = async (
   professional: any,
   subprojectIndex?: number,
   durationOverride?: DurationOverride,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  quantity = 1,
+  requestTimeZone?: unknown
 ): Promise<ScheduleProposals | null> => {
   if (!project || !professional) {
     return null;
   }
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride);
+  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
     return null;
   }
@@ -2237,7 +2486,7 @@ export const buildProjectScheduleProposalsWithData = async (
   const availability = resolveAvailability(
     professional.companyAvailability
   );
-  const timeZone = professional.businessInfo?.timezone || "UTC";
+  const timeZone = resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
 
   // Get resource policy and determine if multi-resource mode is active
@@ -2569,14 +2818,16 @@ export const buildProjectScheduleProposals = async (
   projectId: string,
   subprojectIndex?: number,
   durationOverride?: DurationOverride,
-  excludeBookingId?: string
+  excludeBookingId?: string,
+  quantity = 1,
+  requestTimeZone?: unknown
 ): Promise<ScheduleProposals | null> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project || !professional) {
     return null;
   }
 
-  return buildProjectScheduleProposalsWithData(project, professional, subprojectIndex, durationOverride, excludeBookingId);
+  return buildProjectScheduleProposalsWithData(project, professional, subprojectIndex, durationOverride, excludeBookingId, quantity, requestTimeZone);
 };
 
 type ScheduleContext = {
@@ -2599,19 +2850,22 @@ type AssembleResult =
 
 const assembleScheduleContext = async (
   projectId: string,
-  subprojectIndex?: number
+  subprojectIndex?: number,
+  quantity = 1,
+  durationOverride?: DurationOverride,
+  requestTimeZone?: unknown
 ): Promise<AssembleResult> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
   if (!project) return { ok: false, reason: "Project not found" };
   if (!professional) return { ok: false, reason: "Professional not found" };
 
-  const durations = getProjectDurations(project, subprojectIndex);
+  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
     return { ok: false, reason: "Missing execution duration" };
   }
 
   const availability = resolveAvailability(professional.companyAvailability);
-  const timeZone = professional.businessInfo?.timezone || "UTC";
+  const timeZone = resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
   const resourcePolicy = getResourcePolicy(project);
   const useMultiResource = isMultiResourceMode(project);
@@ -2644,6 +2898,9 @@ export const validateProjectScheduleSelection = async ({
   startTime,
   customerBlocks,
   excludeBookingId,
+  quantity = 1,
+  durationOverride,
+  requestTimeZone,
 }: {
   projectId: string;
   subprojectIndex?: number;
@@ -2651,12 +2908,15 @@ export const validateProjectScheduleSelection = async ({
   startTime?: string;
   customerBlocks?: CustomerBlocks;
   excludeBookingId?: string;
+  quantity?: number;
+  durationOverride?: DurationOverride;
+  requestTimeZone?: unknown;
 }) => {
   if (!startDate) {
     return { valid: true };
   }
 
-  const assembled = await assembleScheduleContext(projectId, subprojectIndex);
+  const assembled = await assembleScheduleContext(projectId, subprojectIndex, quantity, durationOverride, requestTimeZone);
   if (!assembled.ok) {
     return { valid: false, reason: assembled.reason };
   }
@@ -2767,17 +3027,18 @@ export const validateProjectScheduleSelection = async ({
       return { valid: false, reason: "Selected date does not have enough team members available" };
     }
 
-    const selectedSubset = findFirstEligibleSubsetForDays(
+    const coveringAssignment = findCoveringAssignmentForDays({
       perMemberBlocked,
       availability,
-      selectedZoned,
+      startZoned: selectedZoned,
       executionDays,
-      resourcePolicy,
-      orderedResourceIds,
-      timeZone
-    );
+      minResources: resourcePolicy.minResources,
+      minOverlapPercentage: resourcePolicy.minOverlapPercentage,
+      resourceIds: orderedResourceIds,
+      timeZone,
+    });
 
-    if (!selectedSubset) {
+    if (!coveringAssignment) {
       const requiredOverlap = getRequiredOverlapPercentage(resourcePolicy);
       const bestOverlap = computeBestOverlapPercentageForDays(
         perMemberBlocked,
@@ -2830,11 +3091,15 @@ export const getProjectAvailableSlotsForDate = async ({
   subprojectIndex,
   startDate,
   customerBlocks,
+  quantity,
+  requestTimeZone,
 }: {
   projectId: string;
   subprojectIndex?: number;
   startDate: string;
   customerBlocks?: CustomerBlocks;
+  quantity?: number;
+  requestTimeZone?: unknown;
 }): Promise<{ slots: string[]; mode: "hours" | "days" } | null> => {
   if (!startDate) return null;
 
@@ -2851,7 +3116,7 @@ export const getProjectAvailableSlotsForDate = async ({
     return null;
   }
 
-  const assembled = await assembleScheduleContext(projectId, subprojectIndex);
+  const assembled = await assembleScheduleContext(projectId, subprojectIndex, quantity, undefined, requestTimeZone);
   if (!assembled.ok) return null;
   const {
     project,
@@ -2924,7 +3189,9 @@ export const buildProjectScheduleWindow = async ({
   startTime,
   customerBlocks,
   durationOverride,
+  quantity = 1,
   excludeBookingId,
+  requestTimeZone,
 }: {
   projectId: string;
   subprojectIndex?: number;
@@ -2932,7 +3199,9 @@ export const buildProjectScheduleWindow = async ({
   startTime?: string;
   customerBlocks?: CustomerBlocks;
   durationOverride?: DurationOverride;
+  quantity?: number;
   excludeBookingId?: string;
+  requestTimeZone?: unknown;
 }) => {
   if (!startDate) {
     return null;
@@ -2943,7 +3212,7 @@ export const buildProjectScheduleWindow = async ({
     return null;
   }
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride);
+  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
     return null;
   }
@@ -2951,7 +3220,7 @@ export const buildProjectScheduleWindow = async ({
   const availability = resolveAvailability(
     professional.companyAvailability
   );
-  const timeZone = professional.businessInfo?.timezone || "UTC";
+  const timeZone = resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
   const baseBlockedData = await buildBlockedData(
     project,
@@ -3112,6 +3381,10 @@ export const buildProjectScheduleWindow = async ({
       ),
       assignedTeamMembers,
       throughputDays,
+      // The effective zone the wall time was converted in (should-fix 4):
+      // handlers persist it as scheduleTimeZone so details/timeline carry
+      // the resolved zone even when the client sends no timeZone.
+      timeZone,
     };
   }
 
@@ -3123,6 +3396,7 @@ export const buildProjectScheduleWindow = async ({
 
   const executionDays = Math.max(1, Math.ceil(durations.execution.value));
   let selectedSubset: string[] | null = null;
+  let coveringAssignment: CoveringAssignment | null = null;
 
   console.log('[SCHEDULE_WINDOW] Calculating window for:', {
     startDate,
@@ -3174,19 +3448,24 @@ export const buildProjectScheduleWindow = async ({
       checkCursor = addDaysZoned(checkCursor, 1);
     }
 
-    selectedSubset = findFirstEligibleSubsetForDays(
+    // Per-day substitution (client bug list #22a): cover each execution day
+    // with whichever assigned resources are available that day instead of
+    // prolonging the booking when the running subset misses the overlap.
+    coveringAssignment = findCoveringAssignmentForDays({
       perMemberBlocked,
       availability,
-      selectedZoned,
+      startZoned: selectedZoned,
       executionDays,
-      resourcePolicy,
-      orderedResourceIds,
-      timeZone
-    );
-    if (!selectedSubset) {
-      console.log('[SCHEDULE_WINDOW] No eligible subset found - date rejected');
+      minResources: resourcePolicy.minResources,
+      minOverlapPercentage: resourcePolicy.minOverlapPercentage,
+      resourceIds: orderedResourceIds,
+      timeZone,
+    });
+    if (!coveringAssignment) {
+      console.log('[SCHEDULE_WINDOW] No covering assignment found - date rejected');
       return null;
     }
+    selectedSubset = coveringAssignment.assignedResourceIds;
     console.log('[SCHEDULE_WINDOW] Selected subset:', selectedSubset.map(id => id.slice(-6)));
   } else {
     // Single-resource or no policy: use strict per-day check
@@ -3204,17 +3483,19 @@ export const buildProjectScheduleWindow = async ({
       return null;
     }
   }
-  const executionEndDay = advanceWorkingDays(
-    selectedZoned,
-    executionDays,
-    availability,
-    blockedDates,
-    blockedRanges,
-    timeZone,
-    useMultiResource ? perMemberBlocked : undefined,
-    useMultiResource ? resourcePolicy : undefined,
-    selectedSubset ?? undefined
-  );
+  const executionEndDay = coveringAssignment
+    ? coveringAssignment.endZonedDay
+    : advanceWorkingDays(
+      selectedZoned,
+      executionDays,
+      availability,
+      blockedDates,
+      blockedRanges,
+      timeZone,
+      useMultiResource ? perMemberBlocked : undefined,
+      useMultiResource ? resourcePolicy : undefined,
+      selectedSubset ?? undefined
+    );
 
   console.log('[SCHEDULE_WINDOW] Execution window result:', {
     startDateZoned: formatDateKey(selectedZoned),
@@ -3269,6 +3550,8 @@ export const buildProjectScheduleWindow = async ({
     scheduledBufferUnit: durations.buffer?.unit,
     assignedTeamMembers,
     throughputDays,
+    // Effective conversion zone, persisted as scheduleTimeZone (should-fix 4).
+    timeZone,
   };
 };
 
@@ -3277,12 +3560,14 @@ export const getUnbookableStartDates = async ({
   from,
   to,
   subprojectIndex,
+  quantity = 1,
   excludeBookingId,
 }: {
   projectId: string;
   from: Date;
   to: Date;
   subprojectIndex?: number;
+  quantity?: number;
   excludeBookingId?: string;
 }): Promise<string[]> => {
   const { project, professional } = await loadProjectAndProfessional(projectId);
@@ -3303,7 +3588,7 @@ export const getUnbookableStartDates = async ({
     if (daysSubIdx >= 0) resolvedSubprojectIndex = daysSubIdx;
   }
 
-  const durations = getProjectDurations(project, resolvedSubprojectIndex);
+  const durations = getProjectDurations(project, resolvedSubprojectIndex, undefined, quantity);
   if (!durations || !durations.execution?.value) {
     return [];
   }
@@ -3321,7 +3606,7 @@ export const getUnbookableStartDates = async ({
   }
 
   const availability = resolveAvailability(professional.companyAvailability);
-  const timeZone = professional.businessInfo?.timezone || "UTC";
+  const timeZone = resolveEffectiveScheduleTimeZone(professional);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
 
   const perMemberBlocked = await buildPerMemberBlockedData(
@@ -3372,16 +3657,20 @@ export const getUnbookableStartDates = async ({
       if (availableOnStartDay < resourcePolicy.minResources) {
         bookable = false;
       } else {
-        const selectedSubset = findFirstEligibleSubsetForDays(
+        // Per-day substitution (client bug list #22a): a start date is
+        // bookable when each execution day can be covered by whichever
+        // assigned resources are available that day.
+        const coveringAssignment = findCoveringAssignmentForDays({
           perMemberBlocked,
           availability,
-          cursor,
+          startZoned: cursor,
           executionDays,
-          resourcePolicy,
-          orderedResourceIds,
-          timeZone
-        );
-        if (!selectedSubset) {
+          minResources: resourcePolicy.minResources,
+          minOverlapPercentage: resourcePolicy.minOverlapPercentage,
+          resourceIds: orderedResourceIds,
+          timeZone,
+        });
+        if (!coveringAssignment) {
           bookable = false;
         }
       }

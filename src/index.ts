@@ -43,6 +43,9 @@ app.use(cors({
 app.use('/api/stripe/webhooks', express.raw({ type: 'application/json' }));
 
 // Body and cookie parsers
+// Project-copy requests contain only bounded text and must stay far below the
+// legacy draft limit, which still needs room for existing base64 media drafts.
+app.use('/api/projects/generate-copy', express.json({ limit: '16kb' }));
 // Project drafts still embed media as data URLs, so keep the legacy-compatible
 // ceiling until that flow is migrated to direct object-storage uploads.
 const BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || '50mb';

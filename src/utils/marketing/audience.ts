@@ -1,9 +1,7 @@
 import User from '../../models/user';
 import Booking from '../../models/booking';
 import MarketingSubscriber, {
-  type IMarketingSubscriber,
   type MarketingLocale,
-  MARKETING_LOCALES,
 } from '../../models/marketingSubscriber';
 import type { ICampaignAudience } from '../../models/marketingCampaign';
 import { generateUnsubscribeToken } from './unsubscribeToken';
@@ -13,7 +11,18 @@ import {
   suppressBrevoMarketingContact,
 } from './brevoMarketing';
 import { normalizeEmail } from './normalizeEmail';
-import { normalizeMarketingLocale, resolveSubscriberLocale } from './marketingCatalog';
+import {
+  normalizeMarketingLanguage,
+  resolveSubscriberLocale,
+} from './marketingCatalog';
+import { normalizeMarketingCountry } from './canonical';
+import {
+  canonicalizeServiceValues,
+  indexMarketingServiceOptions,
+  loadMarketingServiceOptions,
+  type MarketingServiceIndex,
+} from './serviceCatalog';
+import { safeErrorSummary } from '../safeErrorLog';
 
 export type AudienceMember = {
   email: string;
@@ -37,40 +46,57 @@ export type SubscriberProfile = {
 
 export const MARKETING_AUDIENCE_LIMIT = 5000;
 
-function normalizeCountry(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim().toUpperCase();
-  return trimmed || undefined;
+async function loadServiceIndexSafe(context: string): Promise<MarketingServiceIndex | undefined> {
+  try {
+    return indexMarketingServiceOptions(await loadMarketingServiceOptions());
+  } catch (error) {
+    // Consent must survive a catalog outage. Keep the raw profile; the next
+    // successful sync repairs the canonical service keys.
+    console.error(
+      `[MARKETING] Service catalog unavailable during ${context}; keeping raw service values`,
+      safeErrorSummary(error),
+    );
+    return undefined;
+  }
 }
 
 function userCountry(user: any): string | undefined {
   return (
-    normalizeCountry(user?.location?.country) ||
-    normalizeCountry(user?.companyAddress?.country) ||
-    normalizeCountry(user?.businessInfo?.country)
+    normalizeMarketingCountry(user?.location?.country) ||
+    normalizeMarketingCountry(user?.companyAddress?.country) ||
+    normalizeMarketingCountry(user?.businessInfo?.country)
   );
 }
 
 /**
  * Canonical subscriber metadata for every opt-in path (profile toggle, signup,
- * and the user sync). Keeping this in one place prevents role/locale drift
- * between paths — the original bug that classified professionals as customers.
+ * and the user sync). Keeping this in one place prevents role/locale/service
+ * drift between paths — the original bug that classified professionals as
+ * customers and stored raw service labels as canonical keys.
+ *
+ * The caller supplies a catalog index when it has one. Without it this keeps
+ * the historical raw-profile behavior and never fails the consent write.
  */
 export function subscriberProfileForUser(
   user: any,
   extraServiceKeys: string[] = [],
+  serviceIndex?: MarketingServiceIndex,
 ): SubscriberProfile {
   const region = userCountry(user);
   const fromUser = Array.isArray(user?.serviceCategories) ? user.serviceCategories : [];
-  const interestedServices = Array.from(
-    new Set([...extraServiceKeys, ...fromUser].map(String)),
-  );
+  const rawServices = [...extraServiceKeys, ...fromUser].map(String).filter(Boolean);
+  const { serviceKeys, interestedServices } = serviceIndex
+    ? canonicalizeServiceValues(rawServices, serviceIndex, region)
+    : {
+        serviceKeys: Array.from(new Set(rawServices)),
+        interestedServices: Array.from(new Set(rawServices)),
+      };
   const resolvedLocale = resolveSubscriberLocale(user, region);
   const name = typeof user?.name === 'string' && user.name.trim() ? user.name.trim() : undefined;
 
   const profile: SubscriberProfile = {
     interestedServices,
-    serviceKeys: interestedServices,
+    serviceKeys,
     locale: resolvedLocale.locale,
     localeSource: resolvedLocale.source,
   };
@@ -96,7 +122,8 @@ export async function enablePromotionalEmail(
   const email = normalizeEmail(user?.email);
   if (!email) return;
   const now = new Date();
-  const profile = subscriberProfileForUser(user);
+  const serviceIndex = await loadServiceIndexSafe('promotional opt-in');
+  const profile = subscriberProfileForUser(user, [], serviceIndex);
   const consentFields: Record<string, unknown> = {
     userId: user._id,
     email,
@@ -125,19 +152,18 @@ export async function enablePromotionalEmail(
 }
 
 function normalizeLocale(value: unknown): MarketingLocale {
-  if (typeof value === 'string') {
-    const lower = value.trim().toLowerCase().slice(0, 2);
-    if ((MARKETING_LOCALES as readonly string[]).includes(lower)) {
-      return lower as MarketingLocale;
-    }
-  }
-  return 'en';
+  return normalizeMarketingLanguage(value) || 'en';
 }
+
+export type MarketingRoleCounts = { customer: number; professional: number };
 
 /** Sync opted-in users into MarketingSubscriber collection. */
 export async function syncSubscribersFromUsers(): Promise<{
   upserted: number;
   unsubscribed: number;
+  eligibleByRole: MarketingRoleCounts;
+  syncedByRole: MarketingRoleCounts;
+  skippedByRole: MarketingRoleCounts;
 }> {
   const SYNC_BATCH_SIZE = 500;
   const baseQuery = {
@@ -145,9 +171,12 @@ export async function syncSubscribersFromUsers(): Promise<{
     role: { $in: ['customer', 'professional'] },
     deletedAt: null,
   };
+  const serviceIndex = await loadServiceIndexSafe('subscriber sync');
   let lastUserId: unknown;
   let upserted = 0;
   let unsubscribed = 0;
+  const eligibleByRole: MarketingRoleCounts = { customer: 0, professional: 0 };
+  const syncedByRole: MarketingRoleCounts = { customer: 0, professional: 0 };
 
   // Stable _id keyset pagination bounds memory without permanently omitting users
   // beyond an arbitrary daily cap.
@@ -214,13 +243,20 @@ export async function syncSubscribersFromUsers(): Promise<{
         .filter((sub) => sub.userId)
         .map((sub) => [String(sub.userId), sub]),
     );
+    const expectedSyncs: Array<{ userId: string; email: string; role: keyof MarketingRoleCounts }> = [];
     const operations: Parameters<typeof MarketingSubscriber.bulkWrite>[0] = [];
 
     for (const user of users) {
       const email = normalizeEmail(user.email);
       if (!email) continue;
+      const role: keyof MarketingRoleCounts | undefined =
+        user.role === 'customer' || user.role === 'professional' ? user.role : undefined;
+      if (!role) continue;
 
-      if (isPromotionalEmailEnabled(user.notificationPreferences) && !toConsentDate(user.marketingConsentAt)) {
+      const toggleOn = isPromotionalEmailEnabled(user.notificationPreferences);
+      if (toggleOn) eligibleByRole[role] += 1;
+
+      if (toggleOn && !toConsentDate(user.marketingConsentAt)) {
         const backfilled = new Date();
         await User.updateOne({ _id: user._id }, { $set: { marketingConsentAt: backfilled } });
         (user as { marketingConsentAt?: Date }).marketingConsentAt = backfilled;
@@ -228,7 +264,7 @@ export async function syncSubscribersFromUsers(): Promise<{
 
       const { optedIn, consentVerifiedAt } = promotionalEmailOptIn(user);
       const fromBookings = serviceInterestByUser.get(String(user._id)) || [];
-      const profile = subscriberProfileForUser(user, fromBookings);
+      const profile = subscriberProfileForUser(user, fromBookings, serviceIndex);
       const existingByCurrentEmail = existingByEmail.get(email);
       const existingByUser = existingByUserId.get(String(user._id));
       const existing = existingByCurrentEmail || existingByUser;
@@ -304,18 +340,100 @@ export async function syncSubscribersFromUsers(): Promise<{
           },
         });
       }
-      upserted += 1;
+      expectedSyncs.push({ userId: String(user._id), email, role });
     }
 
     if (operations.length > 0) {
-      await MarketingSubscriber.bulkWrite(operations, { ordered: false });
+      const result = await MarketingSubscriber.bulkWrite(operations, { ordered: false });
+      // Mongoose reports per-operation cast/default failures on the result
+      // instead of rejecting the promise. Never claim a sync that wrote nothing.
+      const validationErrors = (result as any)?.mongoose?.validationErrors;
+      if (Array.isArray(validationErrors) && validationErrors.length > 0) {
+        throw validationErrors[0];
+      }
+    }
+
+    // Report persisted local subscriber rows, including a concurrent zero-match write.
+    if (expectedSyncs.length > 0) {
+      const persisted = await MarketingSubscriber.find({
+        userId: { $in: expectedSyncs.map(row => row.userId) },
+        consentVerifiedAt: { $type: 'date' },
+        unsubscribedAt: null,
+      }).select('userId emailNormalized email role').lean();
+      const synced = new Set(persisted.map(row => `${row.userId}:${normalizeEmail(row.emailNormalized || row.email)}:${row.role}`));
+      for (const row of expectedSyncs) {
+        if (!synced.has(`${row.userId}:${row.email}:${row.role}`)) continue;
+        syncedByRole[row.role] += 1;
+        upserted += 1;
+      }
     }
 
     lastUserId = users[users.length - 1]._id;
     if (users.length < SYNC_BATCH_SIZE) break;
   }
 
-  return { upserted, unsubscribed };
+  return {
+    upserted,
+    unsubscribed,
+    eligibleByRole,
+    syncedByRole,
+    skippedByRole: {
+      customer: Math.max(0, eligibleByRole.customer - syncedByRole.customer),
+      professional: Math.max(0, eligibleByRole.professional - syncedByRole.professional),
+    },
+  };
+}
+
+/**
+ * Repair canonical metadata on an existing consented subscriber row after a
+ * professional changes their country, service categories or language. Never
+ * creates a row, never grants consent, and never touches a lead.
+ */
+export async function refreshSubscriberProfileFromUser(user: any): Promise<void> {
+  const email = normalizeEmail(user?.email);
+  if (!email) return;
+  try {
+    const existing = await MarketingSubscriber.findOne({
+      $or: [
+        ...(user?._id ? [{ userId: user._id }] : []),
+        { email },
+        { emailNormalized: email },
+      ],
+      unsubscribedAt: null,
+      consentVerifiedAt: { $type: 'date' },
+    })
+      .select('_id')
+      .lean();
+    if (!existing) return;
+    const serviceIndex = await loadServiceIndexSafe('profile update');
+    if (!serviceIndex) return;
+    const profile = subscriberProfileForUser(user, [], serviceIndex);
+    const set: Record<string, unknown> = {
+      emailNormalized: email,
+      role: profile.role,
+      locale: profile.locale,
+      localeSource: profile.localeSource,
+      interestedServices: profile.interestedServices,
+      serviceKeys: profile.serviceKeys,
+      name: profile.name,
+      firstName: profile.firstName,
+      region: profile.region,
+    };
+    const unset: Record<string, 1> = {};
+    for (const key of ['role', 'name', 'firstName', 'region'] as const) {
+      if (set[key] === undefined) {
+        delete set[key];
+        unset[key] = 1;
+      }
+    }
+    await MarketingSubscriber.updateOne(
+      { _id: existing._id },
+      { $set: set, ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}) },
+    );
+  } catch (error) {
+    // The profile write already succeeded. Keep it and let the next sync repair.
+    console.error('[MARKETING] Subscriber profile refresh failed', safeErrorSummary(error));
+  }
 }
 
 /** Retry Brevo suppression for locally unsubscribed contacts. */

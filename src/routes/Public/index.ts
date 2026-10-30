@@ -29,6 +29,10 @@ import {
   listPublicSiteAnnouncements,
   recordSiteAnnouncementEvent,
 } from "../../handlers/Public/siteAnnouncements";
+import {
+  getPublicLoyaltyTiers,
+  getPublicProfessionalLevels,
+} from "../../handlers/Public/levelTiers";
 import { unsubscribeMarketing } from "../../handlers/Public/marketingUnsubscribe";
 import { getMarketingLanguages } from "../../handlers/Public/marketingLanguages";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
@@ -128,6 +132,14 @@ publicRouter.route("/site-announcements").get(schedulingRateLimiter, listPublicS
 publicRouter
   .route("/site-announcements/:id/event")
   .post(schedulingRateLimiter, recordSiteAnnouncementEvent);
+
+// Tier/level tag colours (public, display-safe fields only)
+publicRouter
+  .route("/loyalty-tiers")
+  .get(schedulingRateLimiter, getPublicLoyaltyTiers);
+publicRouter
+  .route("/professional-levels")
+  .get(schedulingRateLimiter, getPublicProfessionalLevels);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);

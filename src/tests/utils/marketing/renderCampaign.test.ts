@@ -101,4 +101,25 @@ describe('marketing template contract', () => {
     expect(result.htmlContent).toContain('Preview line');
     expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
   });
+
+  it('uses a neutral footer for lead-inclusive campaigns and keeps the subscriber footer', () => {
+    const invitation = renderMarketingEmail({
+      locale: 'nl',
+      firstName: 'Ada',
+      content: { subject: 'Uitnodiging', htmlContent: '<p>Body</p>' },
+      footerVariant: 'invitation',
+    });
+    expect(invitation.htmlContent).toContain('professionele uitnodiging');
+    expect(invitation.htmlContent).not.toContain('ingeschreven voor');
+    expect(invitation.htmlContent).not.toContain('/profile?tab=notifications');
+    expect(invitation.htmlContent).toContain('Uitschrijven');
+
+    const subscriber = renderMarketingEmail({
+      locale: 'nl',
+      firstName: 'Ada',
+      content: { subject: 'Nieuws', htmlContent: '<p>Body</p>' },
+    });
+    expect(subscriber.htmlContent).toContain('ingeschreven voor');
+    expect(subscriber.htmlContent).toContain('/profile?tab=notifications');
+  });
 });

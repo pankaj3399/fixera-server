@@ -2,8 +2,30 @@ import mongoose, { Document, Schema } from 'mongoose';
 import { MARKETING_LOCALES, type MarketingLocale } from '../utils/marketing/marketingCatalog';
 export { MARKETING_LOCALES } from '../utils/marketing/marketingCatalog';
 
-export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement'] as const;
+export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement', 'invitation'] as const;
 export type MarketingCampaignType = (typeof MARKETING_CAMPAIGN_TYPES)[number];
+
+export const MARKETING_AUDIENCE_TYPES = ['subscribers', 'both', 'leads'] as const;
+export type MarketingAudienceType = (typeof MARKETING_AUDIENCE_TYPES)[number];
+
+/**
+ * Missing/null/empty means subscribers. Unknown stored values return undefined
+ * so callers can fail safely instead of silently widening a legacy campaign.
+ */
+export function campaignAudienceType(value: unknown): MarketingAudienceType | undefined {
+  if (value === undefined || value === null) return 'subscribers';
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return 'subscribers';
+  return (MARKETING_AUDIENCE_TYPES as readonly string[]).includes(normalized)
+    ? (normalized as MarketingAudienceType)
+    : undefined;
+}
+
+export function isLeadAudienceType(value: unknown): boolean {
+  const audienceType = campaignAudienceType(value);
+  return audienceType === 'leads' || audienceType === 'both';
+}
 
 export const MARKETING_CAMPAIGN_STATUSES = [
   'draft',
@@ -42,6 +64,7 @@ export interface ICampaignLocaleDelivery {
   brevoStatus?: 'created' | 'sent';
   recipientCount: number;
   subscriberCount?: number;
+  leadCount?: number;
   deduplicatedRecipientCount?: number;
   criteriaHash?: string;
   stats?: {
@@ -60,6 +83,8 @@ export interface IMarketingCampaign extends Document {
   name: string;
   type: MarketingCampaignType;
   status: MarketingCampaignStatus;
+  /** Subscribers only, or an invitation campaign that also targets leads. */
+  audienceType: MarketingAudienceType;
   /** Content keyed by locale */
   content: Partial<Record<string, ICampaignLocaleContent>>;
   audience: ICampaignAudience;
@@ -121,6 +146,7 @@ const deliverySchema = new Schema<ICampaignLocaleDelivery>(
     brevoStatus: { type: String, enum: ['created', 'sent'] },
     recipientCount: { type: Number, default: 0 },
     subscriberCount: { type: Number, default: 0 },
+    leadCount: { type: Number, default: 0 },
     deduplicatedRecipientCount: { type: Number, default: 0 },
     criteriaHash: { type: String, trim: true },
     stats: {
@@ -152,6 +178,16 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
       default: 'draft',
       index: true,
     },
+    // No schema enum: a removed legacy flow may have stored a value outside the
+    // current set. Handlers validate new writes and block sends/previews until
+    // an unknown stored value is explicitly corrected.
+    audienceType: {
+      type: String,
+      default: 'subscribers',
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
     // Mixed keeps old en/nl/fr documents readable while allowing the catalog
     // to grow without another schema deployment.
     content: { type: Schema.Types.Mixed, default: {} },
@@ -160,6 +196,7 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
       default: () => ({
         countries: [],
         interestedServices: [],
+        serviceKeys: [],
         locales: [],
         roles: ['customer', 'professional'],
       }),

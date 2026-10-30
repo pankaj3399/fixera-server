@@ -23,14 +23,16 @@ export async function notifyBookingPaymentConfirmed(args: {
   let customerName: string | undefined;
   let professionalId: string | undefined;
   let professionalName = 'Professional';
+  let recordedPayment: { totalWithVat?: unknown; amount?: unknown; currency?: unknown } | undefined;
 
   try {
     const Booking = (await import('../../models/booking')).default;
     const booking = await Booking.findById(bookingId)
-      .select('customer professional')
+      .select('customer professional payment.totalWithVat payment.amount payment.currency')
       .populate('customer', 'name')
       .populate('professional', 'name businessInfo username')
       .lean();
+    recordedPayment = (booking as any)?.payment;
     const customer = booking?.customer as any;
     const professional = booking?.professional as any;
     if (customer?._id) {
@@ -69,7 +71,16 @@ export async function notifyBookingPaymentConfirmed(args: {
     throw new Error(`Unable to resolve paid booking notification recipients: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const normalizedCurrency = (currency || 'EUR').toUpperCase();
+  const normalizedCurrency = (currency || (recordedPayment as any)?.currency || 'EUR').toUpperCase();
+  // The paid amount is the VAT-inclusive gross the customer was charged —
+  // the same recorded total booking details shows. Prefer the recorded
+  // payment gross over whatever the caller passed (callers historically
+  // passed the pre-VAT net).
+  const recordedTotal = (recordedPayment as any)?.totalWithVat;
+  const recordedGross = recordedTotal == null ? NaN : Number(recordedTotal);
+  const grossAmount = Number.isFinite(recordedGross)
+    ? recordedGross
+    : (typeof amount === 'number' ? amount : undefined);
   // Stable per-booking keys so confirmPayment + webhook dedupe to a single inbox
   // row/email even when both run (and so milestone/second-PI retries don't
   // re-notify). paymentIntentId is accepted for future traceability but must NOT
@@ -88,11 +99,12 @@ export async function notifyBookingPaymentConfirmed(args: {
         eventKey: 'customer.payment_confirmed',
         entityType: 'booking',
         entityId: bookingId,
+        subjectUserId: professionalId,
         idempotencyKey: customerKey,
         context: {
           bookingId,
           professionalName,
-          ...(typeof amount === 'number' ? { amount } : {}),
+          ...(grossAmount !== undefined ? { amount: grossAmount } : {}),
           currency: normalizedCurrency,
         },
         delivery: { strict: true },
@@ -105,11 +117,13 @@ export async function notifyBookingPaymentConfirmed(args: {
         eventKey: 'professional.booking_created',
         entityType: 'booking',
         entityId: bookingId,
+        actorId: customerId,
+        subjectUserId: customerId,
         idempotencyKey: professionalKey,
         context: {
           bookingId,
           customerName,
-          ...(typeof amount === 'number' ? { amount } : {}),
+          ...(grossAmount !== undefined ? { amount: grossAmount } : {}),
           currency: normalizedCurrency,
         },
         delivery: { strict: true },

@@ -5,6 +5,7 @@ import WarrantyClaim, {
   IWarrantyClaim,
   WarrantyClaimStatus,
 } from "../../models/warrantyClaim";
+import Project from "../../models/project";
 import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import User from "../../models/user";
@@ -30,6 +31,9 @@ import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 import { notify } from "../../utils/notifications/notify";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { params } from "../../utils/requestParams";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
+import { UserFacingError } from "../../utils/appErrors";
+import { isAnonymizedAccount, maskAnonymizedUser, maskWarrantyClaimForAnonymizedParties, referenceId } from "../../utils/accountAnonymity";
 
 const WARRANTY_ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -97,9 +101,18 @@ const validateWarrantyUrlsForClaim = (urls: string[], claim: any, userId: string
   return { validUrls, invalidUrls };
 };
 
-const presignClaim = async (claim: any) => {
+const presignClaim = async (
+  claim: any,
+  flags: {
+    customerId?: string;
+    professionalId?: string;
+    customerAnonymized?: boolean;
+    professionalAnonymized?: boolean;
+  } = {},
+) => {
   if (!claim) return claim;
-  const obj = claim.toObject ? claim.toObject() : { ...claim };
+  const raw = claim.toObject ? claim.toObject() : { ...claim };
+  const obj = maskWarrantyClaimForAnonymizedParties(raw, flags);
   if (Array.isArray(obj.evidence) && obj.evidence.length > 0) {
     const results = await Promise.all(
       obj.evidence.map(async (url: string) => {
@@ -123,6 +136,8 @@ const presignClaim = async (claim: any) => {
       })
     );
   }
+  obj.customer = maskAnonymizedUser(obj.customer);
+  obj.professional = maskAnonymizedUser(obj.professional);
   return obj;
 };
 
@@ -546,7 +561,9 @@ export const attachClaimEvidence = async (req: Request, res: Response) => {
 
     const newUrls = uploaded.map((f) => f.url);
     claim.evidence = [...(claim.evidence || []), ...newUrls];
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     return res.status(200).json({
       success: true,
@@ -678,6 +695,19 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
         msg: "Booking has no assigned professional",
       });
     }
+    const professionalAccount = await User.findById(professionalId)
+      .select("deletedAt isAnonymized")
+      .lean();
+    if (
+      !professionalAccount
+      || professionalAccount.deletedAt
+      || professionalAccount.isAnonymized
+    ) {
+      return res.status(409).json({
+        success: false,
+        msg: "The counterparty account is no longer active.",
+      });
+    }
 
     const { validUrls: evidenceUrls, invalidUrls: invalidEvidenceUrls } = validateWarrantyUrlsForUser(
       Array.isArray(evidence) ? evidence.slice(0, 10) : [],
@@ -688,20 +718,35 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
     }
 
     const openedAt = new Date();
-    const claim = await WarrantyClaim.create({
-      booking: booking._id,
-      customer: booking.customer,
-      professional: professionalId,
-      reason,
-      description: description.trim(),
-      evidence: evidenceUrls,
-      warrantyEndsAt: warrantyCoverage.endsAt,
-      openedAt,
-      sla: {
-        professionalResponseDueAt: addWorkingDays(openedAt, PROFESSIONAL_RESPONSE_DAYS),
-        customerAutoCloseDays: CUSTOMER_AUTO_CLOSE_DAYS,
-      },
-    });
+    let claim: any;
+    try {
+      [claim] = await withAnonymizationWriteFence(
+        [booking.customer, professionalId],
+        async (session) => WarrantyClaim.create([{
+          booking: booking._id,
+          customer: booking.customer,
+          professional: professionalId,
+          reason,
+          description: description.trim(),
+          evidence: evidenceUrls,
+          warrantyEndsAt: warrantyCoverage.endsAt,
+          openedAt,
+          sla: {
+            professionalResponseDueAt: addWorkingDays(openedAt, PROFESSIONAL_RESPONSE_DAYS),
+            customerAutoCloseDays: CUSTOMER_AUTO_CLOSE_DAYS,
+          },
+        }], { session }),
+      );
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+          success: false,
+          msg: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
 
     await ensureWarrantyChatContext({
       customerId: booking.customer as Types.ObjectId,
@@ -722,6 +767,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
       if (professionalUser?._id) {
         await notify({
           userId: professionalUser._id.toString(),
+          actorId: userId,
           eventKey: 'professional.warranty_claim_opened',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -759,14 +805,19 @@ export const getWarrantyClaimByBooking = async (req: Request, res: Response) => 
       return res.status(400).json({ success: false, msg: "Invalid bookingId" });
     }
 
-    const booking = await Booking.findById(bookingId).select("customer professional");
+    const booking = await Booking.findById(bookingId)
+      .select("customer professional")
+      .populate("customer", "isAnonymized deletedAt")
+      .populate("professional", "isAnonymized deletedAt");
     if (!booking) {
       return res.status(404).json({ success: false, msg: "Booking not found" });
     }
 
+    const customerId = referenceId(booking.customer);
+    const professionalId = referenceId(booking.professional);
     const userIsParticipant =
-      booking.customer.toString() === userId ||
-      booking.professional?.toString() === userId ||
+      customerId === userId ||
+      professionalId === userId ||
       isAdmin(req);
     if (!userIsParticipant) {
       return res.status(403).json({ success: false, msg: "Not authorized for this booking" });
@@ -780,9 +831,15 @@ export const getWarrantyClaimByBooking = async (req: Request, res: Response) => 
       WarrantyClaim.findOne({ booking: booking._id }).sort({ createdAt: -1 }),
     ]);
 
+    const maskFlags = {
+      customerId: customerId || undefined,
+      professionalId: professionalId || undefined,
+      customerAnonymized: isAnonymizedAccount(booking.customer),
+      professionalAnonymized: isAnonymizedAccount(booking.professional),
+    };
     const [activeClaim, latestClaim] = await Promise.all([
-      presignClaim(activeClaimRaw),
-      presignClaim(latestClaimRaw),
+      presignClaim(activeClaimRaw, maskFlags),
+      presignClaim(latestClaimRaw, maskFlags),
     ]);
 
     return res.status(200).json({
@@ -811,8 +868,8 @@ export const getWarrantyClaimById = async (req: Request, res: Response) => {
 
     const claim = await WarrantyClaim.findById(claimId)
       .populate("booking", "bookingNumber status")
-      .populate("customer", "name email")
-      .populate("professional", "name email businessInfo");
+      .populate("customer", "name email isAnonymized deletedAt")
+      .populate("professional", "name email businessInfo isAnonymized deletedAt");
     if (!claim) {
       return res.status(404).json({ success: false, msg: "Warranty claim not found" });
     }
@@ -841,7 +898,7 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, msg: "Authentication required" });
     }
 
-    const { status, page = "1", limit = "20" } = req.query;
+    const { status, page = "1", limit = "20", q, search, bookingId, service } = req.query;
     const pageNumber = Math.max(Number.parseInt(String(page), 10) || 1, 1);
     const limitNumber = Math.min(Math.max(Number.parseInt(String(limit), 10) || 20, 1), 100);
     const skip = (pageNumber - 1) * limitNumber;
@@ -853,11 +910,88 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     if (role === "customer") query.customer = toObjectId(userId);
     if (role === "professional") query.professional = toObjectId(userId);
 
+    // Literal search: claim number substring (escaped, never raw regex) or
+    // exact booking identity. Booking-number text resolves through the
+    // viewer's own bookings, preserving role ownership.
+    const searchRaw = typeof q === "string" && q ? q
+      : typeof search === "string" && search ? search : "";
+    const trimmedSearch = searchRaw.trim().slice(0, 80);
+    if (trimmedSearch) {
+      const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
+      const searchOr: Record<string, any>[] = [{ claimNumber: regex }];
+      // Scope booking-number resolution to the viewer's own bookings,
+      // mirroring the my-bookings role scope (pro includes owned projects).
+      let bookingScope: Record<string, any> = {};
+      if (query.customer) {
+        bookingScope = { customer: query.customer };
+      } else if (query.professional) {
+        const ownedProjectIds = await Project.find({ professionalId: query.professional }).select("_id").lean();
+        bookingScope = {
+          $or: [
+            { professional: query.professional },
+            { project: { $in: ownedProjectIds.map((p: any) => p._id) } },
+          ],
+        };
+      }
+      if (mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+        const scoped = await WarrantyClaim.exists({ ...bookingScope, booking: new mongoose.Types.ObjectId(trimmedSearch) });
+        if (scoped) {
+          searchOr.push({ booking: new mongoose.Types.ObjectId(trimmedSearch) });
+        } else {
+          searchOr.push({ claimNumber: regex });
+        }
+      } else {
+        const matchingBookings = await Booking.find({
+          ...bookingScope,
+          bookingNumber: regex,
+        }).select("_id").lean();
+        if (matchingBookings.length > 0) {
+          searchOr.push({ booking: { $in: matchingBookings.map((b: any) => b._id) } });
+        }
+      }
+      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+    }
+
+    if (bookingId && typeof bookingId === "string" && mongoose.Types.ObjectId.isValid(bookingId)) {
+      query.booking = new mongoose.Types.ObjectId(bookingId);
+    }
+
+    // Service filter resolves through the viewer's own bookings.
+    if (service && typeof service === "string" && service !== "all") {
+      const serviceProjectIds = await Project.find({ service }).select("_id").lean();
+      const serviceOr: Record<string, any>[] = [{ "rfqData.serviceType": service }];
+      if (serviceProjectIds.length > 0) {
+        serviceOr.push({ project: { $in: serviceProjectIds.map((p: any) => p._id) } });
+      }
+      // Preserve the role scope ($or for professionals) under $and so the
+      // service $or cannot clobber it.
+      const serviceBookingFilter: Record<string, any> = { $and: [{ $or: serviceOr }] };
+      if (query.customer) {
+        serviceBookingFilter.$and.push({ customer: query.customer });
+      } else if (query.professional) {
+        const ownedProjectIds = await Project.find({ professionalId: query.professional }).select("_id").lean();
+        serviceBookingFilter.$and.push({
+          $or: [
+            { professional: query.professional },
+            { project: { $in: ownedProjectIds.map((p: any) => p._id) } },
+          ],
+        });
+      }
+      const serviceBookings = await Booking.find(serviceBookingFilter).select("_id").lean();
+      const serviceIdSet = new Set(serviceBookings.map((b: any) => String(b._id)));
+      if (query.booking) {
+        query.booking = serviceIdSet.has(String(query.booking)) ? query.booking : { $in: [] };
+      } else {
+        query.booking = { $in: Array.from(serviceIdSet) };
+      }
+    }
+
     const [claims, total] = await Promise.all([
       WarrantyClaim.find(query)
         .populate("booking", "bookingNumber status")
-        .populate("customer", "name email")
-        .populate("professional", "name email businessInfo")
+        .populate("customer", "name email isAnonymized deletedAt")
+        .populate("professional", "name email businessInfo isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),
@@ -950,7 +1084,9 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: "Professional submitted warranty resolve proposal",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -971,6 +1107,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
       if (customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: userId,
           eventKey: 'customer.warranty_proposal_sent',
           entityType: 'booking',
           entityId: String(claim.booking),
@@ -1035,7 +1172,9 @@ export const declineWarrantyClaim = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: `Professional declined claim: ${reason.trim()}`,
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1066,12 +1205,28 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
       return res.status(403).json({ success: false, msg: "Only customers can respond to proposals" });
     }
     const { claimId } = params(req.params);
-    const { action, note } = req.body as { action?: "accept" | "decline"; note?: string };
+    const { action, note, clarification, reason } = req.body as { action?: "accept" | "decline"; note?: string; clarification?: string; reason?: string };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
     if (!action || !["accept", "decline"].includes(action)) {
       return res.status(400).json({ success: false, msg: "Action must be accept or decline" });
+    }
+    // Client bug list #16: declining requires a clarification (popup). The
+    // field is accepted under `clarification` (preferred), `reason` or the
+    // legacy `note`; it is optional when accepting.
+    const clarificationText = typeof clarification === "string" && clarification.trim()
+      ? clarification.trim()
+      : typeof reason === "string" && reason.trim()
+        ? reason.trim()
+        : typeof note === "string" && note.trim()
+          ? note.trim()
+          : "";
+    if (action === "decline" && clarificationText.length < 3) {
+      return res.status(400).json({
+        success: false,
+        error: { code: "CLARIFICATION_REQUIRED", message: "Please explain why you are declining the proposal" },
+      });
     }
 
     const claim = await WarrantyClaim.findById(claimId);
@@ -1093,7 +1248,7 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
 
     claim.proposal.customerDecision = action === "accept" ? "accepted" : "declined";
     claim.proposal.decidedAt = new Date();
-    claim.proposal.decisionNote = note?.trim();
+    claim.proposal.decisionNote = clarificationText || undefined;
 
     if (action === "accept") {
       claim.status = "proposal_accepted";
@@ -1110,7 +1265,7 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
         escalatedBy: toObjectId(userId),
         autoEscalated: false,
         reason: "Customer declined warranty proposal",
-        note: note?.trim(),
+        note: clarificationText,
       };
       claim.statusHistory.push({
         status: "escalated",
@@ -1120,7 +1275,9 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
       });
     }
 
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1135,6 +1292,32 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
           ? `Warranty claim ${claim.claimNumber}: customer accepted proposal.`
           : `Warranty claim ${claim.claimNumber}: customer declined proposal and escalated.`,
     });
+
+    if (action === "decline") {
+      try {
+        const [customerUser, professionalUser] = await Promise.all([
+          User.findById(claim.customer).select("_id name").lean(),
+          User.findById(claim.professional).select("_id name").lean(),
+        ]);
+        if (professionalUser?._id) {
+          await notify({
+            userId: String(professionalUser._id),
+            actorId: userId,
+            eventKey: "professional.warranty_proposal_declined",
+            entityType: "booking",
+            entityId: String(claim.booking),
+            context: {
+              bookingId: String(claim.booking),
+              customerName: customerUser?.name || "The customer",
+              claimNumber: claim.claimNumber || String(claim._id),
+              clarification: clarificationText,
+            },
+          });
+        }
+      } catch (notifyError: any) {
+        console.error("Failed to notify warranty-proposal-declined:", notifyError?.message || notifyError);
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -1205,7 +1388,9 @@ export const markWarrantyResolved = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: "Professional marked warranty claim resolved",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1265,7 +1450,9 @@ export const confirmWarrantyResolution = async (req: Request, res: Response) => 
       updatedBy: toObjectId(userId),
       note: "Customer confirmed warranty resolution",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1333,7 +1520,9 @@ export const escalateWarrantyClaim = async (req: Request, res: Response) => {
       updatedBy: toObjectId(userId),
       note: reason?.trim() || "Claim manually escalated",
     });
-    await claim.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await claim.save(session ? { session } : undefined);
+    });
 
     await ensureWarrantyChatContext({
       customerId: claim.customer,
@@ -1780,8 +1969,8 @@ export const listAdminWarrantyClaims = async (req: Request, res: Response) => {
     const [claims, total] = await Promise.all([
       WarrantyClaim.find(query)
         .populate("booking", "bookingNumber status")
-        .populate("customer", "name email")
-        .populate("professional", "name email businessInfo")
+        .populate("customer", "name email isAnonymized deletedAt")
+        .populate("professional", "name email businessInfo isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),

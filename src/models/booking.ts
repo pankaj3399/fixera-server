@@ -125,6 +125,8 @@ export interface IQuoteVersion {
   rejectedBy?: Types.ObjectId;
   /** Customer-facing amounts frozen at submit/edit; absent for legacy versions. */
   customerTotals?: IQuoteCustomerTotals;
+  /** Earliest feasible execution start computed server-side at submit/edit; null when unavailable. */
+  firstPossibleStart?: Date | null;
   /** Service address as submitted with this version; absent for legacy versions. */
   serviceLocation?: {
     country?: string;
@@ -180,6 +182,7 @@ export interface IBookingSnapshot {
   selectedSubproject?: Record<string, unknown>;
   selectedExtraOptions?: Array<Record<string, unknown>>;
   checkoutSnapshot?: Record<string, unknown>;
+  scheduleSnapshot?: { quantity?: number; executionDuration?: { value: number; unit: 'hours' | 'days' }; preparationDuration?: { value: number; unit: 'hours' | 'days' }; bufferDuration?: { value: number; unit: 'hours' | 'days' }; version?: number };
   parties?: Record<string, unknown>;
   serviceConfigurationId?: string;
 }
@@ -494,7 +497,7 @@ export interface IBooking extends Document {
   actualStartDate?: Date;
   actualEndDate?: Date;
   rescheduleRequest?: {
-    status: 'pending' | 'accepted' | 'declined';
+    status: 'pending' | 'accepted' | 'declined' | 'disputed';
     requestedBy: Types.ObjectId;
     requestedAt: Date;
     reason: string;
@@ -514,7 +517,7 @@ export interface IBooking extends Document {
     note?: string;
     previousSchedule?: IBookingScheduleSnapshot;
     proposedSchedule: IBookingScheduleSnapshot;
-    status: 'accepted' | 'declined' | 'auto_cancelled';
+    status: 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
     respondedAt?: Date;
     respondedBy?: Types.ObjectId;
     responseNote?: string;
@@ -581,6 +584,7 @@ export interface IBooking extends Document {
   cancellation?: {
     cancelledBy: Types.ObjectId; // User who cancelled
     reason: string;
+    adminResolutionNote?: string;
     cancelledAt: Date;
     refundAmount?: number;
   };
@@ -707,6 +711,7 @@ const BookingSnapshotSchema = new Schema(
     selectedSubproject: { type: Schema.Types.Mixed },
     selectedExtraOptions: { type: [Schema.Types.Mixed], default: undefined },
     checkoutSnapshot: { type: Schema.Types.Mixed },
+    scheduleSnapshot: { type: Schema.Types.Mixed },
     parties: { type: Schema.Types.Mixed },
     serviceConfigurationId: { type: String, maxlength: 64 },
   },
@@ -973,6 +978,7 @@ const BookingSchema = new Schema({
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     customerTotals: { type: QuoteCustomerTotalsSchema },
     serviceLocation: { type: QuoteServiceLocationSchema },
+    firstPossibleStart: { type: Date },
   }],
   currentQuoteVersion: { type: Number },
   acceptedQuoteVersion: { type: Number, min: 1 },
@@ -1280,7 +1286,7 @@ const BookingSchema = new Schema({
   rescheduleRequest: {
     status: {
       type: String,
-      enum: ['pending', 'accepted', 'declined'],
+      enum: ['pending', 'accepted', 'declined', 'disputed'],
     },
     requestedBy: {
       type: Schema.Types.ObjectId,
@@ -1349,7 +1355,7 @@ const BookingSchema = new Schema({
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
-    status: { type: String, enum: ['accepted', 'declined', 'auto_cancelled'], required: true },
+    status: { type: String, enum: ['accepted', 'declined', 'disputed', 'auto_cancelled'], required: true },
     respondedAt: {
       type: Date,
       required: function (this: any) {
@@ -1505,6 +1511,10 @@ const BookingSchema = new Schema({
       type: String,
       maxlength: 500
     },
+    adminResolutionNote: {
+      type: String,
+      maxlength: 500
+    },
     cancelledAt: {
       type: Date,
       default: Date.now
@@ -1544,7 +1554,8 @@ const BookingSchema = new Schema({
     referenceIndex: { type: Number },
     estimatedUnits: { type: Number },
     actualUnits: { type: Number },
-    unitPrice: { type: Number }
+    unitPrice: { type: Number },
+    unit: { type: String, maxlength: 50 }
   }],
   extraCostStatus: {
     type: String,

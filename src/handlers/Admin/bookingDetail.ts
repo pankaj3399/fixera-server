@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import mongoose from "mongoose";
 import Booking from "../../models/booking";
+import User from "../../models/user";
 import Payment from "../../models/payment";
 import CancellationRequest from "../../models/cancellationRequest";
 import { auditLog } from "../../utils/auditLogger";
@@ -10,6 +11,11 @@ import {
   filterRawBookingForAdminArea,
   resolveBookingAdminAccess,
 } from "../../utils/bookingDetails/adminAccess";
+import {
+  maskAnonymizedUser,
+  maskBookingForAnonymizedParties,
+  maskCancellationRequestForAnonymizedParties,
+} from "../../utils/accountAnonymity";
 
 export const ADMIN_FORCEABLE_STATUSES = [
   "payment_pending",
@@ -28,13 +34,13 @@ export const getAdminBookingDetail = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(id)
-      .populate("customer", "name username email phone role customerType location vatNumber totalSpent timeZone businessName")
-      .populate("professional", "name username email phone role businessInfo vatNumber timeZone")
+      .populate("customer", "name username email phone role customerType location vatNumber totalSpent timeZone businessName isAnonymized deletedAt")
+      .populate("professional", "name username email phone role businessInfo vatNumber timeZone isAnonymized deletedAt")
       .populate("project", "title description pricing category service areaOfWork timeMode priceModel media rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration services customConfirmationMessage resources")
-      .populate("rescheduleHistory.requestedBy", "name email")
-      .populate("rescheduleHistory.respondedBy", "name email")
-      .populate("dispute.raisedBy", "name email")
-      .populate("dispute.resolvedBy", "name email")
+      .populate("rescheduleHistory.requestedBy", "name email isAnonymized deletedAt")
+      .populate("rescheduleHistory.respondedBy", "name email isAnonymized deletedAt")
+      .populate("dispute.raisedBy", "name email isAnonymized deletedAt")
+      .populate("dispute.resolvedBy", "name email isAnonymized deletedAt")
       .lean();
 
     if (!booking) {
@@ -54,15 +60,15 @@ export const getAdminBookingDetail = async (req: Request, res: Response) => {
     const [payment, cancellationRequests] = await Promise.all([
       adminAccess.payments
         ? Payment.findOne({ booking: id })
-            .populate("customer", "name email")
-            .populate("professional", "name email")
+            .populate("customer", "name email isAnonymized deletedAt")
+            .populate("professional", "name email isAnonymized deletedAt")
             .lean()
         : Promise.resolve(null),
       adminAccess.cancellations
         ? CancellationRequest.find({ booking: id })
             .sort({ createdAt: -1 })
-            .populate("requestedBy", "name email")
-            .populate("resolvedBy", "name email")
+            .populate("requestedBy", "name email isAnonymized deletedAt")
+            .populate("resolvedBy", "name email isAnonymized deletedAt")
             .lean()
         : Promise.resolve([]),
     ]);
@@ -74,12 +80,42 @@ export const getAdminBookingDetail = async (req: Request, res: Response) => {
       adminAccess,
     });
 
+    const projectProfessionalId = String((booking as any).project?.professionalId || "");
+    let projectProfessionalAnonymized = false;
+    if (projectProfessionalId && !(booking as any).professional) {
+      const projectProfessional = await User.findById(projectProfessionalId)
+        .select("isAnonymized deletedAt")
+        .lean();
+      projectProfessionalAnonymized = Boolean(
+        projectProfessional?.isAnonymized || projectProfessional?.deletedAt,
+      );
+    }
+    const maskingFlags = projectProfessionalAnonymized
+      ? { professional: true, professionalId: projectProfessionalId }
+      : {};
+
     return res.json({
       success: true,
       data: {
-        booking: filterRawBookingForAdminArea(booking, adminAccess),
-        payment,
-        cancellationRequests,
+        booking: maskBookingForAnonymizedParties(
+          filterRawBookingForAdminArea(booking, adminAccess),
+          maskingFlags,
+        ),
+        payment: payment
+          ? {
+              ...payment,
+              customer: maskAnonymizedUser(payment.customer),
+              professional: maskAnonymizedUser(payment.professional),
+            }
+          : null,
+        cancellationRequests: cancellationRequests.map((request) =>
+          maskCancellationRequestForAnonymizedParties(request, {
+            customerId: String((booking as any).customer?._id || (booking as any).customer || ""),
+            professionalId: String((booking as any).professional?._id || (booking as any).professional || ""),
+            customerAnonymized: Boolean((booking as any).customer?.isAnonymized || (booking as any).customer?.deletedAt),
+            professionalAnonymized: Boolean((booking as any).professional?.isAnonymized || (booking as any).professional?.deletedAt),
+          }),
+        ),
         details,
       },
     });

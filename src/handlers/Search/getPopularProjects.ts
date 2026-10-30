@@ -20,6 +20,13 @@ export const getPopularProjects = async (req: Request, res: Response) => {
       typeof service === "string" && service.trim() ? service.trim() : null;
 
     const match: Record<string, unknown> = { status: "published" };
+    const activeProfessionalIds = await User.distinct("_id", {
+      role: "professional",
+      professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
+    });
+    match.professionalId = { $in: activeProfessionalIds };
     const serviceMatch = serviceFilter ? popularServiceMatch(serviceFilter) : null;
     if (serviceMatch) {
       Object.assign(match, serviceMatch);

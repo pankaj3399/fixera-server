@@ -1,4 +1,5 @@
 import { getExtraCostQuantity, roundLineAmount } from "./invoiceLineQuantity";
+import type { VatPricingLineInput } from "./vatLineCalculation";
 
 /**
  * What the customer pays for a professional's price: the price plus the
@@ -27,6 +28,35 @@ export const commissionMultiplier = (commissionPercent: number): number =>
 
 export const withCommission = (amount: number, commissionPercent: number): number =>
   roundMoney(amount * commissionMultiplier(commissionPercent));
+
+/**
+ * Commission-inclusive copy of professional pricing lines for VAT.
+ * VAT is charged on the price AFTER commission is included, so every line's
+ * VAT base is the customer-facing amount. Per-line rounding can drift by a
+ * cent from the whole-quote commissioned total; the drift is absorbed on the
+ * last line so the line sum is exactly the recorded customer net.
+ */
+export const commissionedPricingLines = (
+  lines: VatPricingLineInput[],
+  customerNetAmount: number,
+  commissionPercent: number,
+): VatPricingLineInput[] => {
+  if (!Array.isArray(lines) || lines.length === 0) return [];
+  const commissioned = lines.map((line) => ({
+    ...line,
+    price: withCommission(Number(line.price) || 0, commissionPercent),
+  }));
+  const sum = roundMoney(commissioned.reduce((total, line) => total + line.price, 0));
+  const drift = roundMoney(customerNetAmount - sum);
+  if (Math.abs(drift) >= 0.005) {
+    const last = commissioned[commissioned.length - 1];
+    commissioned[commissioned.length - 1] = {
+      ...last,
+      price: roundMoney(last.price + drift),
+    };
+  }
+  return commissioned;
+};
 
 export const customerUnitPrice = (unitPrice: number, commissionPercent: number): number =>
   withCommission(unitPrice, commissionPercent);

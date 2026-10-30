@@ -10,6 +10,8 @@ export interface IEmailLog extends Document {
   errorMessage?: string;
   relatedBooking?: mongoose.Types.ObjectId;
   relatedUser?: mongoose.Types.ObjectId;
+  /** User whose action produced this email, when known. */
+  actorId?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -21,7 +23,8 @@ const emailLogSchema = new Schema<IEmailLog>({
   status: { type: String, enum: ['sent', 'failed', 'skipped'], required: true },
   errorMessage: { type: String, trim: true, maxlength: 2000 },
   relatedBooking: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
-  relatedUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+  relatedUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true }
 }, {
   timestamps: true
 });

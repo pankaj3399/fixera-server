@@ -2,6 +2,7 @@ import Booking from '../../models/booking';
 import User from '../../models/user';
 import CancellationRequest from '../../models/cancellationRequest';
 import { notify } from './notify';
+import { notifyMilestonePaymentDue } from './milestonePaymentDue';
 import { daysAgo, hasUnpaidExtras, shouldSendReminder } from './reminderRules';
 import { processUnreadChatMirrorReminders } from './processUnreadChatMirrors';
 
@@ -14,6 +15,7 @@ export interface ReminderJobCounts {
   review: number;
   rfqPending: number;
   notStarted: number;
+  milestoneDue: number;
   unreadChat: number;
   idExpiry: number;
   errors: string[];
@@ -45,6 +47,7 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     review: 0,
     rfqPending: 0,
     notStarted: 0,
+    milestoneDue: 0,
     unreadChat: 0,
     idExpiry: 0,
     errors: [],
@@ -173,6 +176,7 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
             eventKey: 'professional.reschedule_requested',
             entityType: 'booking',
             entityId: String(booking._id),
+            ...(customerId ? { subjectUserId: customerId } : {}),
             meta: { reminder: true },
             context: { bookingId: String(booking._id) },
           });
@@ -451,6 +455,28 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     }
   } catch (e: any) {
     counts.errors.push(`notStarted query: ${e?.message || e}`);
+  }
+
+  // --- Milestone payment due (payable but unpaid) ---
+  // Covers custom_date milestones whose due date passed and any transition the
+  // event-driven notifies missed. The per-milestone delivery key dedupes
+  // repeats, so each payable milestone notifies exactly once.
+  try {
+    const bookings = await Booking.find({
+      status: { $in: ['booked', 'in_progress', 'professional_completed'] },
+      milestonePayments: { $elemMatch: { status: { $ne: 'paid' } } },
+    }).select('_id').limit(200);
+
+    for (const candidate of bookings) {
+      try {
+        const result = await notifyMilestonePaymentDue(String(candidate._id), { notifyProfessional: true });
+        if (result.notified) counts.milestoneDue++;
+      } catch (e: any) {
+        counts.errors.push(`milestoneDue ${candidate._id}: ${e?.message || e}`);
+      }
+    }
+  } catch (e: any) {
+    counts.errors.push(`milestoneDue query: ${e?.message || e}`);
   }
 
   // --- Unread chat ≥ 24h (email mirror) ---

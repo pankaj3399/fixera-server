@@ -6,6 +6,8 @@ import Project from "../../models/project";
 import mongoose from "mongoose";
 import {
   buildProjectScheduleWindow,
+  resolveProjectScheduleQuantity,
+  getProjectDurations,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
@@ -19,11 +21,14 @@ import {
   bookingForRequest,
   bookingForViewer,
   sanitizePaymentForViewer,
+  stripProPayoutSummaryForCustomer,
 } from "../../utils/invoiceVisibility";
 import { IUser } from "../../models/user";
+import { maskAnonymizedUser, maskBookingForAnonymizedParties } from "../../utils/accountAnonymity";
 import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 import { sendHandlerError } from '../../utils/handlerErrors';
+import { runWithEmailActor } from '../../utils/emailActorContext';
 import { UserFacingError } from '../../utils/appErrors';
 import { assertValidInvoiceUnit } from '../../utils/invoiceUnits';
 import {
@@ -36,8 +41,8 @@ import {
   resolveBookingAdminAccess,
   type BookingAdminAccess,
 } from '../../utils/bookingDetails/adminAccess';
-import { withCalendarTransaction } from '../../utils/support/calendarReservations';
 import { buildBookingCalendarKeys, reserveBookingCalendar } from '../../utils/support/bookingCalendar';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import {
   captureBookingSnapshotIfMissing,
   loadVatQuestionDefinitions,
@@ -45,6 +50,7 @@ import {
 } from '../../utils/bookingDetails/capture';
 import { isQuestionAnswerUploadOwnedByUser, isUploadOwnedByUser } from '../../utils/bookingDetails/attachments';
 import { presignOwnedUrl, presignQuestionAnswerUrl, referenceId } from '../../utils/bookingDetails/attachments';
+import { selectedPriceModel } from "../../utils/bookingDetails/overviewRows";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
@@ -227,15 +233,14 @@ export const buildCheckoutSnapshot = (params: {
     typeof params.estimatedUsage === "number"
       ? params.estimatedUsage
       : typeof params.estimatedUsage === "string"
-        ? Number.parseFloat(params.estimatedUsage)
+        ? Number(params.estimatedUsage)
         : Number.NaN;
-  const quantity = pricingType === "unit" && Number.isFinite(usageQuantityRaw)
-    ? usageQuantityRaw
-    : 1;
+  const quantity = pricingType === "unit" ? usageQuantityRaw : 1;
 
   if (pricingType === "unit" && (!Number.isFinite(quantity) || quantity <= 0)) {
     return null;
   }
+  if (pricingType === "unit" && quantity < (Number(params.selectedSubproject?.pricing?.minOrderQuantity) > 0 ? Number(params.selectedSubproject.pricing.minOrderQuantity) : 1)) return null;
 
   const selectedOptionIndexes = normalizeSelectedExtraOptionIndexes(params.project, params.selectedExtraOptions);
   const selectedOptions = selectedOptionIndexes.flatMap((optionIndex) => {
@@ -700,6 +705,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     // Validate professional or project exists
+    // Should-fix 4: the engine-resolved conversion zone for scheduleTimeZone
+    // (assigned in the project branch when a window is computed).
+    let engineScheduleZone: string | null = null;
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
       if (!professional || professional.role !== 'professional') {
@@ -902,6 +910,27 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         });
       }
 
+      const selectedSubprojectForCheckout =
+        typeof subprojectIndex === "number" &&
+        Array.isArray(project.subprojects) &&
+        subprojectIndex >= 0 &&
+        subprojectIndex < project.subprojects.length
+          ? project.subprojects[subprojectIndex]
+          : undefined;
+      const checkoutSnapshot = selectedSubprojectForCheckout
+        ? buildCheckoutSnapshot({
+            project,
+            selectedSubproject: selectedSubprojectForCheckout,
+            selectedExtraOptions,
+            estimatedUsage,
+          })
+        : null;
+      const scheduleQuantity = resolveProjectScheduleQuantity(project, subprojectIndex, estimatedUsage);
+      if (!scheduleQuantity.valid) return res.status(400).json({ success: false, msg: scheduleQuantity.error });
+      if (selectedSubprojectForCheckout?.pricing?.type === 'unit' && !checkoutSnapshot) {
+        return res.status(400).json({ success: false, msg: 'A valid quantity and price are required for unit bookings' });
+      }
+
       const isRfqSubproject =
         typeof subprojectIndex === "number" &&
         Array.isArray(project.subprojects) &&
@@ -909,13 +938,24 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         subprojectIndex < project.subprojects.length &&
         (project.subprojects[subprojectIndex] as any)?.pricing?.type === "rfq";
 
+      // Should-fix 4: remember the engine-resolved zone for scheduleTimeZone
+      // (declared on the outer project branch so it survives below).
       if (!isRfqSubproject) {
+        // Client bug list #23b: the wall-clock time is converted to a UTC
+        // instant in the professional's effective zone. Pass the request zone
+        // so the engine does not silently fall back to UTC when the
+        // professional's business info has no usable zone.
+        const requestTimeZone = resolveScheduleTimeZone(
+          req.body?.timeZone || req.body?.scheduleTimeZone,
+        ) || undefined;
         const validation = await validateProjectScheduleSelection({
           projectId,
           subprojectIndex,
           startDate: normalizedStartDate,
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
+          quantity: scheduleQuantity.quantity,
+          requestTimeZone,
         });
 
         if (!validation.valid) {
@@ -933,6 +973,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startDate: normalizedStartDate,
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
+          quantity: scheduleQuantity.quantity,
+          requestTimeZone: resolveScheduleTimeZone(
+            req.body?.timeZone || req.body?.scheduleTimeZone,
+          ) || undefined,
         });
 
         if (!window) {
@@ -942,6 +986,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        engineScheduleZone = typeof window.timeZone === 'string' ? window.timeZone : null;
         bookingData.scheduledStartDate = window.scheduledStartDate;
         if (window.scheduledExecutionEndDate) {
           bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
@@ -1009,21 +1054,19 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
       }
 
-      const selectedSubprojectForCheckout =
-        typeof subprojectIndex === "number" &&
-        Array.isArray(project.subprojects) &&
-        subprojectIndex >= 0 &&
-        subprojectIndex < project.subprojects.length
-          ? project.subprojects[subprojectIndex]
-          : undefined;
-      const checkoutSnapshot = selectedSubprojectForCheckout
-        ? buildCheckoutSnapshot({
-            project,
-            selectedSubproject: selectedSubprojectForCheckout,
-            selectedExtraOptions,
-            estimatedUsage,
-          })
-        : null;
+      if (selectedSubprojectForCheckout && checkoutSnapshot) {
+        const durations = getProjectDurations(project, subprojectIndex, undefined, checkoutSnapshot.quantity);
+        if (!durations && selectedSubprojectForCheckout.pricing?.type === 'unit') {
+          return res.status(400).json({ success: false, msg: 'The selected unit package has no valid execution duration' });
+        }
+        if (durations) bookingData.scheduleSnapshot = {
+          quantity: checkoutSnapshot.quantity,
+          executionDuration: durations.execution,
+          preparationDuration: durations.preparation || { value: 0, unit: 'hours' },
+          bufferDuration: durations.buffer || { value: 0, unit: 'hours' },
+          version: 1,
+        };
+      }
       if (checkoutSnapshot) {
         bookingData.checkoutSnapshot = checkoutSnapshot;
         if (checkoutSnapshot.selectedOptions.length > 0) {
@@ -1108,7 +1151,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     // Freeze the booked package/terms/questions before the first save. This is
     // an absolute whitelist copy; later project edits never touch it.
     const vatQuestionsForSnapshot = await loadVatQuestionDefinitions(configIdForVat);
-    const scheduleTimeZone = resolveScheduleTimeZone(
+    // Should-fix 4: persist the engine-resolved conversion zone (the window
+    // already falls back to the request zone) so details/timeline carry the
+    // resolved zone even when the client sends no timeZone.
+    const scheduleTimeZone = engineScheduleZone || resolveScheduleTimeZone(
       req.body?.timeZone || req.body?.scheduleTimeZone,
     );
     if (scheduleTimeZone) {
@@ -1148,18 +1194,21 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     const needsCalendarLock = buildBookingCalendarKeys(calendarBooking).length > 0;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        if (!needsCalendarLock) {
-          booking = await Booking.create(bookingData);
-        } else {
-          // Reserve the same shared calendar keys as support/Meeting writers in
-          // the same transaction as the booking row. A booking that overlaps a
-          // support meeting (or another booking) cannot be created twice.
-          booking = await withCalendarTransaction(async (session) => {
-            await reserveBookingCalendar(calendarBooking, session);
-            const [created] = await Booking.create([bookingData], { session });
+        booking = await withAnonymizationWriteFence(
+          [userId, bookingData.professional],
+          async (session) => {
+            if (needsCalendarLock) {
+              // Reserve the same shared calendar keys as support/Meeting writers
+              // in the same transaction as the booking row.
+              await reserveBookingCalendar(calendarBooking, session);
+            }
+            const [created] = await Booking.create(
+              [bookingData],
+              session ? { session } : undefined,
+            );
             return created;
-          });
-        }
+          },
+        );
         break;
       } catch (err: any) {
         if (err?.code === 11000 && (err.keyPattern?.bookingNumber || err.keyPattern?.quotationNumber) && attempt < 2) {
@@ -1177,8 +1226,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       customer: Pick<IUser, '_id' | 'name' | 'email' | 'phone'>;
       professional: Pick<IUser, '_id' | 'name' | 'email'>;
     }>([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' },
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' },
       { path: 'project', select: 'title description subprojects.pricing' }
     ]);
 
@@ -1187,6 +1236,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     if (notifyProfessionalId && populated.status === "rfq") {
       await notify({
         userId: notifyProfessionalId,
+        actorId: String(userId),
         eventKey: 'professional.rfq_received',
         entityType: 'booking',
         entityId: populated._id.toString(),
@@ -1203,7 +1253,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       msg:
         populated.status === "quote_accepted"
           ? "Booking created. Proceed to payment."
-          : "Booking request created successfully",
+          : populated.status === "rfq"
+            ? "Quotation request created successfully"
+            : "Booking request created successfully",
       booking: bookingForRequest(populated, req.user)
     });
 
@@ -1253,7 +1305,7 @@ export const uploadRFQAttachment = async (req: Request, res: Response) => {
 export const getMyBookings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
-    const { status, page, limit, service, search, addressFilter, customerNameFilter } = req.query;
+    const { status, page, limit, service, search, q, addressFilter, customerNameFilter } = req.query;
     const parsedPage = Math.max(1, Math.floor(Number(page) || 1));
     const parsedLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)));
 
@@ -1265,18 +1317,18 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    const query: any = {};
+    const baseQuery: any = {};
     let professionalProjectIds: any[] | null = null;
 
     // Build query based on user role
     if (user.role === 'customer') {
-      query.customer = userId;
+      baseQuery.customer = userId;
     } else if (user.role === 'professional') {
       const projectIds = await Project.find({
         professionalId: userId,
       }).select("_id");
       professionalProjectIds = projectIds.map((project) => project._id);
-      query.$or = [
+      baseQuery.$or = [
         { professional: userId },
         { project: { $in: professionalProjectIds } },
       ];
@@ -1287,28 +1339,43 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       });
     }
 
+    // Track per-facet clauses separately so counts can be disjunctive on
+    // their own facet while respecting every other active filter.
+    let statusClause: Record<string, unknown> | null = null;
+    let serviceClause: Record<string, unknown> | null = null;
+    const otherAnd: Record<string, unknown>[] = [];
+
+    // Canonical booking-mode status sets. `awaiting_payment` is an alias for
+    // the quote_accepted + payment_pending pair used by both dashboards.
+    const expandStatusAlias = (raw: string): string[] =>
+      raw.split(',').map(s => s.trim()).filter(Boolean).flatMap((s) =>
+        s === 'awaiting_payment' ? ['quote_accepted', 'payment_pending'] : [s],
+      );
+
     // Filter by status if provided (supports comma-separated for multiple statuses)
     if (status && typeof status === 'string') {
-      if (status.includes(',')) {
-        query.status = { $in: status.split(',').map(s => s.trim()) };
-      } else {
-        query.status = status;
+      const statuses = expandStatusAlias(status);
+      if (statuses.length === 1) {
+        statusClause = { status: statuses[0] };
+      } else if (statuses.length > 1) {
+        statusClause = { status: { $in: statuses } };
       }
     }
 
-    // Filter by service type — match project.service OR rfqData.serviceType.
-    // Combined via $and so the role-based $or above is preserved.
     if (service && typeof service === 'string') {
       const matchingProjectIds = await Project.find({ service }).select("_id");
       const serviceOr: any[] = [{ 'rfqData.serviceType': service }];
       if (matchingProjectIds.length > 0) {
         serviceOr.push({ project: { $in: matchingProjectIds.map(p => p._id) } });
       }
-      query.$and = (query.$and || []).concat([{ $or: serviceOr }]);
+      serviceClause = { $or: serviceOr };
     }
 
-    if (search && typeof search === 'string') {
-      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // `q` is a preserved alias of `search`.
+    const searchRaw = typeof search === 'string' && search ? search
+      : typeof q === 'string' && q ? q : '';
+    if (searchRaw) {
+      const escaped = searchRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(escaped, 'i');
       const matchingCustomerIds = await User.find({ name: regex }).select("_id");
       const searchOr: any[] = [
@@ -1319,7 +1386,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (matchingCustomerIds.length > 0) {
         searchOr.push({ customer: { $in: matchingCustomerIds.map(c => c._id) } });
       }
-      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+      otherAnd.push({ $or: searchOr });
     }
 
     if (addressFilter && typeof addressFilter === 'string' && user.role === 'customer') {
@@ -1327,13 +1394,13 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (trimmedAddress.length >= 2) {
         const escaped = trimmedAddress.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const regex = new RegExp(escaped, 'i');
-        query.$and = (query.$and || []).concat([{
+        otherAnd.push({
           $or: [
             { 'location.address': regex },
             { 'location.city': regex },
             { 'location.country': regex },
           ],
-        }]);
+        });
       }
     }
 
@@ -1344,14 +1411,31 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         const regex = new RegExp(escaped, 'i');
         const matchingCustomerIds = await User.find({ role: 'customer', name: regex }).select('_id');
         if (matchingCustomerIds.length > 0) {
-          query.$and = (query.$and || []).concat([{
+          otherAnd.push({
             customer: { $in: matchingCustomerIds.map(c => c._id) },
-          }]);
+          });
         } else {
-          query.$and = (query.$and || []).concat([{ customer: { $in: [] } }]);
+          otherAnd.push({ customer: { $in: [] } });
         }
       }
     }
+
+    const withClauses = (extra: Record<string, unknown>[]): Record<string, unknown> => {
+      const composed = { ...baseQuery };
+      const and = [...otherAnd, ...extra];
+      if (and.length > 0) composed.$and = and;
+      return composed;
+    };
+    // Full filter set drives the page. Counts are computed BEFORE paging on
+    // the same filtered set: total respects every filter; each facet count
+    // is disjunctive on its own facet but respects all other filters
+    // (role, search, location, counterpart, and the sibling facet).
+    const query = withClauses([
+      ...(statusClause ? [statusClause] : []),
+      ...(serviceClause ? [serviceClause] : []),
+    ]);
+    const statusCountMatch = withClauses([...(serviceClause ? [serviceClause] : [])]);
+    const serviceCountMatch = withClauses([...(statusClause ? [statusClause] : [])]);
 
     const skip = (parsedPage - 1) * parsedLimit;
 
@@ -1364,25 +1448,90 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       ? Project.distinct('service', { _id: { $in: roleProjectIds } })
       : Promise.resolve([] as string[]);
 
-    const [bookings, total, distinctServices] = await Promise.all([
+    const [bookings, total, distinctServices, statusCountRows, serviceCountRows] = await Promise.all([
       Booking.find(query)
-        .populate('customer', 'name email phone customerType')
-        .populate('professional', 'name email username businessInfo')
-        .populate('project', 'title description pricing category service timeMode subprojects executionDuration')
-        .sort({ createdAt: -1 })
+        .populate('customer', 'name email phone customerType isAnonymized deletedAt')
+        .populate('professional', 'name email username businessInfo professionalLevel adminTags isAnonymized deletedAt')
+        .populate('project', 'title description priceModel pricing category service timeMode subprojects executionDuration professionalId')
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(parsedLimit),
       Booking.countDocuments(query),
       distinctServicesPromise,
+      Booking.aggregate([
+        { $match: statusCountMatch },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+      Booking.aggregate([
+        { $match: serviceCountMatch },
+        {
+          $lookup: {
+            from: 'projects',
+            localField: 'project',
+            foreignField: '_id',
+            as: '_countProject',
+          },
+        },
+        { $unwind: { path: '$_countProject', preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: { $ifNull: ['$rfqData.serviceType', '$_countProject.service'] },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
 
     const viewerRole = user.role === 'professional' ? 'professional' : 'customer';
-    const visibleBookings = bookings.map((booking) => bookingForViewer(booking, viewerRole));
+    const projectOwnerIds = [...new Set(bookings
+      .filter((booking) => booking.bookingType === 'project' && !booking.professional)
+      .map((booking) => referenceId((booking.project as any)?.professionalId))
+      .filter((value): value is string => Boolean(value)))];
+    const projectOwnerRows = projectOwnerIds.length > 0
+      ? await User.find({ _id: { $in: projectOwnerIds } })
+          .select('_id isAnonymized deletedAt')
+          .lean()
+      : [];
+    const anonymizedProjectOwners = new Set(
+      projectOwnerRows
+        .filter((owner: any) => owner.isAnonymized || owner.deletedAt)
+        .map((owner: any) => String(owner._id)),
+    );
+    const visibleBookings = bookings.map((booking) => {
+      const visible: any = bookingForViewer(booking, viewerRole);
+      if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
+      // The shared bookings table exposes pro-only payout date/amount
+      // columns. Strip the pro payout summary server-side for customers;
+      // UI hiding alone is not a fix. Customer-own totals and refund
+      // records stay intact.
+      if (viewerRole === 'customer' && visible && typeof visible === 'object' && visible.payment) {
+        visible.payment = stripProPayoutSummaryForCustomer(visible.payment);
+      }
+      const projectOwnerId = referenceId((booking.project as any)?.professionalId);
+      if (projectOwnerId && anonymizedProjectOwners.has(projectOwnerId)) {
+        return maskBookingForAnonymizedParties(visible, {
+          professional: true,
+          professionalId: projectOwnerId,
+        });
+      }
+      return visible;
+    });
+
+    const statusCounts: Record<string, number> = {};
+    for (const row of statusCountRows || []) {
+      if (row && typeof row._id === 'string' && row._id) statusCounts[row._id] = Number(row.count) || 0;
+    }
+    const serviceCounts: Record<string, number> = {};
+    for (const row of serviceCountRows || []) {
+      if (row && typeof row._id === 'string' && row._id) serviceCounts[row._id] = Number(row.count) || 0;
+    }
 
     return res.status(200).json({
       success: true,
       bookings: visibleBookings,
       distinctServices: distinctServices.filter(Boolean).sort(),
+      statusCounts,
+      serviceCounts,
       pagination: {
         total,
         page: parsedPage,
@@ -1426,15 +1575,15 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     const isViewerCustomer = !isAdmin && req.user?.role === 'customer';
 
     const professionalFields = isAdmin
-      ? 'name email phone username businessInfo hourlyRate stripe role createdAt vatNumber timeZone'
+      ? 'name email phone username businessInfo hourlyRate stripe role createdAt vatNumber timeZone isAnonymized deletedAt'
       : isViewerCustomer
-        ? '_id name username businessInfo.companyName businessInfo.description businessInfo.website businessInfo.city businessInfo.country businessInfo.timezone businessInfo.postalCode timeZone'
-        : 'name email username businessInfo timeZone';
+        ? '_id name username businessInfo.companyName businessInfo.description businessInfo.website businessInfo.city businessInfo.country businessInfo.timezone businessInfo.postalCode timeZone isAnonymized deletedAt'
+        : 'name email username businessInfo timeZone isAnonymized deletedAt';
 
     const bookingQuery = Booking.findById(bookingId)
       .populate('customer', isAdmin
-        ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone'
-        : 'name username email phone customerType location businessName timeZone')
+        ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone isAnonymized deletedAt'
+        : 'name username email phone customerType location businessName timeZone isAnonymized deletedAt')
       .populate('professional', professionalFields)
       .populate(
         'project',
@@ -1465,14 +1614,32 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       });
     }
 
-    const bookingWithSignedFiles = await presignBookingFiles(booking);
     const viewerRole = isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional';
-    // Participants keep the existing raw-booking behavior. An admin gets only
-    // the granular areas resolved above: no dispute internals, cancellation
-    // details or payment provider credentials beyond their permissions.
-    const visibleBooking = isAdmin
-      ? filterRawBookingForAdminArea(bookingWithSignedFiles, adminAccess!)
-      : bookingForViewer(bookingWithSignedFiles, viewerRole);
+    const projectProfessionalId = referenceId((booking as any).project?.professionalId);
+    let projectProfessionalAnonymized = false;
+    if (projectProfessionalId && !booking.professional) {
+      const projectProfessional = await User.findById(projectProfessionalId)
+        .select('isAnonymized deletedAt')
+        .lean();
+      projectProfessionalAnonymized = Boolean(
+        projectProfessional?.isAnonymized || projectProfessional?.deletedAt,
+      );
+    }
+    const maskingFlags = projectProfessionalAnonymized
+      ? { professional: true, professionalId: projectProfessionalId || undefined }
+      : {};
+    const filteredBooking = isAdmin
+      ? filterRawBookingForAdminArea(
+          typeof (booking as any).toObject === 'function'
+            ? (booking as any).toObject()
+            : booking,
+          adminAccess!,
+        )
+      : bookingForViewer(booking, viewerRole);
+    const maskedBooking = maskBookingForAnonymizedParties(filteredBooking, maskingFlags);
+    // Masking must remove target-owned file keys before any presigner sees
+    // them. The old order signed first and could return a working URL.
+    const visibleBooking = await presignBookingFiles(maskedBooking);
     const details = await attachBookingDetails(booking, viewerRole, req.user, adminAccess);
 
     return res.status(200).json({
@@ -1660,7 +1827,9 @@ export const submitPostBookingAnswers = async (
       };
     }
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     return res.status(200).json({
       success: true,
@@ -1736,8 +1905,8 @@ export const submitQuote = async (req: Request, res: Response, next: NextFunctio
     await (booking as any).updateStatus('quoted', userId, 'Quote submitted by professional');
 
     await booking.populate([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' }
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' }
     ]);
 
     return res.status(200).json({
@@ -1796,8 +1965,8 @@ export const respondToQuote = async (req: Request, res: Response, next: NextFunc
     await (booking as any).updateStatus(newStatus, userId, note);
 
     await booking.populate([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' }
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' }
     ]);
 
     return res.status(200).json({
@@ -1848,8 +2017,8 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
     await (booking as any).updateStatus(status, userId, note);
 
     await booking.populate([
-      { path: 'customer', select: 'name email phone' },
-      { path: 'professional', select: 'name email businessInfo' }
+      { path: 'customer', select: 'name email phone isAnonymized deletedAt' },
+      { path: 'professional', select: 'name email businessInfo isAnonymized deletedAt' }
     ]);
 
     return res.status(200).json({
@@ -1953,9 +2122,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
     const shouldMarkNoShow = isCustomer && normalizedCategory === 'no_show' && !booking.noShow?.markedAt;
 
     let cancellationRequest!: InstanceType<typeof CancellationRequest>;
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    try {
+    cancellationRequest = await withAnonymizationWriteFence([userId], async (session) => {
       const [created] = await CancellationRequest.create(
         [{
           booking: booking._id,
@@ -1967,9 +2134,8 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
           status: 'pending',
           ...(isCustomer ? { responseDeadline: addBusinessDays(new Date(), REFUND_RESPONSE_BUSINESS_DAYS) } : {}),
         }],
-        { session }
+        session ? { session } : undefined,
       );
-      cancellationRequest = created;
 
       if (shouldMarkNoShow) {
         booking.noShow = {
@@ -1978,16 +2144,10 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
           reason: trimmedReason,
           source: 'customer_cancellation',
         };
-        await booking.save({ session });
+        await booking.save(session ? { session } : undefined);
       }
-
-      await session.commitTransaction();
-    } catch (txError) {
-      await session.abortTransaction();
-      throw txError;
-    } finally {
-      session.endSession();
-    }
+      return created;
+    });
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
@@ -1997,17 +2157,18 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       const requesterName = isCustomer
         ? customerUser?.name || 'Customer'
         : getProfessionalDisplayName(professionalUser);
-      await sendCancellationRequestAdminEmail({
+      await runWithEmailActor(String(userId), () => sendCancellationRequestAdminEmail({
         bookingId: String(booking._id),
         requesterName,
         requesterRole: requestedRole,
         reason: trimmedReason,
-      });
+      }));
 
       const otherPartyUserId = isCustomer ? professionalUser?._id : customerUser?._id;
       if (otherPartyUserId) {
         await notify({
           userId: otherPartyUserId.toString(),
+          actorId: String(userId),
           eventKey: isCustomer
             ? 'professional.cancellation_request_received'
             : 'customer.cancellation_request_received',
@@ -2025,6 +2186,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       if (isCustomer && professionalUser?._id) {
         await notify({
           userId: professionalUser._id.toString(),
+          actorId: String(userId),
           eventKey: 'professional.refund_request',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -2033,6 +2195,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
         if (customerUser?._id) {
           await notify({
             userId: customerUser._id.toString(),
+            actorId: String(userId),
             eventKey: 'customer.refund_negotiation',
             entityType: 'booking',
             entityId: String(booking._id),
@@ -2042,6 +2205,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       } else if (!isCustomer && customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
+          actorId: String(userId),
           eventKey: 'customer.refund_negotiation',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -2080,8 +2244,8 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
     })
       .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
-      .populate('customer', 'name')
-      .populate('professional', 'name')
+      .populate('customer', 'name isAnonymized deletedAt')
+      .populate('professional', 'name isAnonymized deletedAt')
       .populate('project', 'title')
       .sort({ 'dispute.raisedAt': -1 })
       .limit(100)
@@ -2102,7 +2266,7 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
 export const getMyPayments = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id ? req.user._id.toString() : undefined;
-    const { status, page = '1', limit = '20' } = req.query;
+    const { status, page = '1', limit = '20', q, search, bookingId, service } = req.query;
 
     if (!userId) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
@@ -2122,6 +2286,51 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       query.status = status;
     }
 
+    // Literal search: booking number substring (escaped, never raw regex),
+    // exact booking identity, or counterparty (professional) name.
+    const searchRaw = typeof q === 'string' && q ? q
+      : typeof search === 'string' && search ? search : '';
+    const trimmedSearch = searchRaw.trim().slice(0, 80);
+    if (trimmedSearch) {
+      const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      const searchOr: Record<string, any>[] = [{ bookingNumber: regex }];
+      if (mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+        searchOr.push({ booking: new mongoose.Types.ObjectId(trimmedSearch) });
+      }
+      const matchingProfessionals = await User.find({ role: 'professional', name: regex }).select('_id');
+      if (matchingProfessionals.length > 0) {
+        searchOr.push({ professional: { $in: matchingProfessionals.map(p => p._id) } });
+      }
+      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+    }
+
+    if (bookingId && typeof bookingId === 'string' && mongoose.Types.ObjectId.isValid(bookingId)) {
+      query.booking = new mongoose.Types.ObjectId(bookingId);
+    }
+
+    // Service filter resolves through the customer's own bookings, so the
+    // payment collection itself is never scanned by service name.
+    if (service && typeof service === 'string' && service !== 'all') {
+      const serviceProjectIds = await Project.find({ service }).select('_id');
+      const serviceBookingFilter: Record<string, any> = {
+        customer: userId,
+        $or: [{ 'rfqData.serviceType': service }],
+      };
+      if (serviceProjectIds.length > 0) {
+        (serviceBookingFilter.$or as any[]).push({ project: { $in: serviceProjectIds.map(p => p._id) } });
+      }
+      const serviceBookingIds = await Booking.find(serviceBookingFilter).select('_id').lean();
+      const serviceIdSet = new Set(serviceBookingIds.map((b: any) => String(b._id)));
+      if (query.booking) {
+        // An explicit booking was also requested: keep it only when it
+        // belongs to the requested service set.
+        query.booking = serviceIdSet.has(String(query.booking)) ? query.booking : { $in: [] };
+      } else {
+        query.booking = { $in: Array.from(serviceIdSet) };
+      }
+    }
+
     const pageNumber = Math.max(parseInt(page as string, 10) || 1, 1);
     const limitNumber = Math.min(Math.max(parseInt(limit as string, 10) || 20, 5), 100);
     const skip = (pageNumber - 1) * limitNumber;
@@ -2129,8 +2338,8 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
     const [payments, totalCount, summaryStats] = await Promise.all([
       Payment.find(query)
         .populate('booking', 'status bookingType bookingNumber')
-        .populate('professional', 'name email username businessInfo')
-        .sort({ createdAt: -1 })
+        .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limitNumber)
         .lean(),
@@ -2159,9 +2368,10 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       if (s._id === 'partially_refunded') summary.refunded += s.total || 0;
     });
 
-    const visiblePayments = payments.map((payment: any) =>
-      sanitizePaymentForViewer(payment, 'customer')
-    );
+    const visiblePayments = payments.map((payment: any) => ({
+      ...sanitizePaymentForViewer(payment, 'customer'),
+      professional: maskAnonymizedUser(payment.professional),
+    }));
 
     return res.status(200).json({
       success: true,

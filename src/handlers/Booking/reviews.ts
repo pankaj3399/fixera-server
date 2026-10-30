@@ -10,6 +10,10 @@ import { uploadToS3, generateFileName, validateImageFileBuffer, deleteFromS3, pr
 import { params } from "../../utils/requestParams";
 import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
+import { getProfessionalId } from '../../utils/bookingHelpers';
+import { maskBookingForAnonymizedParties } from '../../utils/accountAnonymity';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { UserFacingError } from '../../utils/appErrors';
 
 const MAX_COMMENT_LENGTH = 1000;
 
@@ -95,6 +99,20 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
       return res.status(400).json({ success: false, msg: "Can only review completed bookings" });
     }
 
+    const professionalId = await getProfessionalId(booking);
+    if (professionalId) {
+      const professionalAccount = await User.findById(professionalId)
+        .select("deletedAt isAnonymized")
+        .lean();
+      if (
+        !professionalAccount
+        || professionalAccount.deletedAt
+        || professionalAccount.isAnonymized
+      ) {
+        return res.status(409).json({ success: false, msg: "The counterparty account is no longer active." });
+      }
+    }
+
     if (booking.customerReview?.communicationLevel) {
       return res.status(400).json({ success: false, msg: "You have already reviewed this booking" });
     }
@@ -129,7 +147,28 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
       reviewedAt: new Date(),
     };
 
-    await booking.save();
+    try {
+      await withAnonymizationWriteFence(
+        [userId, professionalId],
+        async (session) => {
+          return booking.save({ session });
+        },
+      );
+    } catch (error) {
+      for (const key of uploadedKeys) {
+        try { await deleteFromS3(key); } catch (cleanupErr) {
+          console.error("Failed to clean up orphaned S3 object after account fence:", key, cleanupErr);
+        }
+      }
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+          success: false,
+          msg: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
 
     // Send review notification as system message in chat
     try {
@@ -138,53 +177,57 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
         const customer = await User.findById(userId).select("name").lean();
         const avgRating = Math.round(((communicationLevel + valueOfDelivery + qualityOfService) / 3) * 10) / 10;
 
-        // Find or create conversation
-        let conversation = await Conversation.findOne({
-          customerId: new mongoose.Types.ObjectId(userId),
-          professionalId: new mongoose.Types.ObjectId(professionalId),
-        });
-
-        if (!conversation) {
-          conversation = await Conversation.create({
+        await withAnonymizationWriteFence([userId, professionalId], async (session) => {
+          // Find or create conversation
+          let conversation = await Conversation.findOne({
             customerId: new mongoose.Types.ObjectId(userId),
             professionalId: new mongoose.Types.ObjectId(professionalId),
-            initiatedBy: new mongoose.Types.ObjectId(userId),
-          });
-        }
+          }).session(session ?? null);
 
-        // senderId uses the customer who triggered the review; senderRole "system"
-        // marks this as a platform-generated message so the UI renders it differently.
-        await ChatMessage.create({
-          conversationId: conversation._id,
-          senderId: new mongoose.Types.ObjectId(userId),
-          senderRole: "system",
-          messageType: "review_notification",
-          text: `${customer?.name || "Customer"} left a review - ${avgRating.toFixed(1)} avg`,
-          reviewMeta: {
-            bookingId: bookingId,
-            avgRating,
-            communicationLevel,
-            valueOfDelivery,
-            qualityOfService,
-            comment: trimmedComment,
-            customerName: customer?.name || "Customer",
-          },
-          readBy: [{ userId: new mongoose.Types.ObjectId(userId), readAt: new Date() }],
-        });
+          if (!conversation) {
+            const [created] = await Conversation.create([{
+              customerId: new mongoose.Types.ObjectId(userId),
+              professionalId: new mongoose.Types.ObjectId(professionalId),
+              initiatedBy: new mongoose.Types.ObjectId(userId),
+            }], { session });
+            conversation = created;
+          }
 
-        // Update conversation with notification preview and bump unread count
-        await Conversation.findByIdAndUpdate(conversation._id, {
-          $set: {
-            lastMessageAt: new Date(),
-            lastMessagePreview: `New review - ${avgRating.toFixed(1)} avg`,
-            lastMessageSenderId: new mongoose.Types.ObjectId(userId),
-            customerUnreadCount: 0,
-          },
-          $inc: { professionalUnreadCount: 1 },
+          // senderId uses the customer who triggered the review; senderRole "system"
+          // marks this as a platform-generated message so the UI renders it differently.
+          await ChatMessage.create([{
+            conversationId: conversation._id,
+            senderId: new mongoose.Types.ObjectId(userId),
+            senderRole: "system",
+            messageType: "review_notification",
+            text: `${customer?.name || "Customer"} left a review - ${avgRating.toFixed(1)} avg`,
+            reviewMeta: {
+              bookingId: bookingId,
+              avgRating,
+              communicationLevel,
+              valueOfDelivery,
+              qualityOfService,
+              comment: trimmedComment,
+              customerName: customer?.name || "Customer",
+            },
+            readBy: [{ userId: new mongoose.Types.ObjectId(userId), readAt: new Date() }],
+          }], { session });
+
+          // Update conversation with notification preview and bump unread count
+          await Conversation.findByIdAndUpdate(conversation._id, {
+            $set: {
+              lastMessageAt: new Date(),
+              lastMessagePreview: `New review - ${avgRating.toFixed(1)} avg`,
+              lastMessageSenderId: new mongoose.Types.ObjectId(userId),
+              customerUnreadCount: 0,
+            },
+            $inc: { professionalUnreadCount: 1 },
+          }, { session });
         });
 
         notifyAsync({
           userId: professionalId,
+          actorId: userId,
           eventKey: 'professional.review_received',
           entityType: 'booking',
           entityId: bookingId,
@@ -251,6 +294,17 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
       return res.status(400).json({ success: false, msg: "Can only review completed bookings" });
     }
 
+    const customerAccount = await User.findById(booking.customer)
+      .select("deletedAt isAnonymized")
+      .lean();
+    if (
+      !customerAccount
+      || customerAccount.deletedAt
+      || customerAccount.isAnonymized
+    ) {
+      return res.status(409).json({ success: false, msg: "The counterparty account is no longer active." });
+    }
+
     if (booking.professionalReview?.rating) {
       return res.status(400).json({ success: false, msg: "You have already reviewed this customer for this booking" });
     }
@@ -261,7 +315,23 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
       reviewedAt: new Date(),
     };
 
-    await booking.save();
+    try {
+      await withAnonymizationWriteFence(
+        [userId, booking.customer],
+        async (session) => {
+          return booking.save({ session });
+        },
+      );
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+          success: false,
+          msg: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
 
     try {
       const customerId = booking.customer?.toString();
@@ -269,6 +339,7 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
         const professional = await User.findById(userId).select('name username businessInfo').lean();
         notifyAsync({
           userId: customerId,
+          actorId: userId,
           eventKey: 'customer.review_received',
           entityType: 'booking',
           entityId: bookingId,
@@ -340,7 +411,23 @@ export const replyToCustomerReview = async (req: Request, res: Response, next: N
       repliedAt: new Date(),
     };
 
-    await booking.save();
+    try {
+      await withAnonymizationWriteFence(
+        [userId, booking.customer],
+        async (session) => {
+          return booking.save({ session });
+        },
+      );
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+          success: false,
+          msg: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
 
     return res.status(200).json({
       success: true,
@@ -363,8 +450,8 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
       return res.status(400).json({ success: false, msg: "Invalid professional ID" });
     }
 
-    const professional = await User.findById(professionalId).select("name username role businessInfo.description businessInfo.city businessInfo.country businessInfo.website profileImage serviceCategories hourlyRate createdAt location professionalStatus");
-    if (!professional || professional.role !== "professional" || professional.professionalStatus !== "approved") {
+    const professional = await User.findById(professionalId).select("name username role businessInfo.description businessInfo.city businessInfo.country businessInfo.website profileImage serviceCategories hourlyRate createdAt location professionalStatus deletedAt isAnonymized");
+    if (!professional || professional.role !== "professional" || professional.professionalStatus !== "approved" || professional.deletedAt || professional.isAnonymized) {
       return res.status(404).json({ success: false, msg: "Professional not found" });
     }
 
@@ -437,7 +524,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
     const [reviews, totalCount, ratingStats, distinctProjects] = await Promise.all([
       Booking.find(query)
         .select("customerReview customer project createdAt")
-        .populate("customer", "name profileImage")
+        .populate("customer", "name profileImage isAnonymized deletedAt")
         .populate("project", "title")
         .sort({ "customerReview.reviewedAt": -1 })
         .skip(skip)
@@ -478,7 +565,9 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
       ? (stats.avgCommunication + stats.avgValueOfDelivery + stats.avgQualityOfService) / 3
       : 0;
 
-    const presignedReviews = await presignReviewImages(reviews);
+    const presignedReviews = await presignReviewImages(
+      reviews.map((review) => maskBookingForAnonymizedParties(review)),
+    );
 
     return res.status(200).json({
       success: true,
@@ -519,6 +608,17 @@ export const getProjectReviews = async (req: Request, res: Response, next: NextF
 
     const project = await Project.findById(projectId).select("title professionalId status");
     if (!project || project.status !== "published") {
+      return res.status(404).json({ success: false, msg: "Project not found" });
+    }
+    const owner = project.professionalId
+      ? await User.exists({
+          _id: project.professionalId,
+          role: "professional",
+          deletedAt: null,
+          isAnonymized: { $ne: true },
+        })
+      : null;
+    if (!owner) {
       return res.status(404).json({ success: false, msg: "Project not found" });
     }
 
@@ -580,7 +680,7 @@ export const getProjectReviews = async (req: Request, res: Response, next: NextF
     const [reviews, totalCount, ratingStats, ordersInQueue] = await Promise.all([
       Booking.find(query)
         .select("customerReview customer createdAt")
-        .populate("customer", "name profileImage")
+        .populate("customer", "name profileImage isAnonymized deletedAt")
         .sort({ "customerReview.reviewedAt": -1 })
         .skip(skip)
         .limit(limitNum)
@@ -622,7 +722,9 @@ export const getProjectReviews = async (req: Request, res: Response, next: NextF
       ? (stats.avgCommunication + stats.avgValueOfDelivery + stats.avgQualityOfService) / 3
       : 0;
 
-    const presignedReviews = await presignReviewImages(reviews);
+    const presignedReviews = await presignReviewImages(
+      reviews.map((review) => maskBookingForAnonymizedParties(review)),
+    );
 
     return res.status(200).json({
       success: true,

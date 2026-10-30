@@ -15,8 +15,8 @@ import {
   buildCalendarReservationKeysForInterval,
   releaseCalendarReservations,
   reserveCalendarKeys,
-  withCalendarTransaction,
 } from '../../utils/support/calendarReservations';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 const meetingErrorResponse = (res: Response, error: unknown, message: string) => {
     if (error instanceof UserFacingError) {
@@ -140,21 +140,32 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
         // Get the professional's company availability (for employees using same_as_company)
         const professional = await User.findById(professionalId).select('blockedDates blockedRanges companyAvailability companyBlockedDates companyBlockedRanges');
 
+        // Company closures in the requested range (client bug list #21). The
+        // meeting scheduler calendar reads per-employee entries only, so the
+        // closures are attached to every employee as well as to
+        // companyAvailability below.
+        const companyBlockedDates = professional?.companyBlockedDates?.filter(blocked => {
+            const blockedDate = new Date(blocked.date);
+            return blockedDate >= start && blockedDate <= end;
+        }) || [];
+        const companyBlockedRanges = professional?.companyBlockedRanges?.filter(range => {
+            const rangeStart = new Date(range.startDate);
+            const rangeEnd = new Date(range.endDate);
+            return rangeStart <= end && rangeEnd >= start;
+        }) || [];
+
         res.status(200).json({
             success: true,
             data: {
-                employees: availabilityData,
+                employees: availabilityData.map((entry) => ({
+                    ...entry,
+                    companyBlockedDates,
+                    companyBlockedRanges,
+                })),
                 companyAvailability: {
                     availability: professional?.companyAvailability || {},
-                    blockedDates: professional?.companyBlockedDates?.filter(blocked => {
-                        const blockedDate = new Date(blocked.date);
-                        return blockedDate >= start && blockedDate <= end;
-                    }) || [],
-                    blockedRanges: professional?.companyBlockedRanges?.filter(range => {
-                        const rangeStart = new Date(range.startDate);
-                        const rangeEnd = new Date(range.endDate);
-                        return rangeStart <= end && rangeEnd >= start;
-                    }) || []
+                    blockedDates: companyBlockedDates,
+                    blockedRanges: companyBlockedRanges
                 }
             }
         });
@@ -301,7 +312,7 @@ export const createMeeting = async (req: Request, res: Response) => {
             createdBy: professionalId
         });
 
-        await withCalendarTransaction(async (session) => {
+        await withAnonymizationWriteFence([professionalId], async (session) => {
             await reserveCalendarKeys(
                 {
                     sourceType: 'meeting',
@@ -497,7 +508,7 @@ export const updateMeeting = async (req: Request, res: Response) => {
         });
 
         if (scheduleChanged) {
-            await withCalendarTransaction(async (session) => {
+            await withAnonymizationWriteFence([professionalId], async (session) => {
                 await releaseCalendarReservations('meeting', meeting._id, session);
                 await reserveCalendarKeys(
                     {
@@ -516,7 +527,9 @@ export const updateMeeting = async (req: Request, res: Response) => {
                 return true;
             });
         } else {
-            await meeting.save();
+            await withAnonymizationWriteFence([professionalId], async (session) => {
+                await meeting.save(session ? { session } : undefined);
+            });
         }
 
         res.status(200).json({
@@ -563,8 +576,8 @@ export const cancelMeeting = async (req: Request, res: Response) => {
         meeting.cancelledBy = professionalId;
         meeting.cancellationReason = cancellationReason;
 
-        await withCalendarTransaction(async (session) => {
-            await meeting.save({ session });
+        await withAnonymizationWriteFence([professionalId], async (session) => {
+            await meeting.save(session ? { session } : undefined);
             await releaseCalendarReservations('meeting', meeting._id, session);
             return true;
         });

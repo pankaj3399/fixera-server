@@ -13,11 +13,13 @@ import {
   DAY_KEYS,
   fromZonedTime,
   getProjectAvailableSlotsForDate,
+  resolveEffectiveScheduleTimeZone,
+  resolveProjectScheduleQuantity,
   getResourcePolicy,
   getUnbookableStartDates,
   getWorkingRangeUtc,
+  isDayBlockedByCoveredMinutes,
   normalizeRangeEndInclusive,
-  PARTIAL_BLOCK_THRESHOLD_HOURS,
   startOfDayZoned,
   toZonedTime,
   type ResourcePolicy
@@ -27,7 +29,17 @@ import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
+import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
 // import { seedServiceCategories } from '../../scripts/seedProject';
+
+const saveProjectWithFence = async (project: any, userId: string) =>
+  withAnonymizationWriteFence(
+    [userId, (project as any).professionalId?._id || (project as any).professionalId],
+    async (session) => {
+      await project.save(session ? { session } : undefined);
+      return project;
+    },
+  );
 
 let cachedWindowFieldsSupport: boolean | null = null;
 const mongoHasWindowFields = async (): Promise<boolean> => {
@@ -65,6 +77,19 @@ const toBlockedRange = (range?: {
     endDate,
     reason: range.reason,
   };
+};
+
+/**
+ * Enriched per-booking range for the team calendar. `status`/`bookingId` are
+ * additive display fields (colour + link-back); every range array below shares
+ * this type so the shapes cannot drift apart again.
+ */
+type TeamBookingRange = {
+  startDate: string;
+  endDate: string;
+  reason?: string;
+  status?: string;
+  bookingId?: string;
 };
 
 type ProfessionalStats = {
@@ -502,11 +527,12 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
       console.log("[PROJECT] Update data keys:", Object.keys(updateData));
 
-      project = await Project.findOneAndUpdate(
-        { _id: projectData.id, professionalId },
-        updateData,
-        { new: true, runValidators: true }
-      );
+      project = await withAnonymizationWriteFence([professionalId], async (session) =>
+        Project.findOneAndUpdate(
+          { _id: projectData.id, professionalId },
+          updateData,
+          { new: true, runValidators: true, ...(session ? { session } : {}) },
+        ));
 
       console.log("[PROJECT] Project updated successfully");
       console.log("Updated project ID:", project?._id);
@@ -520,7 +546,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         status: "draft",
         autoSaveTimestamp: new Date(),
       });
-      await project.save();
+      await saveProjectWithFence(project, professionalId);
       console.log("[PROJECT] New project created with ID:", project._id);
     }
 
@@ -562,8 +588,10 @@ export const getDrafts = async (req: Request, res: Response) => {
 export const getAllProjects = async (req: Request, res: Response) => {
   try {
     const professionalId = req.user?.id;
+    const includeArchived = String(req.query.includeArchived || "").toLowerCase() === "true";
     const projects = await Project.find({
       professionalId,
+      ...(includeArchived ? {} : { status: { $ne: "archived" } }),
     }).sort({ updatedAt: -1 });
 
     res.json(projects);
@@ -613,6 +641,21 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     }
 
     const professionalId = (project.professionalId as any)?._id || project.professionalId;
+    const ownerIsActive = professionalId
+      ? await User.exists({
+          _id: professionalId,
+          role: "professional",
+          deletedAt: null,
+          isAnonymized: { $ne: true },
+        })
+      : null;
+    if (!ownerIsActive) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published"
+      });
+    }
+
     const professionalStats = professionalId
       ? await computeProfessionalStats(professionalId.toString())
       : null;
@@ -732,11 +775,13 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const validatedTeamMemberIdStrings = validatedTeamMemberIds.map((id) => String(id));
 
     const professional = await User.findById(project.professionalId).select(
-      "companyAvailability companyBlockedDates companyBlockedRanges blockedDates blockedRanges businessInfo.timezone"
+      "companyAvailability companyBlockedDates companyBlockedRanges blockedDates blockedRanges businessInfo.timezone businessInfo.country"
     );
 
-    // Get professional's timezone for proper date handling
-    const timeZone = professional?.businessInfo?.timezone || "UTC";
+    // Get professional's timezone for proper date handling.
+    // Client bug list #23b: never convert wall times in UTC when the
+    // professional's business info carries no usable zone.
+    const timeZone = resolveEffectiveScheduleTimeZone(professional);
 
     const availability = resolveAvailability(professional?.companyAvailability);
     const { rangeStart, rangeEnd } = getDateRange(startDate, endDate, 180);
@@ -751,14 +796,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       weekends: nonWorkingDates,
       company: {
         dates: [] as string[],
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
       personal: {
         dates: [] as string[],
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
       bookings: {
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
     };
 
@@ -778,9 +823,12 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const dateBlockedMembers = new Map<string, Set<string>>();
     // Track which members have FULL-DAY blocks (from blockedDates, not ranges)
     const memberFullDayBlocked = new Map<string, Set<string>>(); // dateIso -> Set<memberId>
-    // Track actual blocked time ranges per member (for 4-hour threshold calculation)
+    // Track actual blocked time ranges per member (for the free-hours threshold calculation)
     const memberBlockedTimeRanges = new Map<string, Array<{ start: Date; end: Date }>>();
-    const PARTIAL_BLOCK_THRESHOLD = 4; // hours
+    // Calendar days touched by at least one blocked range per member (day keys are
+    // local-midnight-UTC ISO strings). The final pass evaluates merged totals for
+    // every touched day so split blocks (e.g. 2h + 2h + 2h) count together.
+    const memberDaysWithRanges = new Map<string, Set<string>>();
     const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
     // Helper to mark a member as blocked on a date
@@ -815,8 +863,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       memberBlockedTimeRanges.get(memberId)!.push({ start, end });
     };
 
-    // Helper to expand a date range and mark a member blocked only when the
-    // blocked overlap with that working day is at least the threshold hours.
+    // Helper to expand a date range and record which calendar days it touches
+    // for a member. Day-mode availability (client bug list #2) requires at
+    // least MIN_FREE_HOURS_FOR_DAY_AVAILABILITY free hours within the working
+    // schedule, evaluated on merged totals in the final pass below — never on
+    // a single range in isolation.
     // Uses professional's timezone to determine which calendar days are affected
     const expandRangeAndMarkBlocked = (startIso: string, endIso: string, memberId: string) => {
       const start = new Date(startIso);
@@ -841,6 +892,12 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       const startDay = new Date(Date.UTC(startZoned.getUTCFullYear(), startZoned.getUTCMonth(), startZoned.getUTCDate()));
       const endDay = new Date(Date.UTC(endZoned.getUTCFullYear(), endZoned.getUTCMonth(), endZoned.getUTCDate()));
 
+      let touched = memberDaysWithRanges.get(memberId);
+      if (!touched) {
+        touched = new Set<string>();
+        memberDaysWithRanges.set(memberId, touched);
+      }
+
       const cursor = new Date(startDay);
       while (cursor <= endDay) {
         const dayStartZoned = startOfDayZoned(cursor);
@@ -854,29 +911,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           continue;
         }
 
-        const workingRange = getWorkingRangeUtc(availability, cursor, timeZone);
-        if (!workingRange) {
-          cursor.setUTCDate(cursor.getUTCDate() + 1);
-          continue;
-        }
-
-        const overlapStart = Math.max(
-          start.getTime(),
-          dayStartUtc.getTime(),
-          workingRange.startUtc.getTime()
-        );
-        const overlapEnd = Math.min(
-          rangeEndInclusive.getTime(),
-          dayEndUtc.getTime(),
-          workingRange.endUtc.getTime()
-        );
-
-        if (overlapEnd > overlapStart) {
-          const overlapHours = (overlapEnd - overlapStart) / (1000 * 60 * 60);
-          if (overlapHours >= PARTIAL_BLOCK_THRESHOLD_HOURS) {
-            markMemberBlocked(cursor.toISOString(), memberId);
-          }
-        }
+        const dayKey = toLocalMidnightUtc(dayStartUtc, timeZone).toISOString();
+        touched.add(dayKey);
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
     };
@@ -947,7 +983,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
     const allBlockedDates = new Set<string>(nonWorkingDates);
-    const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+    const allBlockedRanges: TeamBookingRange[] = [];
 
     if (professional?.companyBlockedDates) {
       professional.companyBlockedDates.forEach((blocked) => {
@@ -1175,7 +1211,16 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           reason: "booking",
         });
         if (blockedRange) {
-          blockedCategories.bookings.ranges.push(blockedRange);
+          const bookingRange: TeamBookingRange = {
+            ...blockedRange,
+            // Frontend colours team-calendar booking ranges by status.
+            // Additive only; the booking id lets the UI link back. The same
+            // object reference is mirrored into `allBlockedRanges` by the
+            // loop below in simple mode, so shading and the range list agree.
+            status: (booking as any).status ? String((booking as any).status) : undefined,
+            bookingId: String(booking._id),
+          };
+          blockedCategories.bookings.ranges.push(bookingRange);
           // Mark each blocked resource for each day in the range
           blockedResourceIds.forEach((resourceId) => {
             expandRangeAndMarkBlocked(blockedRange.startDate, blockedRange.endDate, resourceId);
@@ -1205,7 +1250,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           reason: "booking-buffer",
         });
         if (bufferRange) {
-          blockedCategories.bookings.ranges.push(bufferRange);
+          blockedCategories.bookings.ranges.push({
+            ...bufferRange,
+            status: (booking as any).status ? String((booking as any).status) : undefined,
+            bookingId: String(booking._id),
+          });
           // Mark each blocked resource for each day in the range
           blockedResourceIds.forEach((resourceId) => {
             expandRangeAndMarkBlocked(bufferRange.startDate, bufferRange.endDate, resourceId);
@@ -1241,6 +1290,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     let executionDays: number | null = null;
 
     const projectData = project as any;
+    const scheduleQuantity = resolveProjectScheduleQuantity(projectData, subprojectIndex, req.query.quantity);
+    if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
 
     // If subprojectIndex is provided, use that specific subproject's execution duration
     if (typeof subprojectIndex === 'number' &&
@@ -1248,7 +1299,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         Array.isArray(projectData.subprojects) &&
         projectData.subprojects[subprojectIndex]?.executionDuration?.value &&
         projectData.subprojects[subprojectIndex]?.executionDuration?.unit === 'days') {
-      executionDays = Math.max(1, Math.ceil(projectData.subprojects[subprojectIndex].executionDuration.value));
+      const durationMultiplier = projectData.subprojects[subprojectIndex].pricing?.type === 'unit' && projectData.subprojects[subprojectIndex].pricing?.durationBasis === 'per_unit' ? scheduleQuantity.quantity : 1;
+      executionDays = Math.max(1, Math.ceil(projectData.subprojects[subprojectIndex].executionDuration.value * durationMultiplier));
     } else if (projectData.executionDuration?.value && projectData.executionDuration?.unit === 'days') {
       // Use project-level execution duration
       executionDays = Math.max(1, Math.ceil(projectData.executionDuration.value));
@@ -1278,31 +1330,34 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       });
     }
 
+    // Final availability pass (client bug list #2): evaluate every touched
+    // member/day on merged totals. A member is blocked on a day when they have
+    // a full-day block OR less than MIN_FREE_HOURS_FOR_DAY_AVAILABILITY free
+    // within the working schedule. Split blocks on the same day count together.
+    validatedTeamMemberIdStrings.forEach((memberId) => {
+      const touched = memberDaysWithRanges.get(memberId);
+      if (!touched) return;
+      touched.forEach((dateIso) => {
+        if (memberFullDayBlocked.get(dateIso)?.has(memberId)) return; // already marked
+        const zonedDay = startOfDayZoned(toZonedTime(new Date(dateIso), timeZone));
+        const workingRange = getWorkingRangeUtc(availability, zonedDay, timeZone);
+        if (!workingRange) return; // non-working days are already in allBlockedDates
+        const scheduleMinutes =
+          (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
+        const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
+        if (isDayBlockedByCoveredMinutes(blockedHours * 60, scheduleMinutes)) {
+          markMemberBlocked(dateIso, memberId);
+        }
+      });
+    });
+
     // Per-day blocking for multi-resource availability:
     // A day is unavailable when fewer than minResources are available.
-    // Uses the 4-hour threshold: a member is only considered "blocked" on a day
-    // if they have a full-day block OR their blocked ranges within working hours >= 4 hours.
+    // Member marks above are authoritative (full-day or free-hours rule).
     // This must match days-mode scheduling start-date validation.
     if (useMultiResourceMode) {
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
-        const fullDayBlocked = memberFullDayBlocked.get(dateIso);
-
-        // Count actually blocked members using 4-hour threshold
-        let actualBlockedCount = 0;
-        blockedMemberIds.forEach(memberId => {
-          // Full-day blocks always count
-          if (fullDayBlocked?.has(memberId)) {
-            actualBlockedCount++;
-            return;
-          }
-          // Range-based blocks: apply 4-hour threshold
-          const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
-          if (blockedHours >= PARTIAL_BLOCK_THRESHOLD) {
-            actualBlockedCount++;
-          }
-        });
-
-        const availableResources = totalResources - actualBlockedCount;
+        const availableResources = totalResources - blockedMemberIds.size;
 
         if (availableResources < minResources) {
           allBlockedDates.add(dateIso);
@@ -1310,24 +1365,9 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         }
       });
     } else {
-      // Single resource mode: also apply 4-hour threshold for range-based blocks
+      // Single resource mode: a marked day is blocked.
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
-        const fullDayBlocked = memberFullDayBlocked.get(dateIso);
-
-        // Check if any member is actually blocked (full-day or >= 4 hours)
-        let hasActualBlock = false;
-        blockedMemberIds.forEach(memberId => {
-          if (fullDayBlocked?.has(memberId)) {
-            hasActualBlock = true;
-            return;
-          }
-          const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
-          if (blockedHours >= PARTIAL_BLOCK_THRESHOLD) {
-            hasActualBlock = true;
-          }
-        });
-
-        if (hasActualBlock) {
+        if (blockedMemberIds.size > 0) {
           allBlockedDates.add(dateIso);
           finalBlockedDateSet.add(dateIso);
         }
@@ -1336,6 +1376,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // In multi-resource days mode, don't add individual booking/personal ranges.
     // We only want to block explicit dates (all resources unavailable or full overlap).
+    // Deliberate split: `blockedCategories` above remains the full structured
+    // feed (per-booking ranges keep `status`/`bookingId` for calendar shading),
+    // while the flat `blockedRanges` list below intentionally carries no
+    // per-range detail in window mode. In simple mode the mirror loop copies
+    // the same enriched references, so both views agree.
     const useWindowBasedCheck = useMultiResourceMode && executionDays && executionDays > 0;
 
     if (!useWindowBasedCheck) {
@@ -1361,6 +1406,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         to: rangeEnd,
         subprojectIndex:
           typeof subprojectIndex === "number" ? subprojectIndex : undefined,
+        quantity: scheduleQuantity.quantity,
         excludeBookingId,
       });
 
@@ -1381,7 +1427,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       id as string,
       subprojectIndex,
       undefined,
-      excludeBookingId
+      excludeBookingId,
+      scheduleQuantity.quantity
     );
 
     // Build response
@@ -1484,7 +1531,7 @@ export const getProjectWorkingHours = async (req: Request, res: Response) => {
     }
 
     const professional = await User.findById(project.professionalId).select(
-      "companyAvailability businessInfo.timezone"
+      "companyAvailability businessInfo.timezone businessInfo.country"
     );
 
     const availability = resolveAvailability(professional?.companyAvailability);
@@ -1492,7 +1539,7 @@ export const getProjectWorkingHours = async (req: Request, res: Response) => {
     res.json({
       success: true,
       availability,
-      timezone: professional?.businessInfo?.timezone || "UTC",
+      timezone: resolveEffectiveScheduleTimeZone(professional),
     });
   } catch (error) {
     console.error("Error fetching working hours:", error);
@@ -1560,7 +1607,14 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       ? { execution: executionParsed.value, preparation: preparationParsed.value, buffer: bufferParsed.value }
       : undefined;
 
-    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, durationOverride, excludeBookingId);
+    const projectForQuantity = await Project.findById(id).select("subprojects");
+    const scheduleQuantity = resolveProjectScheduleQuantity(projectForQuantity, subprojectIndex, req.query.quantity);
+    if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
+    const selectedPricing = projectForQuantity?.subprojects?.[subprojectIndex as number]?.pricing;
+    const safeDurationOverride = selectedPricing?.type === 'unit' && selectedPricing.durationBasis === 'per_unit'
+      ? { ...durationOverride, execution: undefined }
+      : durationOverride;
+    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, safeDurationOverride, excludeBookingId, scheduleQuantity.quantity, typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined);
 
     if (!proposals) {
       return res.status(404).json({
@@ -1629,10 +1683,15 @@ export const getProjectAvailableSlots = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: subprojectIndexResult.error });
     }
 
+    const scheduleQuantity = resolveProjectScheduleQuantity(project, subprojectIndexResult.index, req.query.quantity);
+    if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
+
     const result = await getProjectAvailableSlotsForDate({
       projectId: id as string,
       subprojectIndex: subprojectIndexResult.index,
       startDate: date,
+      quantity: scheduleQuantity.quantity,
+      requestTimeZone: typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined,
     });
 
     if (!result) {
@@ -1695,6 +1754,9 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
     }
     const subprojectIndex = subprojectIndexResult.index;
 
+    const scheduleQuantityW = resolveProjectScheduleQuantity(project, subprojectIndex, req.query.quantity);
+    if (!scheduleQuantityW.valid) return res.status(400).json({ success: false, error: scheduleQuantityW.error });
+
     const parseDurW = (v: unknown, u: unknown): { ok: true; value?: { value: number; unit: 'hours' | 'days' } } | { ok: false; error: string } => {
       if (v == null && u == null) return { ok: true };
       const value = Number(v);
@@ -1721,13 +1783,19 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
     const durationOverrideW = executionParsedW.value || preparationParsedW.value || bufferParsedW.value
       ? { execution: executionParsedW.value, preparation: preparationParsedW.value, buffer: bufferParsedW.value }
       : undefined;
+    const selectedPricingW = project.subprojects?.[subprojectIndex as number]?.pricing;
+    const safeDurationOverrideW = selectedPricingW?.type === 'unit' && selectedPricingW.durationBasis === 'per_unit'
+      ? { ...durationOverrideW, execution: undefined }
+      : durationOverrideW;
 
     const window = await buildProjectScheduleWindow({
       projectId: id as string,
       subprojectIndex,
       startDate: startDate as string,
       startTime: typeof startTime === "string" ? startTime : undefined,
-      durationOverride: durationOverrideW,
+      durationOverride: safeDurationOverrideW,
+      quantity: scheduleQuantityW.quantity,
+      requestTimeZone: typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined,
     });
 
     if (!window) {
@@ -1749,6 +1817,7 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
         scheduledStartTime: window.scheduledStartTime,
         scheduledEndTime: window.scheduledEndTime,
         throughputDays: window.throughputDays,
+        timeZone: window.timeZone,
       },
     };
     console.log('[SCHEDULE WINDOW API] Success response:', response);
@@ -1857,7 +1926,7 @@ export const submitProject = async (req: Request, res: Response) => {
 
     if (failedChecks.length > 0) {
       project.qualityChecks = qualityChecks;
-      await project.save();
+      await saveProjectWithFence(project, professionalId);
       return res.status(400).json({
         error: "Quality checks failed",
         qualityChecks: failedChecks,
@@ -1897,7 +1966,7 @@ export const submitProject = async (req: Request, res: Response) => {
         project.reapprovalType = undefined;
         project.isResubmission = false;
 
-        await project.save();
+        await saveProjectWithFence(project, professionalId);
         return res.json({
           message: "Changes approved automatically",
           id: project._id,
@@ -1915,7 +1984,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.approvedAt = undefined;
       project.approvedBy = undefined;
 
-      await project.save();
+      await saveProjectWithFence(project, professionalId);
       console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
       return res.json({
         message: "Changes submitted for admin review",
@@ -1935,7 +2004,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.adminFeedback = undefined;
     }
 
-    await project.save();
+    await saveProjectWithFence(project, professionalId);
 
     const message = isResubmission
       ? "Project resubmitted for approval"
@@ -1961,35 +2030,52 @@ export const duplicateProject = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const original = await Project.findOne({ _id: id, professionalId });
-    if (!original) {
+    const exists = await Project.findOne({ _id: id, professionalId }).select("_id").lean();
+    if (!exists) {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    const plain = original.toObject();
-    // Reset fields for a clean draft copy
-    delete (plain as any)._id;
-    delete (plain as any).id;
-    const duplicated = new Project({
-      ...plain,
-      title: `${plain.title} (Copy)`,
-      status: "draft",
-      adminFeedback: undefined,
-      submittedAt: undefined,
-      approvedAt: undefined,
-      approvedBy: undefined,
-      previousSnapshot: undefined,
-      pendingChanges: undefined,
-      reapprovalType: undefined,
-      isResubmission: false,
-      autoSaveTimestamp: new Date(),
-      createdAt: undefined,
-      updatedAt: undefined,
+    // Re-read and create in the live account fence. The source snapshot is
+    // never reused after the owner is tombstoned, and the copy and its media
+    // references commit or abort together.
+    const duplicated = await withAnonymizationWriteFence([professionalId], async (session) => {
+      const original = await Project.findOne({ _id: id, professionalId })
+        .session(session ?? null);
+      if (!original) return null;
+      const plain = original.toObject();
+      // Reset fields for a clean draft copy
+      delete (plain as any)._id;
+      delete (plain as any).id;
+      const copy = new Project({
+        ...plain,
+        title: `${plain.title} (Copy)`,
+        status: "draft",
+        adminFeedback: undefined,
+        submittedAt: undefined,
+        approvedAt: undefined,
+        approvedBy: undefined,
+        previousSnapshot: undefined,
+        pendingChanges: undefined,
+        reapprovalType: undefined,
+        isResubmission: false,
+        autoSaveTimestamp: new Date(),
+        createdAt: undefined,
+        updatedAt: undefined,
+      });
+      await copy.save(session ? { session } : undefined);
+      return copy;
     });
-
-    await duplicated.save();
+    if (!duplicated) {
+      return res.status(404).json({ error: "Project not found" });
+    }
     res.json(duplicated);
   } catch (error) {
+    if ((error as { code?: string })?.code === ACCOUNT_WRITE_FENCE_CODE) {
+      return res.status(409).json({
+        error: (error as Error).message,
+        code: ACCOUNT_WRITE_FENCE_CODE,
+      });
+    }
     res.status(500).json({ error: "Failed to duplicate project" });
   }
 };
@@ -2041,11 +2127,99 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Status transition not allowed" });
     }
 
+    project.onHoldAt = status === "on_hold" ? new Date() : undefined;
     project.status = status as any;
-    await project.save();
+    await saveProjectWithFence(project, professionalId);
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to update project status" });
+  }
+};
+
+// Soft archive / restore for the Project Dashboard (group 15a). Archive
+// unpublishes + hides the project from the professional overview, public
+// search, and new bookings. It is never a delete: existing bookings,
+// details, and snapshots stay readable. Restore returns the project to
+// draft, or to its verified pre-archive status for non-published states —
+// never straight back to published (re-approval flow stays authoritative).
+export const archiveProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.user as any)?.id || (req.user as any)?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const actor = await User.findById(userId).select("role professionalStatus");
+    if (!actor) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const isAdmin = actor.role === "admin";
+    if (!isAdmin) {
+      if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+        return res.status(403).json({ error: "Only approved professionals can archive projects" });
+      }
+    }
+
+    const project = isAdmin
+      ? await Project.findById(id)
+      : await Project.findOne({ _id: id, professionalId: userId });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    if (project.status === "archived") {
+      return res.json({ success: true, project });
+    }
+
+    project.statusBeforeArchive = project.status as any;
+    project.archivedAt = new Date();
+    project.status = "archived" as any;
+    await saveProjectWithFence(project, userId);
+    res.json({ success: true, project });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to archive project" });
+  }
+};
+
+export const restoreProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.user as any)?.id || (req.user as any)?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const actor = await User.findById(userId).select("role professionalStatus");
+    if (!actor) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const isAdmin = actor.role === "admin";
+    if (!isAdmin) {
+      if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+        return res.status(403).json({ error: "Only approved professionals can restore projects" });
+      }
+    }
+
+    const project = isAdmin
+      ? await Project.findById(id)
+      : await Project.findOne({ _id: id, professionalId: userId });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    if (project.status !== "archived") {
+      return res.status(400).json({ error: "Project is not archived" });
+    }
+
+    // Never bypass approval: a previously published project restores as
+    // draft so the publish/approval flow runs again. Other verified states
+    // restore to their recorded pre-archive status.
+    const previous = project.statusBeforeArchive;
+    const restorable = ["draft", "pending", "rejected", "on_hold", "suspended"];
+    project.status = (previous && restorable.includes(previous) ? previous : "draft") as any;
+    project.statusBeforeArchive = undefined;
+    project.archivedAt = undefined;
+    await saveProjectWithFence(project, userId);
+    res.json({ success: true, project });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to restore project" });
   }
 };
 
@@ -2073,9 +2247,15 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         filter.status = "rejected";
       } else if (status === "cancelled") {
         filter.status = "closed";
+      } else if (status === "archived") {
+        filter.status = "archived";
       } else {
         filter.status = status;
       }
+    } else {
+      // Archived projects are hidden from the professional overview by
+      // default; they remain reachable via the explicit archived tab.
+      filter.status = { $ne: "archived" };
     }
     if (category && category !== "all") {
       // Match either the primary category field or within services[] selections
@@ -2104,7 +2284,8 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       Project.find(filter)
         .sort({ updatedAt: -1 })
         .skip((page - 1) * limit)
-        .limit(limit),
+        .limit(limit)
+        .lean(),
       Project.countDocuments(filter),
       Project.distinct("service", { professionalId }),
       // Status counts for header cards – normalize raw DB statuses
@@ -2122,6 +2303,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
                     { case: { $eq: ["$status", "on_hold"] }, then: "on_hold" },
                     { case: { $eq: ["$status", "suspended"] }, then: "suspended" },
                     { case: { $eq: ["$status", "rejected"] }, then: "rejected" },
+                    { case: { $eq: ["$status", "archived"] }, then: "archived" },
                   ],
                   default: "draft",
                 },
@@ -2146,12 +2328,29 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
           on_hold: byStatus["on_hold"] || 0,
           suspended: byStatus["suspended"] || 0,
           rejected: byStatus["rejected"] || 0,
+          archived: byStatus["archived"] || 0,
         };
       })(),
     ]);
 
+    // Assigned team member names, resolved in one batched lookup. Only
+    // ids + display names cross the wire — never full person payloads.
+    const teamIds = [...new Set(
+      items.flatMap((item: any) => Array.isArray(item?.resources) ? item.resources : [])
+        .filter((id: unknown) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id)),
+    )];
+    const teamRows = teamIds.length > 0
+      ? await User.find({ _id: { $in: teamIds } }).select("_id name").lean()
+      : [];
+    const teamNames = new Map(teamRows.map((row: any) => [String(row._id), row.name || null]));
+    const itemsWithTeam = items.map((item: any) => ({
+      ...item,
+      teamMembers: (Array.isArray(item?.resources) ? item.resources : [])
+        .map((id: unknown) => ({ id: String(id), name: teamNames.get(String(id)) || null })),
+    }));
+
     res.json({
-      items,
+      items: itemsWithTeam,
       meta: {
         total,
         page,

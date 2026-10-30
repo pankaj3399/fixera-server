@@ -59,6 +59,64 @@ describe("admin support chat helpers", () => {
       disputeCount: 1,
       grossEur: 1234.57,
       refundPercent: 20,
+      financialAccess: true,
+      grossByCurrency: [{ currency: "EUR", gross: 1234.57 }],
     });
+  });
+
+  it("withholds financials as null when the admin lacks payments access", () => {
+    expect(
+      buildSupportParticipantKpis({
+        professionalLevel: "Level 2",
+        reviewCount: 3,
+        avgRating: 4.2,
+        projectCount: 8,
+        bookingCount: 10,
+        completedCount: 6,
+        quotedCount: 7,
+        disputeCount: 1,
+        grossEur: 999.99,
+        refundCount: 2,
+        grossByCurrency: [{ currency: "EUR", gross: 999.99 }],
+        financialAccess: false,
+      }),
+    ).toEqual({
+      level: "Level 2",
+      reviewCount: 3,
+      avgRating: 4.2,
+      projectCount: 8,
+      bookingCount: 10,
+      completedCount: 6,
+      quotedCount: 7,
+      disputeCount: 1,
+      grossEur: null,
+      refundPercent: null,
+      financialAccess: false,
+      grossByCurrency: [],
+    });
+  });
+
+  it("reports multi-currency gross per currency, never as a EUR sum", () => {
+    const kpis = buildSupportParticipantKpis({
+      reviewCount: 0,
+      avgRating: null,
+      projectCount: 0,
+      bookingCount: 4,
+      completedCount: 4,
+      quotedCount: 0,
+      disputeCount: 0,
+      grossEur: 3000,
+      refundCount: 0,
+      grossByCurrency: [
+        { currency: "EUR", gross: 1000 },
+        { currency: "USD", gross: 2000 },
+      ],
+    });
+    expect(kpis.grossEur).toBeNull();
+    expect(kpis.grossByCurrency).toEqual([
+      { currency: "EUR", gross: 1000 },
+      { currency: "USD", gross: 2000 },
+    ]);
+    expect(kpis.refundPercent).toBe(0);
   });
 });

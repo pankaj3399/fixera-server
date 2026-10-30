@@ -29,6 +29,7 @@ import type {
   WarrantyClaimSummaryDto,
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
+import { buildMilestoneChargePlan } from '../milestoneCharges';
 import {
   presignOwnedUrl,
   presignQuestionAnswerUrl,
@@ -43,6 +44,12 @@ import { refundCountsAsCash } from '../paymentRefunds';
 import { resolveAcceptedQuoteVersion } from './quoteTotals';
 import { isBookingSnapshotComplete, isValidIanaTimeZone } from './snapshot';
 import { parseS3KeyFromUrl } from '../s3Upload';
+import {
+  isAnonymizedAccount,
+  maskBookingForAnonymizedParties,
+  maskCancellationRequestForAnonymizedParties,
+  maskWarrantyClaimForAnonymizedParties,
+} from '../accountAnonymity';
 
 const CUSTOMER_INVOICE_KEYS = [
   'invoiceNumber',
@@ -680,9 +687,20 @@ const buildPayments = async (params: {
     || records[0]
     || null;
 
+  // Client bug list #19b: expected charges from the shared plan, using the
+  // recorded quote commission so the shown amounts match actual charges
+  // (options in full on the first milestone). Empty when unrecorded.
+  const chargeVersions = Array.isArray((booking as any).quoteVersions) ? (booking as any).quoteVersions : [];
+  const chargeVersion = chargeVersions
+    .find((version: any) => Number(version?.version) === Number((booking as any).currentQuoteVersion));
+  const recordedCommission = num(chargeVersion?.customerTotals?.commissionPercent);
+  const milestoneChargePlan = recordedCommission != null
+    ? buildMilestoneChargePlan(booking, recordedCommission)
+    : [];
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
       const matching = paymentRows.find((payment) => num(payment.milestoneIndex) === index);
+      const planEntry = milestoneChargePlan.find((entry) => entry.index === index);
       return {
         index,
         title: String(milestone.title || ''),
@@ -697,6 +715,8 @@ const buildPayments = async (params: {
         paidAt: iso(milestone.paidAt),
         customerChargeTotalWithVat: num(matching?.totalWithVat),
         paymentRowPresent: Boolean(matching),
+        expectedCustomerCharge: planEntry ? planEntry.expectedCustomerGross : null,
+        includesSelectedOptions: Boolean(planEntry?.includesSelectedOptions),
       };
     },
   );
@@ -850,7 +870,18 @@ export const buildBookingDetails = async (params: {
   adminAccess?: { bookings?: boolean; disputes: boolean; warranty: boolean; cancellations: boolean; payments: boolean };
   quotationAlias?: boolean;
 }): Promise<BookingDetailsDto> => {
-  const { booking, payments, cancellations, warrantyClaims, actors, viewerRole } = params;
+  const { payments, cancellations, warrantyClaims, actors, viewerRole } = params;
+  const rawProject = params.booking?.project && typeof params.booking.project === 'object'
+    ? params.booking.project
+    : null;
+  const projectProfessionalId = referenceId(rawProject?.professionalId);
+  const projectProfessionalActor = projectProfessionalId ? actors.get(projectProfessionalId) : undefined;
+  const booking = maskBookingForAnonymizedParties(params.booking, {
+    professional:
+      isAnonymizedAccount(params.booking?.professional)
+      || Boolean(projectProfessionalActor?.isAnonymized),
+    ...(projectProfessionalId ? { professionalId: projectProfessionalId } : {}),
+  });
   const isAdminViewer = viewerRole === 'admin';
   const maySeeAdminArea = (area: 'bookings' | 'disputes' | 'warranty' | 'cancellations' | 'payments') =>
     !isAdminViewer || params.adminAccess?.[area] === true;
@@ -859,6 +890,24 @@ export const buildBookingDetails = async (params: {
   const project = booking.project && typeof booking.project === 'object' ? booking.project : null;
   const customerId = objectId(booking.customer);
   const professionalId = objectId(booking.professional || project?.professionalId);
+  const customerMasked = isAnonymizedAccount(customer);
+  const professionalMasked = isAnonymizedAccount(professional);
+  const maskedCancellations = cancellations.map((request) =>
+    maskCancellationRequestForAnonymizedParties(request, {
+      customerId: customerId || undefined,
+      professionalId: professionalId || undefined,
+      customerAnonymized: customerMasked,
+      professionalAnonymized: professionalMasked,
+    }),
+  );
+  const maskedWarrantyClaims = warrantyClaims.map((claim) =>
+    maskWarrantyClaimForAnonymizedParties(claim, {
+      customerId: customerId || undefined,
+      professionalId: professionalId || undefined,
+      customerAnonymized: customerMasked,
+      professionalAnonymized: professionalMasked,
+    }),
+  );
   const projectId = referenceId(booking.project) || str((booking.bookingSnapshot as any)?.project?.id);
   const captured = booking.bookingSnapshot || null;
   const capturedAt = iso(captured?.capturedAt);
@@ -1115,6 +1164,7 @@ export const buildBookingDetails = async (params: {
     scheduleSelection: {
       startDate: dateOnly(booking.scheduledStartDate),
       startTime: str(booking.scheduledStartTime),
+      endTime: str(booking.scheduledEndTime),
       executionEndDate: dateOnly(booking.scheduledExecutionEndDate),
       bufferEndDate: dateOnly(booking.scheduledBufferEndDate),
       timeZone: isValidIanaTimeZone(booking.scheduleTimeZone) ? booking.scheduleTimeZone : null,
@@ -1410,6 +1460,7 @@ export const buildBookingDetails = async (params: {
     justification: String(item.justification || ''),
     professionalAmount: num(item.amount) ?? 0,
     unitPrice: num(item.unitPrice),
+    unit: str(item.unit),
     estimatedUnits: num(item.estimatedUnits),
     actualUnits: num(item.actualUnits),
     referenceIndex: num(item.referenceIndex),
@@ -1510,11 +1561,19 @@ export const buildBookingDetails = async (params: {
     );
     if (!already) historyEntries.push({ ...booking.rescheduleRequest, status: 'pending' });
   }
+  // Client bug list #9c: only the live pending request can be responded to.
+  // History entries (including disputed/terminal ones) always report false.
+  const pendingLiveRequest = booking.status === 'rescheduling_requested'
+    && (booking.rescheduleRequest as any)?.status === 'pending';
   for (const [index, entry] of historyEntries.entries()) {
     const requestedBy = actorForId(entry.requestedBy, actors, viewerRole, {
       roleHint: entry.requestedBy === customerId ? 'customer' : 'professional',
     });
     const respondedBy = actorForId(entry.respondedBy, actors, viewerRole, { roleHint: 'customer' });
+    const liveRequestedAt = iso((booking.rescheduleRequest as any)?.requestedAt);
+    const isLivePending = pendingLiveRequest
+      && liveRequestedAt != null
+      && iso(entry.requestedAt) === liveRequestedAt;
     reschedules.push({
       id: `reschedule:${index}:${iso(entry.requestedAt) || ''}`,
       requestedAt: iso(entry.requestedAt) || '',
@@ -1524,6 +1583,7 @@ export const buildBookingDetails = async (params: {
       description: str(entry.description),
       note: str(entry.note),
       status: entry.status || 'pending',
+      canRespond: entry.status === 'pending' && isLivePending,
       respondedAt: iso(entry.respondedAt),
       respondedBy,
       responseNote: str(entry.responseNote),
@@ -1535,7 +1595,13 @@ export const buildBookingDetails = async (params: {
   }
 
   const cancellationDtos: CancellationRequestDto[] = [];
-  const visibleCancellations = maySeeAdminArea('cancellations') ? cancellations : [];
+  // Client bug list #3: participants must see the cancellation request on the
+  // booking page (status, reason, requested dates/actor). Admins keep the
+  // area-gated full view; participants get a safe subset without the
+  // admin-authored resolution note.
+  const visibleCancellations = isAdminViewer
+    ? (maySeeAdminArea('cancellations') ? maskedCancellations : [])
+    : maskedCancellations;
   for (const [index, request] of visibleCancellations.entries()) {
     const evidence = await attachmentUrlList(
       request.evidence,
@@ -1548,6 +1614,7 @@ export const buildBookingDetails = async (params: {
       status: request.status,
       reasonCategory: str(request.reasonCategory),
       reason: String(request.reason || ''),
+      adminResolutionNote: isAdminViewer ? str(request.adminResolutionNote) : null,
       evidence,
       requestedBy: actorForId(request.requestedBy, actors, viewerRole, {
         roleHint: request.requestedRole === 'professional' ? 'professional' : 'customer',
@@ -1573,7 +1640,7 @@ export const buildBookingDetails = async (params: {
     });
   }
 
-  const visibleWarrantyClaims = maySeeAdminArea('warranty') ? warrantyClaims : [];
+  const visibleWarrantyClaims = maySeeAdminArea('warranty') ? maskedWarrantyClaims : [];
   const warrantyDtos: WarrantyClaimSummaryDto[] = visibleWarrantyClaims.map((claim) => ({
     id: String(claim._id),
     claimNumber: str(claim.claimNumber),
@@ -1678,11 +1745,13 @@ export const buildBookingDetails = async (params: {
           role: 'professional',
           name: str(professional?.name) || str(professional?.username),
           companyName: str(professional?.businessInfo?.companyName),
+          ...(isAnonymizedAccount(professional) ? { isAnonymized: true } : {}),
         }
       : {
           role: 'customer',
           name: str(customer?.name),
           companyName: str(customer?.businessName),
+          ...(isAnonymizedAccount(customer) ? { isAnonymized: true } : {}),
         },
     quote: quoteDto,
     payment: booking.payment
@@ -1740,50 +1809,80 @@ export const buildBookingDetails = async (params: {
   const professionalContactVisible = viewerRole === 'admin';
   const recordedCustomer = captured?.parties?.customer || null;
   const recordedProfessional = captured?.parties?.professional || null;
+  const customerAnonymized = isAnonymizedAccount(customer);
+  const professionalAnonymized = isAnonymizedAccount(professional);
   const parties: PartiesDto = {
     customer: {
       id: customerId,
-      name: str(recordedCustomer?.displayName) || str(customer?.name),
-      username: str(customer?.username),
-      customerType: recordedCustomer?.customerType === 'business' || recordedCustomer?.customerType === 'individual'
-        ? recordedCustomer.customerType
-        : customer?.customerType || null,
-      businessName: str(recordedCustomer?.businessName) || str(customer?.businessName),
-      email: customerEmailVisible ? str(customer?.email) : null,
-      phone: customerPhoneVisible ? str(customer?.phone) : null,
-      vatNumber: viewerRole === 'admin' ? str(customer?.vatNumber) : null,
-      address: customer?.location
-        ? {
-            city: str(recordedCustomer?.city) || str(customer.location.city),
-            country: str(recordedCustomer?.country) || str(customer.location.country),
-            postalCode: str(customer.location.postalCode),
-          }
-        : null,
-      timeZone: isValidIanaTimeZone(customer?.timeZone) ? customer.timeZone : null,
+      name: customerAnonymized ? '[deleted user]' : str(recordedCustomer?.displayName) || str(customer?.name),
+      username: customerAnonymized ? null : str(customer?.username),
+      customerType: customerAnonymized
+        ? null
+        : recordedCustomer?.customerType === 'business' || recordedCustomer?.customerType === 'individual'
+          ? recordedCustomer.customerType
+          : customer?.customerType || null,
+      businessName: customerAnonymized
+        ? null
+        : str(recordedCustomer?.businessName) || str(customer?.businessName),
+      email: customerAnonymized ? null : customerEmailVisible ? str(customer?.email) : null,
+      phone: customerAnonymized ? null : customerPhoneVisible ? str(customer?.phone) : null,
+      vatNumber: customerAnonymized ? null : viewerRole === 'admin' ? str(customer?.vatNumber) : null,
+      address: customerAnonymized
+        ? customer?.location
+          ? { city: null, country: str(customer.location.country), postalCode: null }
+          : null
+        : customer?.location
+          ? {
+              city: str(recordedCustomer?.city) || str(customer.location.city),
+              country: str(recordedCustomer?.country) || str(customer.location.country),
+              postalCode: str(customer.location.postalCode),
+            }
+          : null,
+      timeZone: customerAnonymized
+        ? null
+        : isValidIanaTimeZone(customer?.timeZone) ? customer.timeZone : null,
+      ...(customerAnonymized ? { isAnonymized: true } : {}),
     },
     professional: {
       id: professionalId,
-      name: str(recordedProfessional?.displayName) || str(professional?.name),
-      username: str(professional?.username),
-      companyName: str(recordedProfessional?.companyName) || str(professional?.businessInfo?.companyName),
-      email: professionalContactVisible ? str(professional?.email) : null,
-      phone: professionalContactVisible ? str(professional?.phone) : null,
-      vatNumber: professionalContactVisible ? str(professional?.vatNumber) : null,
-      website: str(professional?.businessInfo?.website),
-      address: professional?.businessInfo
-        ? {
-            city: str(recordedProfessional?.city) || str(professional.businessInfo.city),
-            country: str(recordedProfessional?.country) || str(professional.businessInfo.country),
-            postalCode: str(professional.businessInfo.postalCode),
-          }
-        : null,
-      timeZone: isValidIanaTimeZone(recordedProfessional?.timezone)
-        ? recordedProfessional.timezone
-        : isValidIanaTimeZone(professional?.businessInfo?.timezone)
-          ? professional.businessInfo.timezone
-          : isValidIanaTimeZone(professional?.timeZone)
-            ? professional.timeZone
-            : null,
+      name: professionalAnonymized
+        ? '[deleted user]'
+        : str(recordedProfessional?.displayName) || str(professional?.name),
+      username: professionalAnonymized ? null : str(professional?.username),
+      companyName: professionalAnonymized
+        ? null
+        : str(recordedProfessional?.companyName) || str(professional?.businessInfo?.companyName),
+      email: professionalAnonymized
+        ? null
+        : professionalContactVisible ? str(professional?.email) : null,
+      phone: professionalAnonymized
+        ? null
+        : professionalContactVisible ? str(professional?.phone) : null,
+      vatNumber: professionalAnonymized
+        ? null
+        : professionalContactVisible ? str(professional?.vatNumber) : null,
+      website: professionalAnonymized ? null : str(professional?.businessInfo?.website),
+      address: professionalAnonymized
+        ? professional?.businessInfo
+          ? { city: null, country: str(professional.businessInfo.country), postalCode: null }
+          : null
+        : professional?.businessInfo
+          ? {
+              city: str(recordedProfessional?.city) || str(professional.businessInfo.city),
+              country: str(recordedProfessional?.country) || str(professional.businessInfo.country),
+              postalCode: str(professional.businessInfo.postalCode),
+            }
+          : null,
+      timeZone: professionalAnonymized
+        ? null
+        : isValidIanaTimeZone(recordedProfessional?.timezone)
+          ? recordedProfessional.timezone
+          : isValidIanaTimeZone(professional?.businessInfo?.timezone)
+            ? professional.businessInfo.timezone
+            : isValidIanaTimeZone(professional?.timeZone)
+              ? professional.timeZone
+              : null,
+      ...(professionalAnonymized ? { isAnonymized: true } : {}),
     },
     recordedAt: capturedAt,
     source: captured?.parties ? 'booking_snapshot' : 'current_profile',
@@ -1849,6 +1948,7 @@ export const buildBookingDetails = async (params: {
       preferredStartTime: str(captured?.schedule?.preferredStartTime),
       scheduledStartDate: dateOnly(captured?.schedule?.scheduledStartDate),
       scheduledStartTime: str(captured?.schedule?.scheduledStartTime),
+      scheduledEndTime: str(captured?.schedule?.scheduledEndTime),
       scheduledExecutionEndDate: dateOnly(captured?.schedule?.scheduledExecutionEndDate),
       scheduledBufferStartDate: dateOnly(captured?.schedule?.scheduledBufferStartDate),
       scheduledBufferEndDate: dateOnly(captured?.schedule?.scheduledBufferEndDate),

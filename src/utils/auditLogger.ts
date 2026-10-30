@@ -18,10 +18,16 @@ interface AuditLogInput {
 const SENSITIVE_KEY_PATTERN = /password|token|secret|cvv|cardNumber|verificationCode|idProof|meetingLink|internalNote/i;
 const MAX_STRING_LENGTH = 2048;
 const SUPPORT_NOTE_ROUTE_RE = /\/support\/(?:items\/[^/]+\/[^/]+|tickets\/[^/]+)\/notes(?:\/|$|\?)/i;
+const ACCOUNT_ANONYMIZE_ROUTE_RE = /\/users\/[^/]+\/anonymize(?:\/|$|\?)/i;
 
 /** Private note bodies are never written to the audit trail verbatim. */
 export function sanitizeAdminAuditBody(path: string, body: any): any {
   const sanitized = sanitizeForAudit(body);
+  if (ACCOUNT_ANONYMIZE_ROUTE_RE.test(path.split("?")[0])) {
+    // Confirmation is validated by the handler. Extra caller text, including a
+    // reason, is not part of the contract and must not be retained.
+    return {};
+  }
   if (!SUPPORT_NOTE_ROUTE_RE.test(path.split("?")[0])) return sanitized;
   if (sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)) {
     const out = { ...sanitized };
@@ -30,6 +36,14 @@ export function sanitizeAdminAuditBody(path: string, body: any): any {
   }
   if (typeof sanitized === "string") return "[redacted:private-note]";
   return sanitized;
+}
+
+/** Query strings are not retained for account anonymization either. */
+export function sanitizeAdminAuditQuery(path: string, query: any): any {
+  if (ACCOUNT_ANONYMIZE_ROUTE_RE.test(path.split("?")[0])) {
+    return {};
+  }
+  return sanitizeForAudit(query);
 }
 
 export const getRequestIp = (req: Request): string | undefined => {
@@ -88,6 +102,7 @@ export const auditLog = async (input: AuditLogInput): Promise<void> => {
     const actorId = actorUser?._id;
     const actorRole: string | undefined = actorUser?.role;
     const actorEmail: string | undefined = actorUser?.email;
+    const anonymizedActor = Boolean(actorUser?.isAnonymized || actorUser?.deletedAt);
 
     await AuditLog.create({
       actor: actorId,
@@ -99,8 +114,8 @@ export const auditLog = async (input: AuditLogInput): Promise<void> => {
       method: req.method,
       path: req.originalUrl?.split('?')[0] || req.path,
       details: details ? sanitizeForAudit(details) : undefined,
-      ip: getRequestIp(req),
-      userAgent: req.headers['user-agent']?.toString().slice(0, 500),
+      ip: anonymizedActor ? undefined : getRequestIp(req),
+      userAgent: anonymizedActor ? undefined : req.headers['user-agent']?.toString().slice(0, 500),
       status: status ?? 'success',
       statusCode,
       errorMessage,

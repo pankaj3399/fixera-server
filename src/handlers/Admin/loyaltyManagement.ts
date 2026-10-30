@@ -13,6 +13,9 @@ import { addPoints, deductPoints } from "../../utils/pointsSystem";
 import { updateProfessionalLevel } from "../../utils/professionalLevelSystem";
 import mongoose from 'mongoose';
 import { sendHandlerError } from '../../utils/handlerErrors';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { isAnonymizedAccount } from '../../utils/accountAnonymity';
+import { UserFacingError } from '../../utils/appErrors';
 
 const LOYALTY_LEVELS = ["Bronze", "Silver", "Gold", "Platinum", "Diamond"] as const;
 const PROFESSIONAL_LEVELS = ["New", "Level 1", "Level 2", "Level 3", "Expert"] as const;
@@ -545,7 +548,11 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
       }
     }
 
-    const query: Record<string, any> = { role: "professional", deletedAt: { $exists: false } };
+    const query: Record<string, any> = {
+      role: "professional",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
+    };
     if (customerNameProfessionalIds !== null) {
       query._id = { $in: customerNameProfessionalIds.map((id) => new mongoose.Types.ObjectId(id)) };
     }
@@ -565,7 +572,7 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
 
     const [professionals, total] = await Promise.all([
       User.find(query)
-        .select("name email phone professionalStatus accountStatus professionalLevel manualProfessionalLevelOverride points adminTags businessInfo createdAt")
+        .select("name email phone professionalStatus accountStatus professionalLevel manualProfessionalLevelOverride points adminTags businessInfo createdAt isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -629,6 +636,13 @@ export const updateProfessionalManagement = async (req: Request, res: Response) 
     if (!professional) {
       return res.status(404).json({ success: false, msg: "Professional not found" });
     }
+    if (isAnonymizedAccount(professional)) {
+      return res.status(409).json({
+        success: false,
+        msg: "This account is deleted or anonymized and cannot be changed.",
+        code: "ACCOUNT_UNAVAILABLE",
+      });
+    }
 
     if (professionalLevel) {
       if (!(PROFESSIONAL_LEVELS as readonly string[]).includes(professionalLevel)) {
@@ -657,7 +671,16 @@ export const updateProfessionalManagement = async (req: Request, res: Response) 
       professional.suspensionReason = undefined;
     }
 
-    await professional.save();
+    try {
+      await withAnonymizationWriteFence([String(professionalId)], async (session) => {
+        return professional.save({ session });
+      });
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({ success: false, msg: error.message, code: error.code });
+      }
+      throw error;
+    }
 
     return res.status(200).json({
       success: true,
@@ -702,7 +725,11 @@ export const listCustomerManagement = async (req: Request, res: Response) => {
       addressCustomerIds = [...new Set(matchingBookings.map((b: any) => String(b.customer)))];
     }
 
-    const query: Record<string, any> = { role: "customer", deletedAt: { $exists: false } };
+    const query: Record<string, any> = {
+      role: "customer",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
+    };
     if (addressCustomerIds !== null) {
       query._id = { $in: addressCustomerIds.map((id) => new mongoose.Types.ObjectId(id)) };
     }
@@ -727,7 +754,7 @@ export const listCustomerManagement = async (req: Request, res: Response) => {
 
     const [customers, total] = await Promise.all([
       User.find(query)
-        .select("name email phone customerType businessName location companyAddress loyaltyLevel manualCustomerLevelOverride points totalSpent totalBookings accountStatus createdAt")
+        .select("name email phone customerType businessName location companyAddress loyaltyLevel manualCustomerLevelOverride points totalSpent totalBookings accountStatus createdAt isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -787,6 +814,13 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
     if (!customer) {
       return res.status(404).json({ success: false, msg: "Customer not found" });
     }
+    if (isAnonymizedAccount(customer)) {
+      return res.status(409).json({
+        success: false,
+        msg: "This account is deleted or anonymized and cannot be changed.",
+        code: "ACCOUNT_UNAVAILABLE",
+      });
+    }
 
     if (loyaltyLevel) {
       if (!(LOYALTY_LEVELS as readonly string[]).includes(loyaltyLevel)) {
@@ -798,7 +832,16 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
     if (action === "suspend") customer.accountStatus = "suspended";
     if (action === "reactivate") customer.accountStatus = "active";
 
-    await customer.save();
+    try {
+      await withAnonymizationWriteFence([String(customerId)], async (session) => {
+        return customer.save({ session });
+      });
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        return res.status(error.status).json({ success: false, msg: error.message, code: error.code });
+      }
+      throw error;
+    }
 
     return res.status(200).json({
       success: true,

@@ -4,5 +4,7 @@ export default defineConfig({
   test: {
     include: ["src/tests/**/*.test.ts"],
     exclude: ["dist/**", "node_modules/**"],
+    hookTimeout: 30000,
+    setupFiles: ["src/tests/setup/providerIsolation.ts"],
   },
 });

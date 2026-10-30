@@ -10,6 +10,7 @@ import { uploadIdProof, updateProfessionalProfile, submitForVerification, update
 import { upload, uploadProfileImage as profileImageUpload } from "../../utils/s3Upload";
 import { toHandlerError } from "../../utils/handlerErrors";
 import { getLoyaltyStatus, addSpending, getLeaderboard, getUserPointsBalance, getUserPointsHistory, getProfessionalLevelStatus, boostProfessionalLevel } from "../../handlers/User/loyaltyManagement";
+import { getSavingsSummary } from "../../handlers/User/savingsSummary";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
 import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
 import {
@@ -86,6 +87,7 @@ userRouter.route("/phone").put(updatePhone)
 userRouter.route("/customer-profile").put(updateCustomerProfile)
 userRouter.route("/id-info").put(updateIdInfo)
 userRouter.route("/loyalty/status").get(getLoyaltyStatus)
+userRouter.route("/savings/summary").get(getSavingsSummary)
 userRouter.route("/loyalty/add-spending").post(addSpending)
 userRouter.route("/loyalty/leaderboard").get(getLeaderboard)
 

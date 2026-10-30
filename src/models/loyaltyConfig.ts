@@ -155,14 +155,86 @@ loyaltyConfigSchema.pre('save', function(next) {
   next();
 });
 
+// Standard tier ladder. Extracted so getCurrentConfig can backfill tiers that
+// are missing from configs created before they existed (client bug list #14a).
+export const defaultLoyaltyTiers = () => [
+  {
+    name: 'Bronze',
+    minSpendingAmount: 0,
+    maxSpendingAmount: 999.99,
+    discountPercentage: 0,
+    maxDiscountAmount: null,
+    benefits: [
+      'Standard customer support',
+      'Basic booking features',
+      'Email notifications'
+    ],
+    color: '#CD7F32',
+    icon: 'bronze-medal',
+    isActive: true,
+    order: 1,
+  },
+  {
+    name: 'Silver',
+    minSpendingAmount: 1000,
+    maxSpendingAmount: 4999.99,
+    discountPercentage: 2,
+    maxDiscountAmount: 25,
+    benefits: [
+      '2% booking discount',
+      'Priority customer support',
+      'Early access to new professionals',
+      'Extended booking window'
+    ],
+    color: '#C0C0C0',
+    icon: 'silver-medal',
+    isActive: true,
+    order: 2,
+  },
+  {
+    name: 'Gold',
+    minSpendingAmount: 5000,
+    maxSpendingAmount: 9999.99,
+    discountPercentage: 5,
+    maxDiscountAmount: 75,
+    benefits: [
+      '5% booking discount',
+      'Free service call fees',
+      'Dedicated account manager',
+      'Booking priority scheduling'
+    ],
+    color: '#FFD700',
+    icon: 'gold-medal',
+    isActive: true,
+    order: 3,
+  },
+  {
+    name: 'Platinum',
+    minSpendingAmount: 10000,
+    discountPercentage: 10,
+    maxDiscountAmount: 150,
+    benefits: [
+      '10% booking discount',
+      'Free cancellations up to 2 hours before',
+      'Premium support line',
+      'Exclusive seasonal offers',
+      'VIP badge and profile highlight'
+    ],
+    color: '#E5E4E2',
+    icon: 'crown',
+    isActive: true,
+    order: 4,
+  }
+];
+
 // Static method to get current config or create default
 loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyaltyConfig> {
   let config = await this.findOne();
-  
+
   if (!config) {
     // Create default configuration
     const defaultAdmin = await mongoose.model('User').findOne({ role: 'admin' });
-    
+
     config = await this.create({
       globalSettings: {
         isEnabled: true,
@@ -170,81 +242,27 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
         pointsExpiryMonths: null,
         roundingRule: 'floor'
       },
-      tiers: [
-        {
-          name: 'Bronze',
-          minSpendingAmount: 0,
-          maxSpendingAmount: 999.99,
-          discountPercentage: 0,
-          maxDiscountAmount: null,
-          benefits: [
-            'Standard customer support',
-            'Basic booking features',
-            'Email notifications'
-          ],
-          color: '#CD7F32',
-          icon: 'bronze-medal',
-          isActive: true,
-          order: 1,
-        },
-        {
-          name: 'Silver',
-          minSpendingAmount: 1000,
-          maxSpendingAmount: 4999.99,
-          discountPercentage: 2,
-          maxDiscountAmount: 25,
-          benefits: [
-            '2% booking discount',
-            'Priority customer support',
-            'Early access to new professionals',
-            'Extended booking window'
-          ],
-          color: '#C0C0C0',
-          icon: 'silver-medal',
-          isActive: true,
-          order: 2,
-        },
-        {
-          name: 'Gold',
-          minSpendingAmount: 5000,
-          maxSpendingAmount: 9999.99,
-          discountPercentage: 5,
-          maxDiscountAmount: 75,
-          benefits: [
-            '5% booking discount',
-            'Free service call fees',
-            'Dedicated account manager',
-            'Booking priority scheduling'
-          ],
-          color: '#FFD700',
-          icon: 'gold-medal',
-          isActive: true,
-          order: 3,
-        },
-        {
-          name: 'Platinum',
-          minSpendingAmount: 10000,
-          discountPercentage: 10,
-          maxDiscountAmount: 150,
-          benefits: [
-            '10% booking discount',
-            'Free cancellations up to 2 hours before',
-            'Premium support line',
-            'Exclusive seasonal offers',
-            'VIP badge and profile highlight'
-          ],
-          color: '#E5E4E2',
-          icon: 'crown',
-          isActive: true,
-          order: 4,
-        }
-      ],
+      tiers: defaultLoyaltyTiers(),
       lastModifiedBy: defaultAdmin?._id,
       lastModified: new Date(),
       version: 1
     });
+  } else {
+    // Client bug list #14a: configs created before Platinum existed stop
+    // progression at Gold. Backfill any missing standard tier (additive only;
+    // never touch admin-customized thresholds).
+    const names = new Set((config.tiers || []).map((tier: any) => tier?.name));
+    const missing = defaultLoyaltyTiers().filter((tier) => !names.has(tier.name));
+    if (missing.length > 0) {
+      config.tiers = [...(config.tiers || []), ...missing];
+      // Review nit: re-sort in place so raw tier order stays deterministic
+      // for any consumer that reads it without sorting.
+      config.tiers.sort((a: any, b: any) => (Number(a?.order) || 0) - (Number(b?.order) || 0));
+      await config.save();
+      console.log(`Loyalty: backfilled missing tiers: ${missing.map((tier) => tier.name).join(', ')}`);
+    }
   }
-  
+
   return config;
 };
 
