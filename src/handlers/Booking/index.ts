@@ -588,10 +588,18 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       );
       return match?.type || match?.fieldType;
     };
+    const isFileAnswerType = (value?: string): boolean =>
+      value === 'file' || value === 'attachment';
     const invalidFileAnswers = (Array.isArray(rfqData?.answers) ? rfqData.answers : []).filter((answer: any) => {
-      const fieldType = answer?.fieldType || answer?.type || definitionFieldType(answer);
+      // Either the answer or its project definition may mark this as a file.
+      // A client-supplied "text" must not mask a file definition, because the
+      // projection (and presigning) classify from the definition.
+      const isFile =
+        isFileAnswerType(answer?.fieldType) ||
+        isFileAnswerType(answer?.type) ||
+        isFileAnswerType(definitionFieldType(answer));
       const value = typeof answer?.answer === 'string' ? answer.answer : '';
-      if (fieldType !== 'file' && fieldType !== 'attachment') return false;
+      if (!isFile) return false;
       return Boolean(value) && !isQuestionAnswerUploadOwnedByUser(value, userId, projectId);
     });
     if (invalidFileAnswers.length > 0) {
