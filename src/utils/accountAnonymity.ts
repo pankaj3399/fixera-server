@@ -366,7 +366,11 @@ export const maskBookingForAnonymizedParties = <T>(
 
   if (customerAnonymized) {
     if (next.location) next.location = maskLocation(next.location);
-    next.customerRejectionReason = ANONYMIZED_TEXT;
+    // Only mask an existing rejection reason; otherwise this invents state the
+    // booking never had.
+    if (typeof next.customerRejectionReason === "string" && next.customerRejectionReason.trim()) {
+      next.customerRejectionReason = ANONYMIZED_TEXT;
+    }
   }
   if (next.bookingSnapshot) {
     next.bookingSnapshot = maskBookingSnapshot(

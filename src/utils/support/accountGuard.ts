@@ -87,8 +87,16 @@ const fenceIds = (
   userIds: Array<Types.ObjectId | string | null | undefined>,
 ): string[] => [...new Set(
   userIds
-    .filter((value): value is Types.ObjectId | string => value != null && value !== "")
-    .map((value) => String(value))
+    .filter((value) => value != null && value !== "")
+    // Callers pass populated documents too; String(doc) is "[object Object]"
+    // and would silently drop the fence for that account.
+    .map((value) =>
+      String(
+        value && typeof value === "object" && "_id" in value
+          ? (value as { _id: unknown })._id
+          : value,
+      ),
+    )
     .filter((value) => Types.ObjectId.isValid(value)),
 )];
 

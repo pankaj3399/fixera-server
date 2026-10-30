@@ -175,8 +175,10 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
 
     await withAnonymizationWriteFence([userId], async (session) => {
       await user.save(session ? { session } : undefined);
-      saved = true;
     });
+    // Only after the fenced transaction commits: assigning inside the callback
+    // reported success even when the commit rolled back.
+    saved = true;
 
     console.log(`✅ ID Proof: Successfully uploaded for ${user.email}`);
 
@@ -1113,8 +1115,10 @@ export const uploadProfileImage = async (req: Request, res: Response, next: Next
     user.profileImage = result.url;
     await withAnonymizationWriteFence([userId], async (session) => {
       await user.save(session ? { session } : undefined);
-      saved = true;
     });
+    // Only after the fenced transaction commits: assigning inside the callback
+    // reported success even when the commit rolled back.
+    saved = true;
 
     if (oldProfileImage) {
       const oldKey = parseS3KeyFromUrl(oldProfileImage);
