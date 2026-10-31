@@ -32,6 +32,17 @@ async function run(script: string, args: string[] = [], target = uri) {
   });
 }
 
+describe('migration database parsing', () => {
+  it('accepts multi-host replica-set URIs and requires an explicit database', async () => {
+    const { marketingMigrationDatabase } = await import('../../scripts/migrate/marketingMigration');
+    expect(marketingMigrationDatabase('mongodb://u:p@h1:27017,h2:27017/fixtract?replicaSet=rs0')).toBe('fixtract');
+    expect(marketingMigrationDatabase('mongodb+srv://user:pw@cluster.example.net/leads')).toBe('leads');
+    expect(() => marketingMigrationDatabase('mongodb://host:27017')).toThrow('must name an explicit database');
+    expect(() => marketingMigrationDatabase('mongodb://host:27017/?x=test')).toThrow('must name an explicit database');
+    expect(() => marketingMigrationDatabase('http://host/db')).toThrow('not a valid MongoDB URI');
+  });
+});
+
 suite('explicit offline marketing migrations', () => {
   beforeAll(async () => {
     await mongoose.connect(uri, { autoIndex: false, autoCreate: false });
