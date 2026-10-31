@@ -2171,7 +2171,6 @@ const redactAncillaryData = async (
     ,
     ,
     ,
-    ,
     emailLogResult,
     actorEmailLogResult,
     relatedEmailLogResult,

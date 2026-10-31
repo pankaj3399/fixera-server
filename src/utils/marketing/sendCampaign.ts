@@ -217,8 +217,11 @@ export async function sendMarketingCampaign(
     criteriaHash: '',
   };
   try {
+    // Only provider-backed deliveries can be immutable progress. A
+    // zero-recipient attempt records a hash but no provider state; treating it
+    // as drift would make an edited, failed campaign permanently unretryable.
     const previousCriteriaHash = campaign.deliveries.find(
-      (delivery) => delivery.criteriaHash,
+      (delivery) => delivery.criteriaHash && (delivery.brevoListId || delivery.brevoCampaignId),
     )?.criteriaHash;
     const resolved = await resolveMarketingAudience({
       campaignType: campaign.type,
