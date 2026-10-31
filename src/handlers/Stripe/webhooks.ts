@@ -889,6 +889,8 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
   }
 
   if (shouldNotifyBookingRefund && (booking.payment.status === 'refunded' || booking.payment.status === 'partially_refunded')) {
+    // Project bookings may carry the professional only on the project.
+    const refundProfessionalId = await getProfessionalId(booking);
     try {
       if (booking.customer) {
         await notify({
@@ -896,16 +898,16 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
           eventKey: 'customer.booking_cancelled_refunded',
           entityType: 'booking',
           entityId: String(booking._id),
-          ...(booking.professional
-            ? { subjectUserId: String(booking.professional) }
+          ...(refundProfessionalId
+            ? { subjectUserId: String(refundProfessionalId) }
             : {}),
           context: { bookingId: String(booking._id) },
           meta: { partial: booking.payment.status === 'partially_refunded' },
         });
       }
-      if (booking.professional) {
+      if (refundProfessionalId) {
         await notify({
-          userId: String(booking.professional),
+          userId: String(refundProfessionalId),
           eventKey: 'professional.booking_cancelled_refunded',
           entityType: 'booking',
           entityId: String(booking._id),

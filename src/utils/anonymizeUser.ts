@@ -989,6 +989,13 @@ export async function previewAccountAnonymization(
   };
 }
 
+/**
+ * Upper bound on how many soft-deleted accounts a single recovery-list request
+ * will scan. The queue is ordered oldest-first, so the cap trims the newest
+ * tail and `truncated` tells the operator the numbers are partial.
+ */
+const RECOVERABLE_SCAN_CAP = 5000;
+
 export async function listRecoverableAnonymizations(
   options: { page?: number; limit?: number } = {},
 ): Promise<{
@@ -997,6 +1004,7 @@ export async function listRecoverableAnonymizations(
   page: number;
   limit: number;
   totalPages: number;
+  truncated: boolean;
   counts: {
     partialCleanup: number;
     recoveryInProgress: number;
@@ -1005,25 +1013,40 @@ export async function listRecoverableAnonymizations(
 }> {
   const page = Math.max(1, Math.floor(Number(options.page) || 1));
   const limit = Math.min(Math.max(Math.floor(Number(options.limit) || 20), 1), 100);
+  // Only guards with work left are worth loading: completed anonymizations
+  // accumulate forever and never enter the operator queue.
   const guards = await AccountDataGuard.find({
-    state: { $in: ["anonymizing", "anonymized"] },
+    $or: [
+      { state: "anonymizing" },
+      {
+        state: "anonymized",
+        $or: [
+          { "externalCleanup.pendingKeys.0": { $exists: true } },
+          { "externalCleanup.pendingCalendarReleases.0": { $exists: true } },
+        ],
+      },
+    ],
   })
     .select("_id state startedAt completedAt externalCleanup")
     .lean() as AnyDoc[];
   const guardById = new Map(guards.map((guard) => [idString(guard._id), guard]));
-  const guardIds = guards
-    .filter((guard) => guard.state === "anonymizing")
-    .map((guard) => guard._id);
+  const guardIds = guards.map((guard) => guard._id);
 
+  // Soft-deleted accounts are the unbounded set. Scan in queue order with a
+  // hard cap and report truncation instead of loading every deleted user.
   const users = await User.find({
+    role: { $in: ["customer", "professional"] },
     $or: [
       ...(guardIds.length > 0 ? [{ _id: { $in: guardIds } }] : []),
       { deletedAt: { $type: "date" } },
     ],
-    role: { $in: ["customer", "professional"] },
   })
     .select("_id role deletedAt isAnonymized anonymizedAt name email phone")
+    .sort({ deletedAt: 1, _id: 1 })
+    .limit(RECOVERABLE_SCAN_CAP + 1)
     .lean() as AnyDoc[];
+  const truncated = users.length > RECOVERABLE_SCAN_CAP;
+  if (truncated) users.length = RECOVERABLE_SCAN_CAP;
 
   const accounts: RecoverableAnonymizationAccount[] = [];
   for (const user of users) {
@@ -1094,6 +1117,7 @@ export async function listRecoverableAnonymizations(
     page,
     limit,
     totalPages: Math.max(1, Math.ceil(total / limit)),
+    truncated,
     counts,
   };
 }
@@ -2059,6 +2083,21 @@ const redactBookings = async (
   return changed;
 };
 
+/**
+ * Run session-bound writes one at a time. The MongoDB driver does not support
+ * concurrent operations on a single session, and a rejected `Promise.all` can
+ * leave sibling writes running while the enclosing transaction aborts.
+ */
+const runSessionWritesSequentially = async <
+  T extends ReadonlyArray<() => Promise<unknown>>,
+>(
+  writes: T,
+): Promise<{ [K in keyof T]: T[K] extends () => Promise<infer R> ? R : never }> => {
+  const results: unknown[] = [];
+  for (const write of writes) results.push(await write());
+  return results as { [K in keyof T]: T[K] extends () => Promise<infer R> ? R : never };
+};
+
 const redactAncillaryData = async (
   data: CollectedData,
   userId: Types.ObjectId,
@@ -2098,9 +2137,9 @@ const redactAncillaryData = async (
     emailLogResult,
     actorEmailLogResult,
     relatedEmailLogResult,
-  ] = await Promise.all([
-    Notification.deleteMany({ userId }, { session }),
-    Notification.updateMany(
+  ] = await runSessionWritesSequentially([
+    () => Notification.deleteMany({ userId }, { session }),
+    () => Notification.updateMany(
       {
         userId: { $ne: userId },
         $or: [
@@ -2118,7 +2157,7 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    MarketingSubscriber.deleteMany(
+    () => MarketingSubscriber.deleteMany(
       {
         $or: [
           { userId },
@@ -2127,9 +2166,9 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    PointTransaction.deleteMany({ userId }, { session }),
-    BacklinkSubmission.deleteMany({ userId }, { session }),
-    Favorite.deleteMany({
+    () => PointTransaction.deleteMany({ userId }, { session }),
+    () => BacklinkSubmission.deleteMany({ userId }, { session }),
+    () => Favorite.deleteMany({
       $or: [
         { user: userId },
         { targetType: "professional", targetId: userId },
@@ -2138,10 +2177,10 @@ const redactAncillaryData = async (
           : []),
       ],
     }, { session }),
-    ProfileView.deleteMany({
+    () => ProfileView.deleteMany({
       $or: [{ professional: userId }, { viewer: userId }],
     }, { session }),
-    EmailLog.updateMany(
+    () => EmailLog.updateMany(
       {
         $or: [
           { relatedUser: userId },
@@ -2157,7 +2196,7 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    EmailLog.updateMany(
+    () => EmailLog.updateMany(
       { actorId: userId, relatedUser: { $ne: userId } },
       {
         $set: { subject: ANONYMIZED_TEXT },
@@ -2166,7 +2205,7 @@ const redactAncillaryData = async (
       { session },
     ),
     ...(data.bookingIds.length > 0
-      ? [EmailLog.updateMany(
+      ? [() => EmailLog.updateMany(
           {
             relatedBooking: { $in: data.bookingIds },
             relatedUser: { $ne: userId },
@@ -2180,8 +2219,8 @@ const redactAncillaryData = async (
       : []),
   ]);
 
-  await Promise.all([
-    Referral.updateMany(
+  await runSessionWritesSequentially([
+    () => Referral.updateMany(
       { referrer: userId },
       {
         $set: { referralCode: ANONYMIZED_TEXT, ipAddress: ANONYMIZED_TEXT },
@@ -2189,7 +2228,7 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    Referral.updateMany(
+    () => Referral.updateMany(
       { referredUser: userId },
       {
         $set: { ipAddress: ANONYMIZED_TEXT },
@@ -2197,12 +2236,12 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    Referral.updateMany(
+    () => Referral.updateMany(
       { referredUser: userId, status: "pending" },
       { $set: { status: "expired" } },
       { session },
     ),
-    AuditLog.updateMany(
+    () => AuditLog.updateMany(
       { actor: userId },
       {
         $set: { actorEmail: email },
@@ -2210,7 +2249,7 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    AuditLog.updateMany(
+    () => AuditLog.updateMany(
       {
         targetId: userId,
         action: { $in: ["admin.users.anonymize", "user.anonymize"] },
@@ -2219,22 +2258,22 @@ const redactAncillaryData = async (
       { session },
     ),
     ...(originalEmail
-      ? [MarketingSuppression.deleteMany({ emailNormalized: originalEmail }, { session })]
+      ? [() => MarketingSuppression.deleteMany({ emailNormalized: originalEmail }, { session })]
       : []),
   ]);
 
-  await Promise.all([
-    Booking.updateMany(
+  await runSessionWritesSequentially([
+    () => Booking.updateMany(
       { assignedTeamMembers: userId },
       { $pull: { assignedTeamMembers: userId } },
       { session },
     ),
-    Booking.updateMany(
+    () => Booking.updateMany(
       { "resourcePlan.resourceId": userId },
       { $pull: { resourcePlan: { resourceId: userId } } },
       { session },
     ),
-    Project.updateMany(
+    () => Project.updateMany(
       {
         $or: [
           { resources: userIdText },
@@ -2251,7 +2290,7 @@ const redactAncillaryData = async (
       },
       { session },
     ),
-    mongoose.connection.collection("calendarreservations").deleteMany(
+    () => mongoose.connection.collection("calendarreservations").deleteMany(
       { userId },
       { session },
     ),
@@ -2259,13 +2298,14 @@ const redactAncillaryData = async (
 
   return {
     notifications:
-      (notificationResult.deletedCount || 0)
-      + (actorNotificationResult.modifiedCount || 0),
-    marketingSubscribers: marketingResult.deletedCount || 0,
+      ((notificationResult as { deletedCount?: number }).deletedCount || 0)
+      + ((actorNotificationResult as { modifiedCount?: number }).modifiedCount || 0),
+    marketingSubscribers:
+      (marketingResult as { deletedCount?: number }).deletedCount || 0,
     emailLogs:
-      (emailLogResult.modifiedCount || 0)
-      + (actorEmailLogResult.modifiedCount || 0)
-      + (relatedEmailLogResult?.modifiedCount || 0),
+      ((emailLogResult as { modifiedCount?: number }).modifiedCount || 0)
+      + ((actorEmailLogResult as { modifiedCount?: number }).modifiedCount || 0)
+      + ((relatedEmailLogResult as { modifiedCount?: number } | undefined)?.modifiedCount || 0),
   };
 };
 
@@ -2537,7 +2577,12 @@ export async function executeAccountAnonymization(input: {
       "Admin accounts cannot be anonymized through this endpoint.",
     );
   }
-  if (existing.role === "employee") {
+  if (
+    existing.role === "employee" &&
+    !(input.initiatedBy === "self" && idString(userId) === idString(actorId))
+  ) {
+    // Self-service deletion stays available to employees; only admin-initiated
+    // anonymization is limited to customers and professionals.
     throw new AnonymizationError(
       403,
       "UNSUPPORTED_ACCOUNT_ROLE",

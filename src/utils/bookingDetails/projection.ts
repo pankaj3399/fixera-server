@@ -862,22 +862,29 @@ export const buildBookingDetails = async (params: {
     : null;
   const projectProfessionalId = referenceId(rawProject?.professionalId);
   const projectProfessionalActor = projectProfessionalId ? actors.get(projectProfessionalId) : undefined;
+  // Project bookings often carry no booking.professional at all; the owner is
+  // only reachable through booking.project. Record the flag once so every
+  // downstream mask sees it.
+  const projectOwnerAnonymized = Boolean(projectProfessionalActor?.isAnonymized);
   const booking = maskBookingForAnonymizedParties(params.booking, {
     professional:
       isAnonymizedAccount(params.booking?.professional)
-      || Boolean(projectProfessionalActor?.isAnonymized),
+      || projectOwnerAnonymized,
     ...(projectProfessionalId ? { professionalId: projectProfessionalId } : {}),
   });
   const isAdminViewer = viewerRole === 'admin';
   const maySeeAdminArea = (area: 'bookings' | 'disputes' | 'warranty' | 'cancellations' | 'payments') =>
     !isAdminViewer || params.adminAccess?.[area] === true;
+  // Admin-authored text is not participant-facing, even for the areas the
+  // participant can otherwise read.
+  const maySeeAdminNotes = isAdminViewer && params.adminAccess?.cancellations === true;
   const customer = booking.customer && typeof booking.customer === 'object' ? booking.customer : null;
   const professional = booking.professional && typeof booking.professional === 'object' ? booking.professional : null;
   const project = booking.project && typeof booking.project === 'object' ? booking.project : null;
   const customerId = objectId(booking.customer);
   const professionalId = objectId(booking.professional || project?.professionalId);
   const customerMasked = isAnonymizedAccount(customer);
-  const professionalMasked = isAnonymizedAccount(professional);
+  const professionalMasked = isAnonymizedAccount(professional) || projectOwnerAnonymized;
   const maskedCancellations = cancellations.map((request) =>
     maskCancellationRequestForAnonymizedParties(request, {
       customerId: customerId || undefined,
@@ -1578,7 +1585,7 @@ export const buildBookingDetails = async (params: {
       status: request.status,
       reasonCategory: str(request.reasonCategory),
       reason: String(request.reason || ''),
-      adminResolutionNote: str(request.adminResolutionNote),
+      adminResolutionNote: maySeeAdminNotes ? str(request.adminResolutionNote) : null,
       evidence,
       requestedBy: actorForId(request.requestedBy, actors, viewerRole, {
         roleHint: request.requestedRole === 'professional' ? 'professional' : 'customer',
@@ -1709,7 +1716,7 @@ export const buildBookingDetails = async (params: {
           role: 'professional',
           name: str(professional?.name) || str(professional?.username),
           companyName: str(professional?.businessInfo?.companyName),
-          ...(isAnonymizedAccount(professional) ? { isAnonymized: true } : {}),
+          ...(professionalMasked ? { isAnonymized: true } : {}),
         }
       : {
           role: 'customer',
@@ -1774,7 +1781,7 @@ export const buildBookingDetails = async (params: {
   const recordedCustomer = captured?.parties?.customer || null;
   const recordedProfessional = captured?.parties?.professional || null;
   const customerAnonymized = isAnonymizedAccount(customer);
-  const professionalAnonymized = isAnonymizedAccount(professional);
+  const professionalAnonymized = professionalMasked;
   const parties: PartiesDto = {
     customer: {
       id: customerId,

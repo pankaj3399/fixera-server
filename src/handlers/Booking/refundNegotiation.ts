@@ -64,9 +64,10 @@ const finalizeRefund = async (
   if (resolvedBy) request.resolvedBy = resolvedBy;
   request.refundAmount = result.amount;
   request.refundedAt = new Date();
-  await withAnonymizationWriteFence([request.requestedBy, actorId], async (session) => {
-    await request.save(session ? { session } : undefined);
-  });
+  // The provider refund has already settled. Recording it must not depend on
+  // either party's account state: a fence rejection here would leave a real
+  // refund unrecorded and unretryable (the claim filter rejects a re-run).
+  await request.save();
 
   booking.status = REFUND_FINALIZED_BOOKING_STATUS;
   booking.cancellation = {
@@ -82,9 +83,8 @@ const finalizeRefund = async (
     updatedBy: resolvedBy || request.requestedBy,
     note: `Refund issued (${result.amount}) — ${reason}`,
   });
-  await withAnonymizationWriteFence([request.requestedBy, actorId], async (session) => {
-    await booking.save(session ? { session } : undefined);
-  });
+  // Same reason as the request save above: the money has moved already.
+  await booking.save();
 
   return { ok: true, refundAmount: result.amount };
 };

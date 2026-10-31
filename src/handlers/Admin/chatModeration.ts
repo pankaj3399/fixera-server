@@ -29,6 +29,9 @@ const maskChatReportForRead = (report: any): any => {
   const next = {
     ...report,
     reportedBy: maskAnonymizedUser(report.reportedBy),
+    // The support-conversation list returns this at the top level as well as
+    // under conversationId; both shapes must be masked.
+    supportTargetUserId: maskAnonymizedUser(report.supportTargetUserId),
     messageId: report.messageId && typeof report.messageId === "object"
       ? maskChatMessageForAnonymizedSender(report.messageId)
       : report.messageId,

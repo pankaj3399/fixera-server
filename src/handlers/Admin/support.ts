@@ -80,7 +80,11 @@ export const adminListTickets = async (req: Request, res: Response) => {
     return res.status(200).json({
       success: true,
       data: {
-        items,
+        // Admin lists still must not re-expose an anonymized requester.
+        items: items.map((item: any) => ({
+          ...item,
+          userId: maskAnonymizedUser(item.userId),
+        })),
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       },
     });

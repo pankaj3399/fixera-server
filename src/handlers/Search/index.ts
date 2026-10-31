@@ -41,6 +41,7 @@ export { getPopularProjects } from "./getPopularProjects";
 export { aggregateRatings, aggregateProfessionalRatings, aggregateProjectRatings } from "./aggregateRatings";
 
 import { aggregateProfessionalRatings, aggregateProjectRatings } from "./aggregateRatings";
+import { eligibleProjectOwnerStages } from "./eligibleOwner";
 
 /**
  * Unified search endpoint for professionals and projects
@@ -403,17 +404,9 @@ async function searchProjects(
   limit: number
 ) {
   try {
-    // Build the filter object
-    const activeProfessionalIds = await User.distinct("_id", {
-      role: "professional",
-      professionalStatus: "approved",
-      deletedAt: null,
-      isAnonymized: { $ne: true },
-    });
-    const filter: any = {
-      status: "published",
-      professionalId: { $in: activeProfessionalIds },
-    };
+    // Build the filter object. Owner eligibility is applied with a $lookup
+    // after the selective project match; see eligibleOwner.ts.
+    const filter: any = { status: "published" };
 
     if (professionalLevels.length > 0 || adminTags.length > 0) {
       const MAX_MATCHED_PROS = 1000;
@@ -565,8 +558,6 @@ async function searchProjects(
     // Execute query with pagination and populate professional info
     console.log('[SEARCH] Project filter:', JSON.stringify(filter, null, 2));
 
-    const baseQuery = Project.find(filter).sort({ createdAt: -1 });
-
     let projects: any[] = [];
     let total = 0;
     let usedGeoSearch = false;
@@ -638,6 +629,7 @@ async function searchProjects(
           },
         },
       });
+      geoPipeline.push(...eligibleProjectOwnerStages());
 
       if (locationValue) {
         geoPipeline.push({
@@ -691,7 +683,10 @@ async function searchProjects(
         total = geoResult?.total?.[0]?.count ?? 0;
       }
     } else if (hasLocationFilter) {
-      projects = await baseQuery.lean();
+      projects = await Project.aggregate([
+        { $match: filter },
+        ...eligibleProjectOwnerStages(),
+      ]);
       total = projects.length;
       // Performance warning: location filtering loads all projects into memory
       if (total > 500) {
@@ -701,7 +696,12 @@ async function searchProjects(
         );
       }
     } else if (needsFullSet) {
-      projects = await Project.find(filter).sort({ createdAt: -1 }).limit(PROJECT_CAP).lean();
+      projects = await Project.aggregate([
+        { $match: filter },
+        ...eligibleProjectOwnerStages(),
+        { $sort: { createdAt: -1 } },
+        { $limit: PROJECT_CAP },
+      ]);
       total = projects.length;
       if (projects.length >= PROJECT_CAP) {
         console.warn(
@@ -710,10 +710,19 @@ async function searchProjects(
         );
       }
     } else {
-      [projects, total] = await Promise.all([
-        baseQuery.skip(skip).limit(limit).lean(),
-        Project.countDocuments(filter),
+      const [facet] = await Project.aggregate([
+        { $match: filter },
+        ...eligibleProjectOwnerStages(),
+        { $sort: { createdAt: -1 } },
+        {
+          $facet: {
+            results: [{ $skip: skip }, { $limit: limit }],
+            total: [{ $count: "count" }],
+          },
+        },
       ]);
+      projects = facet?.results ?? [];
+      total = facet?.total?.[0]?.count ?? 0;
     }
 
     console.log("[SEARCH] Found", total, "projects, returning", projects.length);

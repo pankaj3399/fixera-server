@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import http from 'node:http';
 import https from 'node:https';
 
@@ -60,6 +61,16 @@ const originalHttpsGet = https.get;
 (https as any).get = function guardedHttpsGet(...args: unknown[]) {
   assertLocal(hostFromArgs(args), 'https', String(args[0]));
   return (originalHttpsGet as any).apply(this, args);
+};
+
+// HTTP/2 opens its own connections and bypasses the http/https guards. The ESM
+// namespace is frozen, so patch the CommonJS export object instead.
+const nodeRequire = createRequire(import.meta.url);
+const http2Cjs = nodeRequire('node:http2') as any;
+const originalHttp2Connect = http2Cjs.connect;
+http2Cjs.connect = function guardedHttp2Connect(...args: unknown[]) {
+  assertLocal(hostFromArgs(args), 'https', String(args[0]));
+  return originalHttp2Connect.apply(this, args);
 };
 
 const originalFetch = globalThis.fetch;
