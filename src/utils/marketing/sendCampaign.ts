@@ -26,6 +26,19 @@ import {
 } from './brevoMarketing';
 import { signUnsubscribePayload } from './unsubscribeToken';
 
+/**
+ * Localized fallback for the Brevo FIRSTNAME token. Leads and nameless
+ * subscribers have no first name, and an empty attribute renders "Hallo ,".
+ */
+const GENERIC_GREETING_NAME: Record<string, string> = {
+  en: 'there',
+  nl: 'daar',
+  fr: 'à vous',
+  de: 'zusammen',
+};
+const greetingName = (locale: string | undefined): string =>
+  GENERIC_GREETING_NAME[locale || 'en'] || GENERIC_GREETING_NAME.en;
+
 function contentForLocale(campaign: IMarketingCampaign, locale: MarketingLocale) {
   const content = campaign.content as any;
   return content?.[locale] || null;
@@ -395,7 +408,7 @@ export async function sendMarketingCampaign(
           attributes: {
             REGION: r.region || '',
             LOCALE: r.locale,
-            FIRSTNAME: r.name || '',
+            FIRSTNAME: r.name || greetingName(r.locale),
             UNSUB_TOKEN: signUnsubscribePayload(r.email),
           },
         })),
