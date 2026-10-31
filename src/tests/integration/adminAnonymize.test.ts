@@ -3288,7 +3288,11 @@ describeDb('admin account anonymization', () => {
     expect(JSON.stringify(stored)).not.toContain('499 22 33 44');
   });
 
-  it('runs the focused suite with provider delivery intercepted and no outbound host', () => {
+  it('runs the focused suite with provider delivery intercepted and no outbound host', async () => {
+    // Self-contained: make one mocked S3 call so this assertion does not depend
+    // on tests that ran earlier in the file.
+    const { deleteFromS3 } = await import('../../utils/s3Upload');
+    await deleteFromS3('profile-images/isolation-check/file.jpg');
     expect(process.env.EMAIL_DEV_NO_SEND).toBe('true');
     expect(s3.totalCalls).toBeGreaterThan(0);
     expect(providerNetworkAttempts).toEqual([]);

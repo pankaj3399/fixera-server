@@ -746,9 +746,9 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
-        await withAnonymizationWriteFence([userIdStr], async (session) => {
-          await booking.save(session ? { session } : undefined);
-        });
+        // Payment is already captured and the status is already completed; the
+        // settlement record must not depend on either party's account state.
+        await booking.save();
 
         if (!finalizeResult.alreadyCompleted) {
           // Process referral completion for the customer
@@ -848,9 +848,8 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
-        await withAnonymizationWriteFence([userIdStr], async (session) => {
-          await booking.save(session ? { session } : undefined);
-        });
+        // Same rule as the already-captured branch: the money has moved.
+        await booking.save();
 
         // Process referral completion for the customer
         try {

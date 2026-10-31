@@ -1632,7 +1632,11 @@ const redactWarrantyClaims = async (
       }
     }
     if (professionalTarget) {
-      set["proposal.message"] = ANONYMIZED_TEXT;
+      // Only mask an existing proposal message; otherwise this invents a
+      // proposal on a claim that never had one.
+      if (claim?.proposal?.message) {
+        set["proposal.message"] = ANONYMIZED_TEXT;
+      }
       if (idString(claim?.resolution?.resolvedBy) === userIdText) {
         set["resolution.summary"] = ANONYMIZED_TEXT;
       }
@@ -1748,6 +1752,11 @@ const sanitizeBookingSnapshotForProfessional = (  snapshot: AnyDoc | undefined,
         city: null,
         country: null,
         timezone: null,
+        // Match the read mask: these are stored in the Mixed snapshot.
+        email: null,
+        phone: null,
+        username: null,
+        vatNumber: null,
       },
     };
   }
@@ -1834,6 +1843,11 @@ const buildBookingUpdate = (
       set["bookingSnapshot.parties.customer.businessName"] = null;
       set["bookingSnapshot.parties.customer.city"] = null;
       set["bookingSnapshot.parties.customer.country"] = null;
+      // Same field set the read mask hides; the snapshot is Mixed, so contact
+      // data can be stored here even though it is not in the schema.
+      for (const field of ["timezone", "email", "phone", "username", "vatNumber"]) {
+        set[`bookingSnapshot.parties.customer.${field}`] = null;
+      }
       if (booking.bookingSnapshot.location) {
         set["bookingSnapshot.location.address"] = ANONYMIZED_TEXT;
         set["bookingSnapshot.location.city"] = null;
@@ -1841,10 +1855,15 @@ const buildBookingUpdate = (
         set["bookingSnapshot.location.coordinates"] = [0, 0];
       }
     }
-    set["location.address"] = ANONYMIZED_TEXT;
-    set["location.city"] = null;
-    set["location.postalCode"] = null;
-    set["location.coordinates"] = [0, 0];
+    // Only rewrite a location the booking actually has: `$set` does not apply
+    // schema defaults, and a coordinates array without GeoJSON `type` would
+    // create an invalid subdocument (and can be rejected by a 2dsphere index).
+    if (booking.location) {
+      set["location.address"] = ANONYMIZED_TEXT;
+      set["location.city"] = null;
+      set["location.postalCode"] = null;
+      set["location.coordinates"] = [0, 0];
+    }
     if (booking.customerBlocks) {
       const blocks = booking.customerBlocks || {};
       set.customerBlocks = {
