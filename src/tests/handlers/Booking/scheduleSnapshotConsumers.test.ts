@@ -4,12 +4,25 @@ const mocks = vi.hoisted(() => ({ project: null as any, booking: null as any, va
 const customerId = new Types.ObjectId('507f1f77bcf86cd799439011');
 const professionalId = new Types.ObjectId('507f1f77bcf86cd799439012');
 const projectId = new Types.ObjectId('507f1f77bcf86cd799439013');
-vi.mock('../../../models/project', () => ({ default: { findById: () => ({ select: async () => mocks.project, then: (resolve: any) => Promise.resolve(mocks.project).then(resolve) }) } }));
+const projectQuery = () => {
+  const query: any = {
+    select: () => query,
+    lean: async () => mocks.project,
+    then: (resolve: any) => Promise.resolve(mocks.project).then(resolve),
+  };
+  return query;
+};
+vi.mock('../../../models/project', () => ({ default: { findById: () => projectQuery() } }));
 vi.mock('../../../models/user', () => ({ default: { findById: (id: any) => {
   const doc = String(id) === String(customerId)
     ? { _id: customerId, role: 'customer', location: { coordinates: [4, 50], country: 'BE' } }
     : { _id: professionalId, role: 'professional', professionalStatus: 'approved', businessInfo: { country: 'BE' } };
-  return { select: async () => doc, then: (resolve: any) => Promise.resolve(doc).then(resolve) };
+  const query: any = {
+    select: () => query,
+    lean: async () => doc,
+    then: (resolve: any) => Promise.resolve(doc).then(resolve),
+  };
+  return query;
 } } }));
 vi.mock('../../../models/booking', () => ({ default: { findById: async () => mocks.booking } }));
 vi.mock('../../../services/stripe', () => ({ stripe: {}, STRIPE_CONFIG: { supportedCurrencies: [], defaultCurrency: 'EUR', environment: 'test' } }));

@@ -27,12 +27,56 @@ vi.mock("../../models/user", () => ({
     })),
   },
 }));
-vi.mock("../../models/project", () => ({
-  default: {
-    find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
-    aggregate: vi.fn(async () => []),
-  },
-}));
+vi.mock("../../models/project", () => {
+  // Minimal pipeline execution for the stages the handler uses: the owner
+  // eligibility $lookup/$match and the final $sort. Prices/availability are
+  // filtered in memory by the handler, not in the pipeline.
+  const eligibleOwners = () => new Set(
+    mocks.professionals
+      .filter((person) =>
+        person.role === "professional"
+        && person.professionalStatus === "approved"
+        && !person.deletedAt
+        && person.isAnonymized !== true)
+      .map((person) => String(person._id)),
+  );
+  const runPipeline = (pipeline: any[]) => {
+    let rows = [...mocks.projects];
+    const eligible = eligibleOwners();
+    for (const stage of pipeline) {
+      if (stage.$match) {
+        const match = stage.$match as Record<string, any>;
+        if (typeof match.status === "string") {
+          rows = rows.filter((row) => row.status === match.status);
+        }
+        if (match["eligibleOwner.0"]) {
+          rows = rows.filter((row) => eligible.has(String(row.professionalId)));
+        }
+      }
+      if (stage.$sort) {
+        const entries = Object.entries(stage.$sort as Record<string, number>);
+        rows.sort((a: any, b: any) => {
+          for (const [field, direction] of entries) {
+            const left = a[field];
+            const right = b[field];
+            if (left === right) continue;
+            return (left > right ? 1 : -1) * direction;
+          }
+          return 0;
+        });
+      }
+      if (typeof stage.$skip === "number") rows = rows.slice(stage.$skip);
+      if (typeof stage.$limit === "number") rows = rows.slice(0, stage.$limit);
+    }
+    return rows;
+  };
+  return {
+    default: {
+      find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
+      aggregate: vi.fn(async (pipeline: any[]) => runPipeline(pipeline)),
+    },
+  };
+});
 vi.mock("../../models/professionalLevelConfig", () => ({ default: { getCurrentConfig: vi.fn() } }));
 vi.mock("../../models/loyaltyConfig", () => ({ default: { getCurrentConfig: async () => ({ tiers: [
   { name: "Bronze", minSpendingAmount: 0, discountPercentage: 0, isActive: true },
@@ -86,6 +130,10 @@ describe("project search handler", () => {
     mocks.professionals = [{
       _id: proId,
       name: "A. Pro",
+      role: "professional",
+      professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: false,
       professionalLevel: "Level 2",
       adminTags: ["Verified"],
       businessInfo: { timezone: "UTC" },
