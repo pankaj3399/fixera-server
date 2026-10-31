@@ -356,6 +356,12 @@ export async function deliverMeetingNotification(params: {
     // cleanup still succeeds without a mail attempt.
     return { emailSent: false, emailAttempted: false };
   }
+  if (owner.deletedAt) {
+    // An anonymized or deleted owner has no deliverable address (it is a
+    // tombstone placeholder). The meeting action itself must still succeed: an
+    // admin has to be able to cancel a held slot for an anonymized recipient.
+    return { emailSent: false, emailAttempted: false };
+  }
 
   const now = params.now || new Date();
   const snapshot = notificationSnapshot(ticket);
