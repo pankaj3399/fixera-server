@@ -33,6 +33,22 @@ export interface IPaymentRefund {
   refundedAt: Date;
   source: "professional" | "platform" | "mixed";
   notes?: string;
+  /** Actual actor for an API/admin-initiated refund; absent for provider webhooks. */
+  refundedBy?: Types.ObjectId;
+  /** Only populated when the authoritative record stores the split. */
+  netAmount?: number;
+  vatAmount?: number;
+  vatRate?: number;
+  /** Extra-cost refunds are not part of the base payment refundable total. */
+  kind?: "booking" | "extra_cost";
+  /** Logical completion-refund obligation this extra-cost row belongs to. */
+  obligationId?: string;
+  /**
+   * Actual provider refund status when it was recorded. Missing on legacy rows
+   * (treated as an actual/succeeded refund); failed/canceled rows do not
+   * consume refundable capacity or appear as money returned.
+   */
+  status?: "pending" | "requires_action" | "succeeded" | "failed" | "canceled";
 }
 
 export interface IPayment extends Document {
@@ -92,6 +108,7 @@ export interface IPayment extends Document {
   transferredAt?: Date;
   refundedAt?: Date;
   canceledAt?: Date;
+  failedAt?: Date;
 
   invoiceNumber?: string;
   invoiceUrl?: string;
@@ -150,6 +167,16 @@ const PaymentRefundSchema = new Schema<IPaymentRefund>(
       required: true,
     },
     notes: { type: String, maxlength: 1000 },
+    refundedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    netAmount: { type: Number, min: 0 },
+    vatAmount: { type: Number, min: 0 },
+    vatRate: { type: Number, min: 0, max: 100 },
+    kind: { type: String, enum: ["booking", "extra_cost"], default: "booking" },
+    obligationId: { type: String, maxlength: 100 },
+    status: {
+      type: String,
+      enum: ["pending", "requires_action", "succeeded", "failed", "canceled"],
+    },
   },
   { _id: false }
 );
@@ -260,6 +287,7 @@ const PaymentSchema = new Schema<IPayment>(
     transferredAt: { type: Date },
     refundedAt: { type: Date },
     canceledAt: { type: Date },
+    failedAt: { type: Date },
 
     invoiceNumber: { type: String },
     invoiceUrl: { type: String },

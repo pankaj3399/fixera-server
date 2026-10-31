@@ -35,6 +35,14 @@ import {
 } from '../../utils/bookingHelpers';
 import { sendDisputeRaisedAdminEmail } from '../../utils/emailService';
 import { notify } from '../../utils/notifications/notify';
+import { finalizeBookingCompletion } from '../../utils/notifications/runCompletionAutoAccept';
+import {
+  buildPendingExtraCostRefund,
+  clearPersistedPendingExtraCostRefund,
+  releasePendingExtraCostRefundClaim,
+  getPendingExtraCostRefund,
+  settlePendingExtraCostRefund,
+} from '../../utils/completionRefund';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
@@ -43,6 +51,7 @@ import { getTransferStatus } from '../../utils/paymentSafety';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 import { isUserFacingError } from '../../utils/appErrors';
 import { bookingForViewer } from '../../utils/invoiceVisibility';
+import { isUploadOwnedByUser } from '../../utils/bookingDetails/attachments';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -695,6 +704,70 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       });
     }
 
+    if (booking.status === COMPLETED_BOOKING_STATUS && getPendingExtraCostRefund(booking)) {
+      const recovery = await finalizeBookingCompletion({
+        bookingId: booking._id.toString(),
+        actorId: userId,
+      });
+      if (recovery.ok) {
+        const recoveredBooking = await Booking.findById(booking._id);
+        return res.json({
+          success: true,
+          data: {
+            message: 'Booking completed successfully',
+            booking: recoveredBooking
+              ? bookingForViewer(recoveredBooking, 'customer')
+              : bookingForViewer(booking, 'customer'),
+          }
+        });
+      }
+      if (recovery.reason === 'refund_in_progress' || recovery.reason === 'completion_claim_lost') {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'COMPLETION_REFUND_IN_PROGRESS',
+            message: 'The completion refund is already being settled. Retry after it finishes.',
+          },
+        });
+      }
+      if (recovery.reason === 'payout_recovery_required') {
+        return res.status(502).json({
+          success: false,
+          error: {
+            code: 'PAYOUT_RECOVERY_REQUIRED',
+            message: 'The booking is completed, but the professional payout still needs recovery before the extra-cost refund can be settled.',
+          },
+        });
+      }
+      // Recovery may have reverted the booking (payout/payment failure) and
+      // released the obligation lease. Report the actual state instead of
+      // claiming a refund is still queued for a booking that is no longer
+      // completed.
+      const afterRecovery = await Booking.findById(booking._id).select('status');
+      if (!afterRecovery || afterRecovery.status !== COMPLETED_BOOKING_STATUS) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'COMPLETION_REVERTED',
+            message: 'Completion could not be finalized because the payment or payout failed. The booking is back to awaiting completion; resolve the payout and confirm again.',
+          },
+          data: {
+            bookingId: booking._id.toString(),
+            status: afterRecovery?.status ?? null,
+            refundStatus: 'not_settled',
+          },
+        });
+      }
+      return res.status(502).json({
+        success: false,
+        error: {
+          code: 'REFUND_RECOVERY_REQUIRED',
+          message: 'The booking is completed, but the required extra-cost refund could not be confirmed yet. It remains queued for automatic retry.',
+        },
+        data: { bookingId: booking._id.toString(), status: afterRecovery.status, refundStatus: 'pending' },
+      });
+    }
+
     if (booking.status !== 'professional_completed') {
       return res.status(400).json({
         success: false,
@@ -739,6 +812,14 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     }
 
     const completionDate = new Date();
+    const pendingRefund = buildPendingExtraCostRefund({
+      booking,
+      commissionPercent: extraCostTotal < 0 ? await getPlatformCommissionPercent() : 0,
+      actorId: authUser._id,
+      notifyAutoAccept: false,
+      requestedAt: completionDate,
+    });
+
     const completedBooking = await Booking.findOneAndUpdate(
       { _id: booking._id, status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
       {
@@ -747,6 +828,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           actualStartDate: booking.actualStartDate || completionDate,
           actualEndDate: completionDate,
           ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'confirmed' } : {}),
+          ...(pendingRefund ? { 'payment.extraCostRefundPending': pendingRefund } : {}),
         },
         $push: {
           statusHistory: {
@@ -763,8 +845,17 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     );
 
     if (!completedBooking) {
-      const currentBooking = await Booking.findById(booking._id).select('status');
+      const currentBooking = await Booking.findById(booking._id).select('status payment.extraCostRefundPending');
       if (currentBooking?.status === COMPLETED_BOOKING_STATUS) {
+        if (getPendingExtraCostRefund(currentBooking)) {
+          return res.status(409).json({
+            success: false,
+            error: {
+              code: 'COMPLETION_REFUND_IN_PROGRESS',
+              message: 'The booking completion is being finalized and its refund is already in progress. Retry after it finishes.',
+            },
+          });
+        }
         return res.json({
           success: true,
           data: {
@@ -795,10 +886,16 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       }) === 'failed';
       if (transferFailed) {
         await Booking.findOneAndUpdate(
-          { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+          {
+            _id: completedBooking._id,
+            status: COMPLETED_BOOKING_STATUS,
+            ...(pendingRefund?.claimId
+              ? { 'payment.extraCostRefundPending.claimId': pendingRefund.claimId }
+              : {}),
+          },
           {
             $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
-            $unset: { actualEndDate: 1 },
+            $unset: { actualEndDate: 1, 'payment.extraCostRefundPending': 1 },
             $push: {
               statusHistory: {
                 status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
@@ -821,13 +918,20 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       }
       if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
         await Booking.findOneAndUpdate(
-          { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+          {
+            _id: completedBooking._id,
+            status: COMPLETED_BOOKING_STATUS,
+            ...(pendingRefund?.claimId
+              ? { 'payment.extraCostRefundPending.claimId': pendingRefund.claimId }
+              : {}),
+          },
           {
             $set: {
               status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
             },
             $unset: {
               actualEndDate: 1,
+              'payment.extraCostRefundPending': 1,
             },
             $push: {
               statusHistory: {
@@ -848,27 +952,60 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     }
 
     const finalizedBooking = refreshedBooking || completedBooking;
+    let settledClaimId: string | undefined = pendingRefund?.claimId;
+
+    if (pendingRefund) {
+      const settlement = await settlePendingExtraCostRefund(finalizedBooking, {
+        alreadyClaimed: true,
+        claimId: pendingRefund.claimId,
+      });
+      if (!settlement.ok) {
+        console.error(
+          `Extra-cost refund ${settlement.reason === 'refund_pending' ? 'is pending' : 'failed'} for completed booking ${finalizedBooking._id}; retry remains pending:`,
+          settlement.error instanceof Error ? settlement.error.message : settlement.error,
+        );
+        return res.status(502).json({
+          success: false,
+          error: {
+            code: 'REFUND_RECOVERY_REQUIRED',
+            message: 'The booking completion is recorded, but the required extra-cost refund could not be confirmed. The refund remains queued for automatic retry.',
+          },
+          data: { bookingId: String(finalizedBooking._id), status: finalizedBooking.status, refundStatus: 'pending' },
+        });
+      }
+      settledClaimId = settlement.claimId;
+    }
 
     markMilestonesCompleted(finalizedBooking, completionDate);
     await ensureWarrantyCoverageSnapshot(finalizedBooking);
 
-    if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
-      const commissionPercent = await getPlatformCommissionPercent();
-      const refundAmount = Math.abs(commissionedExtraCostTotal((finalizedBooking as any).extraCosts, extraCostTotal, commissionPercent));
-      const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
-      await stripe.refunds.create({
-        payment_intent: finalizedBooking.payment.stripePaymentIntentId,
-        amount: convertToStripeAmount(refundAmount, currency),
-      }, {
-        idempotencyKey: generateIdempotencyKey({
-          bookingId: finalizedBooking._id.toString(),
-          operation: 'unit-underuse-refund',
-          version: `${finalizedBooking.payment.stripePaymentIntentId}:${convertToStripeAmount(refundAmount, currency)}`,
-        })
-      });
+    try {
+      await finalizedBooking.save();
+    } catch (saveError) {
+      // The refund is already recorded with the provider but the completion
+      // write failed: release this attempt's lease so a retry can finish
+      // instead of waiting out the 15-minute claim.
+      await releasePendingExtraCostRefundClaim(
+        finalizedBooking._id,
+        settledClaimId,
+      ).catch(() => undefined);
+      throw saveError;
     }
-
-    await finalizedBooking.save();
+    if (getPendingExtraCostRefund(finalizedBooking)) {
+      const cleared = await clearPersistedPendingExtraCostRefund(
+        finalizedBooking._id,
+        settledClaimId,
+      );
+      if (!cleared) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'COMPLETION_REFUND_IN_PROGRESS',
+            message: 'Another completion attempt settled this refund. Retry to read the completed booking.',
+          },
+        });
+      }
+    }
 
     try {
       const bookingAmount = (finalizedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
@@ -1015,6 +1152,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       ? rawAttachments
           .filter((u: unknown): u is string => typeof u === 'string' && u.trim().length > 0)
           .filter((u) => isAllowedS3Url(u))
+          .filter((u) => isUploadOwnedByUser(u, userId, ['dispute-attachments', 'rfq-attachments']))
           .slice(0, 10)
       : [];
 

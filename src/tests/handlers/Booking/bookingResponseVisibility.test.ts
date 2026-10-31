@@ -323,8 +323,9 @@ describe('non-admin booking response serialization', () => {
     expect(payment.transferFailureReason).toBeUndefined();
     expect(payment.extraCostTransferFailureReason).toBeUndefined();
     expect(payment.refundNotes).toBeUndefined();
-    expect(payment.metadata.transferError).toBeUndefined();
+    expect(payment.metadata).toBeUndefined();
     expect(payment.refunds[0].notes).toBeUndefined();
+    expect(payment.refunds[0].refundId).toBeUndefined();
     expect(payment.supplierInvoiceNumber).toBeUndefined();
     expect(res.body.data.booking.milestonePayments[0].stripeClientSecret).toBeUndefined();
   });
@@ -566,7 +567,7 @@ describe('payment history and quotation response serialization', () => {
     expect(payment.status).toBe('completed');
     expect(payment.amount).toBe(100);
     expect(payment.refunds[0].reason).toBe('Customer cancellation');
-    expect(payment.metadata.transferFailed).toBe(true);
+    expect(payment.metadata).toBeUndefined();
     expect(payment.invoiceNumber).toBe('FIX-1');
     expect(payment.supplierInvoiceNumber).toBeUndefined();
     expect(payment.invoiceArtifactHistory).toEqual([
@@ -629,6 +630,11 @@ describe('payment history and quotation response serialization', () => {
       professional: { _id: PROFESSIONAL_ID, name: 'Professional', businessInfo: {} },
     });
     mocks.bookingFindById.mockReturnValue(query(booking));
+    mocks.bookingFindOneAndUpdate.mockResolvedValue({
+      ...booking,
+      status: 'quote_rejected',
+      customerRejectionReason: 'Too expensive',
+    });
 
     const res = response();
     await customerRespondToQuotation(

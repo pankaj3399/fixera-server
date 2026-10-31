@@ -1,5 +1,6 @@
 import CancellationRequest from "../models/cancellationRequest";
 import Booking from "../models/booking";
+import { SYSTEM_USER_ID } from "../constants/system";
 import { notifyAsync } from "./notifications/notify";
 
 export interface RefundSlaCheckResult {
@@ -42,6 +43,7 @@ export const runRefundNegotiationSlaCheck = async (): Promise<RefundSlaCheckResu
           disputedBooking.statusHistory.push({
             status: "dispute",
             timestamp: new Date(),
+            updatedBy: SYSTEM_USER_ID,
             note: "Refund dispute escalated (no_response)",
           } as any);
           await disputedBooking.save();

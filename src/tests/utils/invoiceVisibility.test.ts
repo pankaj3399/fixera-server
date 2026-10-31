@@ -120,10 +120,15 @@ describe("non-admin payment diagnostics", () => {
     refunds: [
       {
         amount: 20,
-        reason: "Customer cancellation: order not needed",
+        reason: "Completion extra-cost adjustment",
         source: "platform",
         refundedAt: "2026-01-01T00:00:00.000Z",
         notes: "Stripe refund failure: card_declined sk_live_secret",
+        refundId: "re_provider_internal",
+        obligationId: "obligation-internal-id",
+        refundedBy: "507f1f77bcf86cd799439011",
+        kind: "extra_cost",
+        status: "succeeded",
       },
       {
         amount: 5,
@@ -152,7 +157,7 @@ describe("non-admin payment diagnostics", () => {
     ],
   });
 
-  it("strips every historical internal diagnostic for customers and professionals", () => {
+  it("strips every historical internal diagnostic from customer and professional payment-history/export payloads", () => {
     for (const role of ["customer", "professional"] as const) {
       const source = historicalPayment();
       const result = sanitizePaymentForViewer(source, role);
@@ -162,23 +167,31 @@ describe("non-admin payment diagnostics", () => {
       expect(result.extraCostTransferFailureReason).toBeUndefined();
       expect(result.refundNotes).toBeUndefined();
       expect(result.refunds[0].notes).toBeUndefined();
-      expect(result.metadata.transferError).toBeUndefined();
+      expect(result.refunds[0].refundId).toBeUndefined();
+      expect(result.refunds[0].obligationId).toBeUndefined();
+      expect(result.refunds[0].refundedBy).toBeUndefined();
+      expect(result.metadata).toBeUndefined();
 
       expect(serialized).not.toContain("sk_live");
       expect(serialized).not.toContain("SQLSTATE");
       expect(serialized).not.toContain("Traceback");
       expect(serialized).not.toContain("card_declined");
+      expect(serialized).not.toContain("re_provider_internal");
+      expect(serialized).not.toContain("obligation-internal-id");
+      expect(serialized).not.toContain("507f1f77bcf86cd799439011");
 
       // Financial/user state survives sanitization.
       expect(result.status).toBe("completed");
       expect(result.amount).toBe(120);
       expect(result.totalWithVat).toBe(145.2);
       expect(result.refunds[0].amount).toBe(20);
+      expect(result.refunds[0].reason).toBe("Completion extra-cost adjustment");
+      expect(result.refunds[0].kind).toBe("extra_cost");
+      expect(result.refunds[0].status).toBe("succeeded");
       expect(result.refundReason).toBe("Customer accepted negotiated refund");
       expect(result.disputeReason).toBe("product_not_received");
       expect(result.disputeStatus).toBe("needs_response");
-      expect(result.metadata.transferFailed).toBe(true);
-      expect(result.metadata.environment).toBe("production");
+      expect(result.metadata).toBeUndefined();
 
       // The source document is never mutated.
       expect(source.transferFailureReason).toContain("Stripe API error");
@@ -192,6 +205,9 @@ describe("non-admin payment diagnostics", () => {
     expect(result.extraCostTransferFailureReason).toContain("Traceback");
     expect(result.refundNotes).toContain("sk_live_abc");
     expect(result.refunds[0].notes).toContain("card_declined");
+    expect(result.refunds[0].refundId).toBe("re_provider_internal");
+    expect(result.refunds[0].obligationId).toBe("obligation-internal-id");
+    expect(result.refunds[0].refundedBy).toBe("507f1f77bcf86cd799439011");
     expect(result.metadata.transferError).toContain("sk_live_meta_secret");
     expect(result.invoiceNumber).toBe("FIX-1");
     expect(result.supplierInvoiceNumber).toBe("SUP-1");

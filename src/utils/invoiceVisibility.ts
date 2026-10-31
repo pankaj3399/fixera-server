@@ -20,6 +20,7 @@ const PEPPOL_DIAGNOSTIC_FIELDS = [
 const INTERNAL_PAYMENT_DIAGNOSTIC_FIELDS = [
   "transferFailureReason",
   "extraCostTransferFailureReason",
+  "extraCostRefundPending",
   "refundNotes",
 ] as const;
 
@@ -36,6 +37,24 @@ const INTERNAL_PAYMENT_METADATA_KEYS = [
   "transferFailureReason",
   "providerError",
   "stripeError",
+] as const;
+
+/**
+ * Provider identifiers/credentials and operational metadata are admin payment
+ * data. The legacy raw booking response keeps only the customer's own client
+ * secrets (the existing payment page reads them); these fields are removed for
+ * every participant.
+ */
+const PARTICIPANT_PROVIDER_FIELDS = [
+  "stripePaymentIntentId",
+  "stripeChargeId",
+  "stripeTransferId",
+  "stripeDestinationPayment",
+  "transferIdempotencyKey",
+  "extraCostStripePaymentIntentId",
+  "extraCostStripeChargeId",
+  "extraCostTransferId",
+  "disputeId",
 ] as const;
 
 /** Invoice fields that belong to the customer (FIX) side. */
@@ -83,6 +102,21 @@ const stripFields = (payment: Record<string, any>, fields: readonly string[]) =>
   }
 };
 
+/**
+ * Remove both invoice sides (and their artifact history/claims). Used when an
+ * admin can read bookings but not the payments area: invoice documents are
+ * payment-area artifacts, while amounts/statuses remain visible.
+ */
+export const stripAllInvoiceFields = <T extends Record<string, any>>(payment: T): T => {
+  if (!payment || typeof payment !== "object") return payment;
+  const clean: Record<string, any> = { ...payment };
+  stripFields(clean, CUSTOMER_INVOICE_FIELDS);
+  stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+  if ("invoiceArtifactHistory" in clean) clean.invoiceArtifactHistory = undefined;
+  if ("manualArtifactClaims" in clean) clean.manualArtifactClaims = undefined;
+  return clean as T;
+};
+
 const filterArtifactHistory = (
   history: unknown,
   side: "customer" | "supplier"
@@ -115,7 +149,17 @@ export const stripInternalPaymentDiagnostics = <T extends Record<string, any>>(
 
   if (Array.isArray(clean.refunds)) {
     clean.refunds = clean.refunds.map((refund: any) =>
-      refund && typeof refund === "object" ? { ...refund, notes: undefined } : refund
+      refund && typeof refund === "object"
+        ? {
+            ...refund,
+            notes: undefined,
+            refundId: undefined,
+            obligationId: undefined,
+            // Internal actor id only; participant details/activity resolve the
+            // recorded actor name without exposing the admin's user id.
+            refundedBy: undefined,
+          }
+        : refund
     );
   }
 
@@ -149,6 +193,8 @@ export const sanitizePaymentForViewer = (
   if (viewerRole === "admin") return { ...payment };
 
   const clean: Record<string, any> = stripInternalPaymentDiagnostics(payment);
+  stripFields(clean, PARTICIPANT_PROVIDER_FIELDS);
+  if ("metadata" in clean) clean.metadata = undefined;
 
   if (viewerRole === "customer") {
     stripFields(clean, SUPPLIER_INVOICE_FIELDS);
@@ -179,7 +225,14 @@ export const sanitizeMilestonesForViewer = (milestones: unknown) => {
 
 export const sanitizeMilestoneForViewer = (milestone: any) => {
   if (!milestone || typeof milestone !== "object") return milestone;
-  return { ...milestone, stripeClientSecret: undefined };
+  const clean: Record<string, any> = {
+    ...milestone,
+    stripeClientSecret: undefined,
+    extraCostClientSecret: undefined,
+  };
+  stripFields(clean, PARTICIPANT_PROVIDER_FIELDS);
+  if ("metadata" in clean) clean.metadata = undefined;
+  return clean;
 };
 
 /**
@@ -206,7 +259,20 @@ export const bookingForViewer = (booking: any, viewerRole: InvoiceViewerRole) =>
   if (!booking || typeof booking !== "object" || viewerRole === "admin") return booking;
 
   const source = typeof booking.toObject === "function" ? booking.toObject() : { ...booking };
-  return filterInvoiceFieldsByRole(source, viewerRole);
+  const visible = filterInvoiceFieldsByRole(source, viewerRole);
+
+  // Internal booking notes and admin-only dispute internals are not part of
+  // any participant payload. They must be removed here as well as in details,
+  // because older clients still read the raw booking object.
+  if ("notes" in visible) visible.notes = undefined;
+  if (visible.dispute && typeof visible.dispute === "object") {
+    delete visible.dispute.resolution;
+    delete visible.dispute.resolutionAttachments;
+    delete visible.dispute.resolvedBy;
+    delete visible.dispute.adminAdjustedAmount;
+  }
+
+  return visible;
 };
 
 const referenceId = (value: any): string | undefined => {

@@ -26,7 +26,8 @@ const finalizeRefund = async (
   booking: any,
   request: any,
   amount: number | undefined,
-  reason: string
+  reason: string,
+  actorId?: string
 ): Promise<{ ok: true; refundAmount: number } | { ok: false; status: number; message: string; code?: string }> => {
   if (request.status === 'approved' || request.refundedAt) {
     return { ok: true, refundAmount: request.refundAmount || 0 };
@@ -42,7 +43,7 @@ const finalizeRefund = async (
 
   let result;
   try {
-    result = await executeRefund(String(booking._id), { amount, reason });
+    result = await executeRefund(String(booking._id), { amount, reason, actorId });
   } catch (error: any) {
     await CancellationRequest.updateOne(
       { _id: request._id, status: 'processing' },
@@ -54,8 +55,12 @@ const finalizeRefund = async (
     throw error;
   }
 
+  const resolvedBy = actorId && mongoose.Types.ObjectId.isValid(String(actorId))
+    ? new mongoose.Types.ObjectId(String(actorId))
+    : undefined;
   request.status = 'approved';
   request.resolvedAt = new Date();
+  if (resolvedBy) request.resolvedBy = resolvedBy;
   request.refundAmount = result.amount;
   request.refundedAt = new Date();
   await request.save();
@@ -71,7 +76,7 @@ const finalizeRefund = async (
   booking.statusHistory.push({
     status: REFUND_FINALIZED_BOOKING_STATUS,
     timestamp: new Date(),
-    updatedBy: request.requestedBy,
+    updatedBy: resolvedBy || request.requestedBy,
     note: `Refund issued (${result.amount}) — ${reason}`,
   });
   await booking.save();
@@ -193,6 +198,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
 
     const bookingPrice = Number(booking.payment?.amount || 0);
     request.professionalRespondedAt = new Date();
+    request.professionalRespondedBy = new mongoose.Types.ObjectId(userId);
     request.professionalNote = typeof note === 'string' ? note.trim().slice(0, 1000) : undefined;
 
     const [customerUser, professionalUser] = await Promise.all([
@@ -202,7 +208,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
 
     if (decision === 'approve') {
       request.professionalDecision = 'approved';
-      const result = await finalizeRefund(booking, request, undefined, `Professional approved full refund: ${request.reason}`);
+      const result = await finalizeRefund(booking, request, undefined, `Professional approved full refund: ${request.reason}`, getUserId(req));
       if (!result.ok) {
         return res.status(result.status).json({ success: false, msg: result.message, code: result.code });
       }
@@ -311,10 +317,11 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
     }
 
     request.customerRespondedAt = new Date();
+    request.customerRespondedBy = new mongoose.Types.ObjectId(userId);
 
     if (decision === 'accept') {
       request.customerDecision = 'accepted';
-      const result = await finalizeRefund(booking, request, request.counterOfferAmount, `Customer accepted negotiated refund: ${request.reason}`);
+      const result = await finalizeRefund(booking, request, request.counterOfferAmount, `Customer accepted negotiated refund: ${request.reason}`, getUserId(req));
       if (!result.ok) {
         return res.status(result.status).json({ success: false, msg: result.message, code: result.code });
       }

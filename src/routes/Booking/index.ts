@@ -40,6 +40,7 @@ import {
 } from '../../handlers/Booking/completion';
 import { protect } from '../../middlewares/auth';
 import { upload, rfqUpload, uploadReviewImages } from '../../utils/s3Upload';
+import { getBookingDetails, getBookingActivity } from '../../handlers/Booking/details';
 
 const router = express.Router();
 
@@ -69,6 +70,10 @@ router.get('/refund-requests', listProfessionalRefundRequests);
 
 // Get single booking by ID
 router.get('/:bookingId', getBookingById);
+
+// Read-only normalized details/activity (same authorization as the booking)
+router.get('/:bookingId/details', getBookingDetails);
+router.get('/:bookingId/activity', getBookingActivity);
 
 // Customer opts to proceed at standard VAT when RFQ review was triggered
 router.post('/:bookingId/vat-proceed-standard', proceedAtStandardVatRate);

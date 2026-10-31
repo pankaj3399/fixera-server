@@ -82,6 +82,23 @@ export interface IQuoteMaterial {
   description?: string;
 }
 
+export interface IQuoteCustomerTotals {
+  commissionPercent: number;
+  professionalNetAmount: number;
+  /** Customer net before VAT and before checkout-only discounts. */
+  customerNetAmount: number;
+  /** Alias kept for the frontend contract. */
+  amountBeforeDiscounts?: number;
+  vatAmount?: number;
+  vatRate?: number;
+  totalWithVat?: number;
+  /** Alias kept for the frontend contract. */
+  totalAmount?: number;
+  currency: string;
+  recordedAt: Date;
+  discount?: Record<string, unknown>;
+}
+
 export interface IQuoteVersion {
   version: number;
   quotationNumber: string;
@@ -100,6 +117,71 @@ export interface IQuoteVersion {
   validUntil: Date;
   createdAt: Date;
   changeNote?: string;
+  /** Recorded at the submit/edit mutation; null/absent for legacy versions. */
+  createdBy?: Types.ObjectId;
+  /** Rejection provenance bound to this exact version. */
+  rejectedAt?: Date;
+  rejectionReason?: string;
+  rejectedBy?: Types.ObjectId;
+  /** Customer-facing amounts frozen at submit/edit; absent for legacy versions. */
+  customerTotals?: IQuoteCustomerTotals;
+  /** Service address as submitted with this version; absent for legacy versions. */
+  serviceLocation?: {
+    country?: string;
+    address?: string;
+    city?: string;
+    postalCode?: string;
+    coordinates?: [number, number];
+  };
+}
+
+export interface IBookingSnapshotQuestion {
+  questionId?: string;
+  question: string;
+  type?: string;
+  options?: string[];
+  isRequired?: boolean;
+  professionalAttachments?: string[];
+}
+
+export interface IBookingSnapshot {
+  capturedAt: Date;
+  source: 'booking_creation' | 'schedule_selection' | 'direct_quotation_creation';
+  project?: {
+    id: string;
+    title: string;
+    category?: string;
+    service?: string;
+    areaOfWork?: string;
+    description?: string;
+    priceModel?: string;
+    timeMode?: string;
+    media?: { images?: string[]; video?: string };
+    termsConditions?: Array<{
+      name: string;
+      description: string;
+      type?: 'condition' | 'warning';
+      additionalCost?: number;
+      isCustom?: boolean;
+    }>;
+    customConfirmationMessage?: string;
+    minResources?: number;
+    minOverlapPercentage?: number;
+    resourcesCount?: number;
+  };
+  questions?: {
+    rfq?: IBookingSnapshotQuestion[];
+    postBooking?: IBookingSnapshotQuestion[];
+    vat?: Array<{ fieldName: string; question?: string; type?: string }>;
+  };
+  schedule?: Record<string, unknown>;
+  location?: Record<string, unknown>;
+  selectedSubprojectIndex?: number;
+  selectedSubproject?: Record<string, unknown>;
+  selectedExtraOptions?: Array<Record<string, unknown>>;
+  checkoutSnapshot?: Record<string, unknown>;
+  parties?: Record<string, unknown>;
+  serviceConfigurationId?: string;
 }
 
 export interface IQuotationPricingLine {
@@ -169,6 +251,7 @@ export interface IBooking extends Document {
     description: string; // Detailed description of the work needed
     answers: IRFQAnswer[]; // Answers to project/professional-specific questions
     preferredStartDate?: Date;
+    preferredStartTime?: string; // stored wall clock HH:mm, no implied zone
     urgency?: 'low' | 'medium' | 'high' | 'urgent';
     budget?: {
       min?: number;
@@ -186,7 +269,12 @@ export interface IBooking extends Document {
   quotationNumber?: string;
   quoteVersions: IQuoteVersion[];
   currentQuoteVersion?: number;
-  rfqResponse?: { action: 'accepted' | 'rejected'; respondedAt: Date; rejectionReason?: string };
+  /** Version the customer actually accepted; absent for legacy bookings. */
+  acceptedQuoteVersion?: number;
+  acceptedQuotationNumber?: string;
+  /** Immutable booking-time terms snapshot. Captured only at mutation boundaries. */
+  bookingSnapshot?: IBookingSnapshot;
+  rfqResponse?: { action: 'accepted' | 'rejected'; respondedAt: Date; respondedBy?: Types.ObjectId; rejectionReason?: string };
   rfqDeadline?: Date;
   rfqRemindersSent: number;
   lastReminderSentAt?: Date;
@@ -283,6 +371,8 @@ export interface IBooking extends Document {
     paidAt?: Date;
     refundedAt?: Date;
     disputeOpenedAt?: Date;
+    failedAt?: Date;
+    canceledAt?: Date;
 
     // Refund
     refundAmount?: number;
@@ -310,11 +400,31 @@ export interface IBooking extends Document {
     extraCostStatus?: 'pending' | 'succeeded' | 'failed' | 'refunded';
     extraCostPaymentSucceeded?: boolean;
     extraCostPaidAt?: Date;
+    extraCostFailedAt?: Date;
     extraCostStripeChargeId?: string;
     extraCostTransferId?: string;
     extraCostTransferStatus?: 'pending' | 'succeeded' | 'failed';
     extraCostTransferFailureReason?: string;
     extraCostTransferAttemptedAt?: Date;
+    /**
+     * Persisted obligation to refund a negative extra-cost adjustment. Written
+     * atomically with `status:"completed"` so a failed provider call remains
+     * retryable; cleared only after the refund is recorded.
+     */
+    extraCostRefundPending?: {
+      amount: number;
+      reason: string;
+      actorId?: Types.ObjectId;
+      notifyAutoAccept?: boolean;
+      requestedAt: Date;
+      processingAt?: Date;
+      /** Stable logical identity of this refund obligation. */
+      obligationId?: string;
+      /** Fencing token for the attempt that currently owns the lease. */
+      claimId?: string;
+      /** Provider refund id once an accepted/recorded refund is known. */
+      providerRefundId?: string;
+    };
 
     invoiceNumber?: string;
     invoiceUrl?: string;
@@ -379,6 +489,8 @@ export interface IBooking extends Document {
   scheduledBufferUnit?: "hours" | "days";
   scheduledStartTime?: string;
   scheduledEndTime?: string;
+  /** IANA zone recorded with the schedule; absent/null for legacy wall-clock data. */
+  scheduleTimeZone?: string;
   actualStartDate?: Date;
   actualEndDate?: Date;
   rescheduleRequest?: {
@@ -398,6 +510,7 @@ export interface IBooking extends Document {
     requestedBy: Types.ObjectId;
     requestedAt: Date;
     reason: string;
+    description?: string;
     note?: string;
     previousSchedule?: IBookingScheduleSnapshot;
     proposedSchedule: IBookingScheduleSnapshot;
@@ -510,7 +623,22 @@ export interface IBooking extends Document {
     questionId: string;
     question: string;
     answer: string;
+    fieldType?: string;
+    options?: string[];
   }[];
+  postBookingSubmittedAt?: Date;
+  postBookingSubmittedBy?: Types.ObjectId;
+  /**
+   * Later-provenance capture of the question definitions a customer actually
+   * answered when the booking snapshot had no post-booking question section.
+   * Kept separate from `bookingSnapshot` so a question created after booking
+   * is never presented as an original snapshot fact.
+   */
+  postBookingQuestionSnapshot?: {
+    capturedAt: Date;
+    source: 'post_booking_submission';
+    questions: IBookingSnapshotQuestion[];
+  };
 
   // Metadata
   bookingNumber: string; // Unique booking reference number (e.g., BK-2024-001234)
@@ -552,6 +680,63 @@ const InvoiceArtifactHistorySchema = new Schema<InvoiceArtifactHistoryEntry>(
     generatedAt: { type: Date },
     relatedInvoiceNumber: { type: String },
     replacedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
+/**
+ * Booking-time snapshot of the selected project/package/terms/questions.
+ * Nested facts are stored as a validated whitelist (see utils/bookingDetails/
+ * snapshot.ts); the schema is intentionally permissive so legacy documents and
+ * future additive facts never block a save. It is only written at mutation
+ * boundaries, never on GET, and never overwritten once captured.
+ */
+const BookingSnapshotSchema = new Schema(
+  {
+    capturedAt: { type: Date, required: true },
+    source: {
+      type: String,
+      enum: ['booking_creation', 'schedule_selection', 'direct_quotation_creation'],
+      required: true,
+    },
+    project: { type: Schema.Types.Mixed },
+    questions: { type: Schema.Types.Mixed },
+    schedule: { type: Schema.Types.Mixed },
+    location: { type: Schema.Types.Mixed },
+    selectedSubprojectIndex: { type: Number, min: 0 },
+    selectedSubproject: { type: Schema.Types.Mixed },
+    selectedExtraOptions: { type: [Schema.Types.Mixed], default: undefined },
+    checkoutSnapshot: { type: Schema.Types.Mixed },
+    parties: { type: Schema.Types.Mixed },
+    serviceConfigurationId: { type: String, maxlength: 64 },
+  },
+  { _id: false },
+);
+
+const QuoteCustomerTotalsSchema = new Schema(
+  {
+    commissionPercent: { type: Number, min: 0 },
+    professionalNetAmount: { type: Number, min: 0 },
+    customerNetAmount: { type: Number, min: 0 },
+    amountBeforeDiscounts: { type: Number, min: 0 },
+    vatAmount: { type: Number, min: 0 },
+    vatRate: { type: Number, min: 0, max: 100 },
+    totalWithVat: { type: Number, min: 0 },
+    totalAmount: { type: Number, min: 0 },
+    currency: { type: String, maxlength: 10 },
+    recordedAt: { type: Date },
+    discount: { type: Schema.Types.Mixed },
+  },
+  { _id: false },
+);
+
+const QuoteServiceLocationSchema = new Schema(
+  {
+    country: { type: String, maxlength: 50 },
+    address: { type: String, maxlength: 500 },
+    city: { type: String, maxlength: 200 },
+    postalCode: { type: String, maxlength: 50 },
+    coordinates: { type: [Number], default: undefined },
   },
   { _id: false },
 );
@@ -652,6 +837,11 @@ const BookingSchema = new Schema({
     }],
     preferredStartDate: {
       type: Date
+    },
+    preferredStartTime: {
+      type: String,
+      trim: true,
+      match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
     },
     urgency: {
       type: String,
@@ -776,12 +966,22 @@ const BookingSchema = new Schema({
     },
     validUntil: { type: Date, required: true },
     createdAt: { type: Date, default: Date.now },
-    changeNote: { type: String, maxlength: 500 }
+    changeNote: { type: String, maxlength: 500 },
+    createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    rejectedAt: { type: Date },
+    rejectionReason: { type: String, maxlength: 1000 },
+    rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    customerTotals: { type: QuoteCustomerTotalsSchema },
+    serviceLocation: { type: QuoteServiceLocationSchema },
   }],
   currentQuoteVersion: { type: Number },
+  acceptedQuoteVersion: { type: Number, min: 1 },
+  acceptedQuotationNumber: { type: String, maxlength: 100 },
+  bookingSnapshot: { type: BookingSnapshotSchema },
   rfqResponse: {
     action: { type: String, enum: ['accepted', 'rejected'] },
     respondedAt: { type: Date },
+    respondedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     rejectionReason: { type: String, maxlength: 500 }
   },
   rfqDeadline: { type: Date },
@@ -953,6 +1153,8 @@ const BookingSchema = new Schema({
     paidAt: { type: Date },
     refundedAt: { type: Date },
     disputeOpenedAt: { type: Date },
+    failedAt: { type: Date },
+    canceledAt: { type: Date },
 
     // Refund metadata
     refundAmount: { type: Number, min: 0 },
@@ -983,11 +1185,23 @@ const BookingSchema = new Schema({
     extraCostStatus: { type: String, enum: ['pending', 'succeeded', 'failed', 'refunded'] },
     extraCostPaymentSucceeded: { type: Boolean },
     extraCostPaidAt: { type: Date },
+    extraCostFailedAt: { type: Date },
     extraCostStripeChargeId: { type: String },
     extraCostTransferId: { type: String },
     extraCostTransferStatus: { type: String, enum: ['pending', 'succeeded', 'failed'] },
     extraCostTransferFailureReason: { type: String, maxlength: 1000 },
     extraCostTransferAttemptedAt: { type: Date },
+    extraCostRefundPending: {
+      amount: { type: Number, min: 0 },
+      reason: { type: String, maxlength: 500 },
+      actorId: { type: Schema.Types.ObjectId, ref: 'User' },
+      notifyAutoAccept: { type: Boolean },
+      requestedAt: { type: Date },
+      processingAt: { type: Date },
+      obligationId: { type: String, maxlength: 100 },
+      claimId: { type: String, maxlength: 100 },
+      providerRefundId: { type: String, maxlength: 255 },
+    },
 
     // Invoice
     invoiceNumber: { type: String },
@@ -1060,6 +1274,7 @@ const BookingSchema = new Schema({
     trim: true,
     match: [TIME_24H_REGEX, "Invalid time format. Expected HH:mm"],
   },
+  scheduleTimeZone: { type: String, trim: true, maxlength: 64 },
   actualStartDate: { type: Date },
   actualEndDate: { type: Date },
   rescheduleRequest: {
@@ -1112,6 +1327,7 @@ const BookingSchema = new Schema({
     requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     requestedAt: { type: Date, required: true },
     reason: { type: String, required: true, trim: true, maxlength: 500 },
+    description: { type: String, trim: true, maxlength: 2000 },
     note: { type: String, trim: true, maxlength: 2000 },
     previousSchedule: {
       scheduledStartDate: { type: Date },
@@ -1376,8 +1592,17 @@ const BookingSchema = new Schema({
   postBookingData: [{
     questionId: { type: String, required: true },
     question: { type: String, required: true, maxlength: 500 },
-    answer: { type: String, required: true, maxlength: 1000 }
+    answer: { type: String, required: true, maxlength: 1000 },
+    fieldType: { type: String, maxlength: 50 },
+    options: [{ type: String, maxlength: 200 }],
   }],
+  postBookingSubmittedAt: { type: Date },
+  postBookingSubmittedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  postBookingQuestionSnapshot: {
+    capturedAt: { type: Date },
+    source: { type: String, enum: ['post_booking_submission'] },
+    questions: { type: [Schema.Types.Mixed], default: undefined },
+  },
 
   customerBlocks: {
     dates: [{

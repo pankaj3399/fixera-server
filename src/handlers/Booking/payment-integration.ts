@@ -4,13 +4,12 @@
  */
 
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Booking, { BookingStatus } from '../../models/booking';
-import Payment from '../../models/payment';
 import Project from '../../models/project';
 import PlatformSettings from '../../models/platformSettings';
 import { createPaymentIntent, captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
-import { stripe } from '../../services/stripe';
-import { generateIdempotencyKey, computeGrossBookingAmount } from '../../utils/payment';
+import { computeGrossBookingAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import { updateUserLoyalty } from '../../utils/loyaltySystem';
@@ -37,6 +36,9 @@ import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { releaseScheduleSlots } from '../../utils/scheduleRelease';
 import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
+import {
+  resolveScheduleTimeZone,
+} from '../../utils/bookingDetails/capture';
 import {
   findBookingCalendarConflictsForSchedule,
   replaceBookingCalendar,
@@ -376,66 +378,30 @@ const refundCapturedBookingOnConflict = async (
   }
   if (
     !booking.payment?.stripePaymentIntentId ||
-    !['captured', 'completed'].includes(String(booking.payment.status))
+    !['captured', 'completed', 'partially_refunded'].includes(String(booking.payment.status))
   ) {
     return { success: false, error: { code: 'INVALID_STATUS', message: 'Captured booking payment is not refundable in current state' } };
   }
 
-  const totalWithVat = booking.payment.totalWithVat ?? booking.payment.amount ?? 0;
-  const refund = await stripe.refunds.create({
-    payment_intent: booking.payment.stripePaymentIntentId,
-  }, {
-    idempotencyKey: generateIdempotencyKey({
-      bookingId: booking._id.toString(),
-      operation: 'refund',
-      version: `conflict-${booking.payment.stripePaymentIntentId}`,
-    })
-  });
-
-  if (booking.payment.stripeTransferId) {
-    try {
-      await stripe.transfers.createReversal(
-        booking.payment.stripeTransferId,
-        { metadata: { reason, bookingId: booking._id.toString() } }
-      );
-      booking.payment.refundSource = 'professional';
-    } catch (error) {
-      console.error('Transfer reversal failed during completion conflict refund:', error);
-      booking.payment.refundSource = 'platform';
-      booking.payment.refundNotes = 'Platform-funded refund after booking completion conflict';
+  // Reuse the one booking-refund operation so the compensating refund obeys
+  // the same all-refund capacity, ledger row, transfer reversal and status
+  // rules as admin/customer refunds. The old copy refunded the full booking
+  // total even after an extra-cost refund had already reduced the charge.
+  try {
+    await executeRefund(bookingId, { reason });
+    return { success: true };
+  } catch (error: any) {
+    if (error instanceof RefundError) {
+      return { success: false, error: { code: error.code, message: error.message } };
     }
-  } else {
-    booking.payment.refundSource = 'platform';
+    return {
+      success: false,
+      error: {
+        code: 'REFUND_FAILED',
+        message: error?.message || 'Compensating refund failed',
+      },
+    };
   }
-
-  booking.payment.status = 'refunded';
-  booking.payment.refundedAt = new Date();
-  booking.payment.refundReason = reason;
-  booking.status = 'refunded';
-  await booking.save();
-
-  await Payment.findOneAndUpdate(
-    { booking: booking._id },
-    {
-      $set: {
-        status: 'refunded',
-        refundedAt: booking.payment.refundedAt,
-      },
-      $push: {
-        refunds: {
-          amount: totalWithVat,
-          reason,
-          refundId: refund.id,
-          refundedAt: booking.payment.refundedAt || new Date(),
-          source: booking.payment.refundSource || 'platform',
-          notes: booking.payment.refundNotes,
-        },
-      },
-    },
-    { upsert: false }
-  );
-
-  return { success: true };
 };
 
 const awardBookingCompletionPointsToUser = async (
@@ -520,32 +486,97 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
       });
     }
 
+    const now = new Date();
+    const customerObjectId = new mongoose.Types.ObjectId(userId);
+    const rejectionReason = typeof (req.body as any)?.rejectionReason === 'string'
+      ? String((req.body as any).rejectionReason).trim().slice(0, 1000)
+      : '';
+
+    const currentVersion = Array.isArray(booking.quoteVersions)
+      ? booking.quoteVersions.find((version) => version.version === booking.currentQuoteVersion)
+      : undefined;
+    const versionGuard = booking.currentQuoteVersion != null
+      ? { currentQuoteVersion: booking.currentQuoteVersion }
+      : {};
+    const versionArrayFilter = currentVersion
+      ? [{ 'rejectedVersion.version': Number(currentVersion.version) }]
+      : undefined;
+
     if (action === 'reject') {
-      booking.status = 'quote_rejected';
-      await booking.save();
+      const rejectFields: Record<string, any> = {
+        status: 'quote_rejected',
+        ...(rejectionReason ? { customerRejectionReason: rejectionReason } : {}),
+        ...(currentVersion
+          ? {
+              'quoteVersions.$[rejectedVersion].rejectedAt': now,
+              'quoteVersions.$[rejectedVersion].rejectionReason': rejectionReason || undefined,
+              'quoteVersions.$[rejectedVersion].rejectedBy': customerObjectId,
+            }
+          : {}),
+      };
+      const updatedBooking = await Booking.findOneAndUpdate(
+        { _id: booking._id, status: 'quoted', ...versionGuard },
+        {
+          $set: rejectFields,
+          $push: {
+            statusHistory: {
+              status: 'quote_rejected',
+              timestamp: now,
+              updatedBy: customerObjectId,
+              note: rejectionReason
+                ? `Customer rejected the quote: ${rejectionReason}`
+                : 'Customer rejected the quote',
+            },
+          },
+        },
+        { new: true, ...(versionArrayFilter ? { arrayFilters: versionArrayFilter } : {}) },
+      );
+      if (!updatedBooking) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_STATUS', message: 'Quote cannot be rejected in current status' }
+        });
+      }
 
       return res.json({
         success: true,
-        data: { message: 'Quote rejected', booking: bookingForRequest(booking, (req as any).user) }
+        data: { message: 'Quote rejected', booking: bookingForRequest(updatedBooking, (req as any).user) }
       });
     }
 
     if (action === 'accept') {
-      booking.status = 'quote_accepted';
-      booking.statusHistory = booking.statusHistory || [];
-      booking.statusHistory.push({
-        status: 'quote_accepted',
-        timestamp: new Date(),
-        updatedBy: booking.customer,
-        note: 'Customer accepted the quote',
-      });
-      await booking.save();
+      const acceptedFields: Record<string, any> = {};
+      if (currentVersion) {
+        acceptedFields.acceptedQuoteVersion = Number(currentVersion.version);
+        acceptedFields.acceptedQuotationNumber = currentVersion.quotationNumber;
+      }
+      const updatedBooking = await Booking.findOneAndUpdate(
+        { _id: booking._id, status: 'quoted', ...versionGuard },
+        {
+          $set: { status: 'quote_accepted', ...acceptedFields },
+          $push: {
+            statusHistory: {
+              status: 'quote_accepted',
+              timestamp: now,
+              updatedBy: customerObjectId,
+              note: 'Customer accepted the quote',
+            },
+          },
+        },
+        { new: true },
+      );
+      if (!updatedBooking) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_STATUS', message: 'Quote cannot be accepted in current status' }
+        });
+      }
 
       return res.json({
         success: true,
         data: {
           message: 'Quote accepted. Please complete the booking wizard to proceed to payment.',
-          booking: bookingForRequest(booking, (req as any).user),
+          booking: bookingForRequest(updatedBooking, (req as any).user),
           requiresBookingWizard: true,
         }
       });
@@ -1170,6 +1201,24 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       booking.rfqData.additionalNotes = additionalNotes;
     }
 
+    const scheduleTimeZone = resolveScheduleTimeZone(
+      (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
+    );
+    if (scheduleTimeZone) {
+      booking.scheduleTimeZone = scheduleTimeZone;
+    }
+    // A legacy booking without a booking-time snapshot must stay legacy. The
+    // live project at schedule-selection time is not evidence of what was
+    // agreed when the booking was created, so it is never captured late.
+    // Prepared before the transaction: the callback may replay, and the
+    // pre-attempt array is restored, so the entry is not appended twice.
+    booking.statusHistory = booking.statusHistory || [];
+    booking.statusHistory.push(createStatusHistoryEntry(
+      booking.status,
+      (req as any).user._id,
+      'Schedule selected',
+    ));
+
     const candidate = {
       _id: booking._id,
       professional: (booking.professional as any)?._id || booking.professional,
@@ -1556,7 +1605,10 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       let refundAmount = 0;
       if (hasPayment && booking.payment && REFUNDABLE_PAYMENT_STATUSES.has(booking.payment.status)) {
         try {
-          const result = await executeRefund(String(booking._id), { reason: refundReasonText });
+          const result = await executeRefund(String(booking._id), {
+            reason: refundReasonText,
+            actorId: (req as any).user._id,
+          });
           refundAmount = result.amount;
           if (booking.cancellation) {
             (booking.cancellation as any).refundAmount = refundAmount || undefined;
@@ -1614,6 +1666,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       requestedBy: booking.rescheduleRequest!.requestedBy,
       requestedAt: booking.rescheduleRequest!.requestedAt,
       reason: booking.rescheduleRequest!.reason,
+      description: booking.rescheduleRequest!.description,
       note: booking.rescheduleRequest!.note,
       previousSchedule: booking.rescheduleRequest!.previousSchedule,
       proposedSchedule: booking.rescheduleRequest!.proposedSchedule,

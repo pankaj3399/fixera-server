@@ -14,6 +14,7 @@ import {
   updateMilestoneWorkStatus,
 } from '../../handlers/Quotation';
 import { protect } from '../../middlewares/auth';
+import { getBookingDetails } from '../../handlers/Booking/details';
 
 const router = express.Router();
 
@@ -46,6 +47,9 @@ router.get('/active-projects', getActiveProjects);
 
 // Get all quotation versions for a booking
 router.get('/:bookingId/versions', getQuotationVersions);
+
+// Read-only full details alias for the quotation page (same DTO as bookings/:id/details)
+router.get('/:bookingId/details', getBookingDetails);
 
 // Milestone payment routes
 router.get('/:bookingId/milestones', getMilestonePaymentStatus);
