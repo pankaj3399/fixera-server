@@ -88,12 +88,23 @@ describe('OpenAI Responses API generation', () => {
     expect(init.headers.Authorization).toBe('Bearer test-key');
     const payload = JSON.parse(init.body);
     expect(payload.model).toBe('gpt-test-model');
+    expect(payload.reasoning).toBeUndefined();
     expect(payload.max_output_tokens).toBe(240);
     expect(payload.store).toBe(false);
     expect(payload.text.format).toMatchObject({ type: 'json_schema', name: 'project_title', strict: true });
     expect(payload.instructions).toContain('French');
     expect(payload.input[0].content[0].text).toContain('Shower replacement');
     expect(payload.input[0].content[0].text).not.toContain('contactEmail');
+  });
+
+  it('requests no reasoning for reasoning-model families', async () => {
+    const fetchMock = vi.fn(async () => response(titleOutput));
+    await generateProjectCopy(request('title') as any, {
+      env: { OPENAI_API_KEY: 'test-key', OPENAI_MODEL: 'o3-mini' },
+      fetchImpl: fetchMock as any,
+    });
+    const payload = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    expect(payload.reasoning).toEqual({ effort: 'none' });
   });
 
   it('uses the default model for FAQ generation and returns eight grounded pairs', async () => {

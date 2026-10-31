@@ -35,7 +35,14 @@ export type ProjectCopyRequest = {
 
 export class ProjectCopyInputError extends Error {}
 export class ProjectCopyConfigurationError extends Error {}
-export class ProjectCopyProviderError extends Error {}
+export class ProjectCopyProviderError extends Error {
+  /** Upstream HTTP status when the provider answered; never the body. */
+  readonly status?: number;
+  constructor(status?: number) {
+    super('Project copy provider request failed');
+    this.status = status;
+  }
+}
 export class ProjectCopyTimeoutError extends Error {}
 export class ProjectCopyRefusalError extends Error {}
 export class ProjectCopyOutputError extends Error {}
@@ -237,8 +244,14 @@ export const generateProjectCopy = async (request: ProjectCopyRequest, options: 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 20_000);
   const schema = request.kind === 'title' ? TITLES_SCHEMA : FAQ_SCHEMA;
+  const model = env.OPENAI_MODEL?.trim() || 'gpt-5.4-mini';
+  // Reasoning models share max_output_tokens with hidden reasoning tokens. The
+  // configured model may be one (OPENAI_MODEL is overridable), so ask for no
+  // reasoning when the family supports the option.
+  const isReasoningModel = /^(gpt-5|o[1-4])/i.test(model);
   const payload = {
-    model: env.OPENAI_MODEL?.trim() || 'gpt-5.4-mini',
+    model,
+    ...(isReasoningModel ? { reasoning: { effort: 'none' } } : {}),
     instructions: instructionsFor(request.kind, request.locale),
     input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify(request.context) }] }],
     max_output_tokens: request.kind === 'title' ? 240 : 900,
@@ -258,7 +271,7 @@ export const generateProjectCopy = async (request: ProjectCopyRequest, options: 
       if (controller.signal.aborted) throw new ProjectCopyTimeoutError();
       throw new ProjectCopyProviderError();
     }
-    if (!response.ok) throw new ProjectCopyProviderError();
+    if (!response.ok) throw new ProjectCopyProviderError(response.status);
     let result: unknown;
     try { result = await response.json(); } catch {
       if (controller.signal.aborted) throw new ProjectCopyTimeoutError();

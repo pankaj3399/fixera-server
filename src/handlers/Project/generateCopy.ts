@@ -50,6 +50,12 @@ export const generateCopy = async (req: Request, res: Response) => {
     const result = await generateProjectCopy(request);
     return res.json({ success: true, data: result });
   } catch (error) {
+    // Safe diagnostics only: name and upstream status, never the prompt/key.
+    console.error('[PROJECT_COPY] generation failed', {
+      name: error instanceof Error ? error.name : typeof error,
+      status: error instanceof ProjectCopyProviderError ? error.status : undefined,
+      aborted: error instanceof ProjectCopyTimeoutError,
+    });
     if (error instanceof ProjectCopyConfigurationError) return res.status(503).json({ success: false, code: 'AI_NOT_CONFIGURED' });
     if (error instanceof ProjectCopyTimeoutError) return res.status(504).json({ success: false, code: 'AI_TIMEOUT' });
     if (error instanceof ProjectCopyRefusalError) return res.status(422).json({ success: false, code: 'AI_REFUSED' });

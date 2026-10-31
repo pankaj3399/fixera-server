@@ -25,6 +25,13 @@ describe('unit priced project scheduling quantity', () => {
     expect(durations?.execution).toEqual({ value: 2.5, unit: 'hours' });
   });
 
+  it('defaults an omitted quantity to the package minimum', () => {
+    expect(resolveProjectScheduleQuantity(project({ minOrderQuantity: 5 }), 0, undefined)).toEqual({
+      valid: true,
+      quantity: 5,
+    });
+  });
+
   it('rejects non-finite, non-positive and below-minimum quantities', () => {
     const value = project({ minOrderQuantity: 2 });
     expect(resolveProjectScheduleQuantity(value, 0, '2.5')).toEqual({ valid: true, quantity: 2.5 });

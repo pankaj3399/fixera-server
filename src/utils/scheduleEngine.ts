@@ -332,8 +332,10 @@ export const resolveProjectScheduleQuantity = (project: any, subprojectIndex: nu
   if (rawQuantity != null && typeof rawQuantity !== 'number' && typeof rawQuantity !== 'string') {
     return { valid: false as const, error: 'Quantity must be a single number' };
   }
-  const quantity = rawQuantity == null ? 1 : Number(rawQuantity);
   const minimum = Number(subproject.pricing.minOrderQuantity) > 0 ? Number(subproject.pricing.minOrderQuantity) : 1;
+  // An omitted quantity means "the smallest orderable amount", not 1: a unit
+  // package with minOrderQuantity > 1 would otherwise be rejected as invalid.
+  const quantity = rawQuantity == null ? minimum : Number(rawQuantity);
   if (!Number.isFinite(quantity) || quantity <= 0 || quantity < minimum) {
     return { valid: false as const, error: `Quantity must be a positive number of at least ${minimum}` };
   }

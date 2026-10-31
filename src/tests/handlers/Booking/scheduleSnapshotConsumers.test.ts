@@ -68,6 +68,14 @@ describe('booking schedule snapshot consumers', () => {
     expect(schema.path('scheduleSnapshot.quantity')).toBeTruthy();
     expect(schema.path('scheduleSnapshot.executionDuration.value')).toBeTruthy();
     expect(schema.path('scheduleSnapshot.executionDuration.unit')).toBeTruthy();
+    // Constructing through the real schema must retain the frozen snapshot.
+    const doc = new actual.default({
+      customer: customerId,
+      professional: professionalId,
+      scheduleSnapshot: { quantity: 6, executionDuration: { value: 12, unit: 'days' } },
+    });
+    expect(doc.toObject().scheduleSnapshot?.quantity).toBe(6);
+    expect(doc.toObject().scheduleSnapshot?.executionDuration?.value).toBe(12);
   });
 
   it('passes the frozen snapshot through admin dispute rescheduling', async () => {

@@ -58,14 +58,6 @@ import { getCurrentTier } from "../../utils/loyaltySystem";
 const escapeSearchRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const SEARCH_BATCH_SIZE = 500;
-/**
- * Upper bound on the in-memory candidate set. Facet counts, rating filters and
- * date windows need the whole matching set, but an unbounded load makes a
- * public endpoint scale linearly with the catalogue. Above this bound the
- * response is truncated (with a warning), matching the earlier PROJECT_CAP
- * behaviour.
- */
-const SEARCH_FULL_SET_CAP = 2000;
 const aggregateProjectRatingsInBatches = async (ids: any[]) => {
   const ratings = new Map<string, { avgRating: number; totalReviews: number }>();
   for (let index = 0; index < ids.length; index += SEARCH_BATCH_SIZE) {
@@ -693,8 +685,6 @@ async function searchProjects(
       } else {
         geoPipeline.push({ $sort: { createdAt: -1, _id: 1 } });
       }
-      geoPipeline.push({ $limit: SEARCH_FULL_SET_CAP });
-
       geoPipeline.push({
         $project: {
           geoDistanceMeters: 0,
@@ -722,7 +712,6 @@ async function searchProjects(
         { $match: filter },
         ...eligibleProjectOwnerStages(),
         { $sort: { createdAt: -1, _id: 1 } },
-        { $limit: SEARCH_FULL_SET_CAP },
       ]);
       total = projects.length;
       // Performance warning: location filtering loads all projects into memory
@@ -737,7 +726,6 @@ async function searchProjects(
         { $match: filter },
         ...eligibleProjectOwnerStages(),
         { $sort: { createdAt: -1, _id: 1 } },
-        { $limit: SEARCH_FULL_SET_CAP },
       ]);
       total = projects.length;
     } else {
@@ -794,12 +782,6 @@ async function searchProjects(
     }
 
     let locationCandidates: any[] = filteredResults ?? projects;
-    if (locationCandidates.length >= SEARCH_FULL_SET_CAP) {
-      console.warn(
-        `[Search Performance] Candidate set hit the ${SEARCH_FULL_SET_CAP}-project cap; ` +
-        `facets and totals are truncated. Narrow the filters or move facets into an aggregation.`
-      );
-    }
     // Apply the cheap in-memory dimension/price filters before the schedule
     // step: a date-window search must not compute proposals for projects that
     // can never match.
@@ -819,12 +801,6 @@ async function searchProjects(
 
     if (startDateFrom || startDateTo) {
       const hasDateWindow = true;
-      if (dimensionCandidates.length > SEARCH_FULL_SET_CAP) {
-        console.warn(
-          `[Search Performance] Date-window search truncated to ${SEARCH_FULL_SET_CAP} candidates.`
-        );
-        dimensionCandidates = dimensionCandidates.slice(0, SEARCH_FULL_SET_CAP);
-      }
       const chunks: any[][] = [];
       for (let index = 0; index < dimensionCandidates.length; index += 8) chunks.push(dimensionCandidates.slice(index, index + 8));
       for (const chunk of chunks) {
@@ -850,6 +826,9 @@ async function searchProjects(
           const availableDates = packages.length ? subprojectProposals : [main];
           const matchesDate = availableDates.some((proposal: any) => {
             if (!proposal?.earliestBookableDate) return false;
+            // A fallback date means the 180-day scan found nothing bookable; it
+            // must not satisfy the requested window.
+            if (proposal?._debug?.usedFallback) return false;
             const localDay = DateTime.fromJSDate(new Date(proposal.earliestBookableDate), { zone: timezone }).toISODate();
             if (!localDay) return false;
             const lower = startDateFrom?.toISOString().slice(0, 10);
