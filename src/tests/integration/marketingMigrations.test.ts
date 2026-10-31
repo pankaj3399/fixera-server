@@ -9,7 +9,20 @@ const configured = process.env.FIXERA_TEST_MONGODB_URI;
 const local = Boolean(configured && /^mongodb:\/\/(127\.0\.0\.1|localhost)/.test(configured) && /test/i.test(configured));
 const suite = local ? describe : describe.skip;
 const database = `fixera_marketing_migration_test_${process.pid}`;
-const uri = local ? configured!.replace(/\/[^/?]+(\?|$)/, `/${database}$1`) : '';
+// Replace (or append) the database segment without relying on a regex that
+// misses `mongodb://host:27017/?x=test` and silently keeps the default `test`.
+const uri = (() => {
+  if (!local) return '';
+  const raw = configured!;
+  const queryIndex = raw.indexOf('?');
+  const base = queryIndex === -1 ? raw : raw.slice(0, queryIndex);
+  const query = queryIndex === -1 ? '' : raw.slice(queryIndex);
+  const schemeEnd = base.indexOf('://') + 3;
+  const pathStart = base.indexOf('/', schemeEnd);
+  return pathStart === -1
+    ? `${base}/${database}${query}`
+    : `${base.slice(0, pathStart)}/${database}${query}`;
+})();
 const scripts = ['migrateMarketingLeads.ts', 'backfillMarketingIdentities.ts'];
 
 async function run(script: string, args: string[] = [], target = uri) {
@@ -22,9 +35,13 @@ async function run(script: string, args: string[] = [], target = uri) {
 suite('explicit offline marketing migrations', () => {
   beforeAll(async () => {
     await mongoose.connect(uri, { autoIndex: false, autoCreate: false });
+    // Never run the drop below against whatever database the URI fell back to.
+    expect(mongoose.connection.name).toBe(database);
   });
   afterAll(async () => {
-    await mongoose.connection.dropDatabase();
+    if (mongoose.connection.name === database) {
+      await mongoose.connection.dropDatabase();
+    }
     await mongoose.disconnect();
   });
 

@@ -13,6 +13,10 @@ import { leadTupleKey } from './leadIdentity';
 
 export const MARKETING_LEAD_MAX_FILE_BYTES = 5 * 1024 * 1024;
 export const MARKETING_LEAD_MAX_ROWS = 5000;
+/** Blank/header rows allowed beyond the data-row limit before a sheet is refused. */
+const MARKETING_LEAD_SHEET_ROW_ALLOWANCE = 1000;
+const MARKETING_LEAD_MAX_SHEET_ROWS = MARKETING_LEAD_MAX_ROWS + MARKETING_LEAD_SHEET_ROW_ALLOWANCE;
+const MARKETING_LEAD_MAX_SHEET_COLUMNS = 100;
 export const MARKETING_LEAD_MAX_ERRORS = 200;
 export const MARKETING_LEAD_MAX_SERVICES = 20;
 export const MARKETING_LEAD_MAX_EMAIL_LENGTH = 320;
@@ -90,13 +94,16 @@ function firstNonEmptyMatrixRow(matrix: unknown[][]): number {
   return matrix.findIndex((row) => row.some((cell) => cellText(cell).length > 0));
 }
 
-function readFirstNonEmptySheet(buffer: Buffer): unknown[][] {
+function readFirstNonEmptySheet(buffer: Buffer): { matrix: unknown[][]; startRow: number } {
   let workbook: XLSX.WorkBook;
   try {
     workbook = XLSX.read(buffer, {
       type: 'buffer',
       raw: false,
       cellDates: false,
+      // Stop reading rows while parsing: a small file can declare a huge `!ref`
+      // range, and materializing it would exhaust memory on the request thread.
+      sheetRows: MARKETING_LEAD_MAX_SHEET_ROWS + 1,
     });
   } catch {
     throw new LeadWorkbookError('The uploaded file is not a valid .xlsx or .xls workbook');
@@ -105,13 +112,24 @@ function readFirstNonEmptySheet(buffer: Buffer): unknown[][] {
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
+    const ref = sheet['!ref'];
+    if (!ref) continue;
+    const range = XLSX.utils.decode_range(ref);
+    if (
+      range.e.r - range.s.r + 1 > MARKETING_LEAD_MAX_SHEET_ROWS ||
+      range.e.c - range.s.c + 1 > MARKETING_LEAD_MAX_SHEET_COLUMNS
+    ) {
+      throw new LeadWorkbookError(
+        `The worksheet is larger than the allowed import range (${MARKETING_LEAD_MAX_SHEET_ROWS} rows, ${MARKETING_LEAD_MAX_SHEET_COLUMNS} columns)`,
+      );
+    }
     const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
       header: 1,
       defval: '',
       raw: false,
       blankrows: true,
     });
-    if (firstNonEmptyMatrixRow(matrix) >= 0) return matrix;
+    if (firstNonEmptyMatrixRow(matrix) >= 0) return { matrix, startRow: range.s.r };
   }
   throw new LeadWorkbookError('The workbook does not contain a non-empty worksheet');
 }
@@ -148,7 +166,7 @@ export function validateLeadWorkbook(
     throw new LeadWorkbookError('The workbook must be 5 MB or smaller');
   }
 
-  const matrix = readFirstNonEmptySheet(buffer);
+  const { matrix, startRow } = readFirstNonEmptySheet(buffer);
   const headerIndex = firstNonEmptyMatrixRow(matrix);
   const rawHeaders = matrix[headerIndex] || [];
   const headerPositions = new Map<RequiredHeaderKey, number>();
@@ -173,7 +191,8 @@ export function validateLeadWorkbook(
 
   const dataRows = matrix
     .slice(headerIndex + 1)
-    .map((row, offset) => ({ row, rowNumber: headerIndex + offset + 2 }))
+    // `sheet_to_json` starts at the sheet's `!ref` start, not at Excel row 1.
+    .map((row, offset) => ({ row, rowNumber: startRow + headerIndex + offset + 2 }))
     .filter(({ row }) => row.some((cell) => cellText(cell).length > 0));
   if (dataRows.length === 0) {
     throw new LeadWorkbookError('The workbook has no data rows');

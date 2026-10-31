@@ -342,6 +342,18 @@ describeDb('invitation campaigns and lead audiences', () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    // A second campaign stays uncorrected so the send refusal is exercised.
+    const stillUnknown = await mongoose.connection.collection('marketingcampaigns').insertOne({
+      name: 'Still unknown audience',
+      type: 'invitation',
+      audienceType: 'mystery',
+      status: 'draft',
+      content: { nl: { subject: 'Still unknown', htmlContent: '<p>Still unknown audience content</p>' } },
+      audience: { countries: [], interestedServices: [], serviceKeys: [], locales: ['nl'], roles: ['professional'] },
+      deliveries: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 
     const list = await request('GET', '/api/admin/marketing-campaigns?limit=100', {
       cookie: adminCookie,
@@ -391,10 +403,13 @@ describeDb('invitation campaigns and lead audiences', () => {
     expect(corrected.body.data).toMatchObject({ audienceType: 'subscribers' });
     expect(corrected.body.data).not.toHaveProperty('audienceTypeInvalid');
 
-    const sendUnknown = await request('POST', `/api/admin/marketing-campaigns/${invitation.insertedId}/send`, {
+    const sendUnknown = await request('POST', `/api/admin/marketing-campaigns/${stillUnknown.insertedId}/send`, {
       cookie: adminCookie,
     });
-    expect(sendUnknown.status).not.toBe(500);
+    expect(sendUnknown.status).toBe(400);
+    expect(sendUnknown.body.msg).toBe(
+      'This campaign has an unsupported audience type. Edit the campaign and select Subscribers, Subscribers+Leads, or Leads before sending.',
+    );
   });
 
   it('blocks changing invitation with leads away from invitation unless subscribers is selected', async () => {

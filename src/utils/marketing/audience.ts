@@ -349,7 +349,15 @@ export async function syncSubscribersFromUsers(): Promise<{
       // instead of rejecting the promise. Never claim a sync that wrote nothing.
       const validationErrors = (result as any)?.mongoose?.validationErrors;
       if (Array.isArray(validationErrors) && validationErrors.length > 0) {
-        throw validationErrors[0];
+        // `ordered: false` already persisted the valid operations, and the
+        // persisted-row check below reports what actually landed. Throwing here
+        // would skip every later batch and repeat the same failure daily.
+        console.error(
+          '[MARKETING] Subscriber sync rejected rows:',
+          validationErrors
+            .slice(0, 5)
+            .map((error: any) => error?.message || String(error)),
+        );
       }
     }
 
@@ -402,7 +410,7 @@ export async function refreshSubscriberProfileFromUser(user: any): Promise<void>
       unsubscribedAt: null,
       consentVerifiedAt: { $type: 'date' },
     })
-      .select('_id')
+      .select('_id serviceKeys interestedServices')
       .lean();
     if (!existing) return;
     const serviceIndex = await loadServiceIndexSafe('profile update');
@@ -419,6 +427,14 @@ export async function refreshSubscriberProfileFromUser(user: any): Promise<void>
       firstName: profile.firstName,
       region: profile.region,
     };
+    // Booking-derived interests are not in the user document. A language-only
+    // refresh (or a customer update) must not erase them.
+    const hasUserServices =
+      Array.isArray(user?.serviceCategories) && user.serviceCategories.length > 0;
+    if (user?.role !== 'professional' || !hasUserServices) {
+      delete set.interestedServices;
+      delete set.serviceKeys;
+    }
     const unset: Record<string, 1> = {};
     for (const key of ['role', 'name', 'firstName', 'region'] as const) {
       if (set[key] === undefined) {

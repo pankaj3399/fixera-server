@@ -8,6 +8,7 @@ import {
   canonicalizeServiceValues,
   indexMarketingServiceOptions,
   loadMarketingServiceOptions,
+  resolveMarketingService,
 } from '../../utils/marketing/serviceCatalog';
 import { leadIdentityHash, primaryLeadServiceKey } from '../../utils/marketing/leadIdentity';
 
@@ -68,6 +69,11 @@ async function main(): Promise<void> {
 
   const services = await loadMarketingServiceOptions();
   const serviceIndex = indexMarketingServiceOptions(services);
+  // An empty or wrong-database catalog writes raw labels into serviceKeys and
+  // bakes them into the identity hash, so apply mode must refuse it.
+  if (services.length === 0 && !dryRun) {
+    throw new Error('No marketing services loaded; refusing to apply the lead migration');
+  }
 
   const leadCollection = db.collection('marketingleads');
   const importCollection = db.collection('marketingleadimports');
@@ -104,6 +110,7 @@ async function main(): Promise<void> {
   const documents = await leadCollection.find({}).toArray();
   const normalized: NormalizedLead[] = [];
   const unnormalizable: Array<{ id: string; reason: string }> = [];
+  const unresolvedServices: Array<{ id: string; value: string }> = [];
 
   for (const doc of documents) {
     const email = normalizeEmail(doc.emailNormalized || doc.email);
@@ -114,6 +121,13 @@ async function main(): Promise<void> {
       ...(Array.isArray(doc.interestedServices) ? doc.interestedServices : []),
     ].map(String);
     const canonical = canonicalizeServiceValues(rawServices, serviceIndex, country);
+    for (const value of rawServices) {
+      const raw = value.trim();
+      if (!raw) continue;
+      if (!resolveMarketingService(raw, country, serviceIndex).option) {
+        unresolvedServices.push({ id: String(doc._id), value: raw });
+      }
+    }
     const labelByKey = new Map(
       canonical.serviceKeys.map((key, index) => [key, canonical.interestedServices[index] || key]),
     );
@@ -296,6 +310,7 @@ async function main(): Promise<void> {
     exactDuplicateGroups: duplicateGroups.length,
     duplicateRowsMerged: mergedRows,
     unnormalizableRows: unnormalizable,
+    unresolvedServices,
     importsProcessed: imports.length,
     importsUpdated,
     obsoleteEmailIndexes: obsoleteEmailIndexes.map((index) => index.name),

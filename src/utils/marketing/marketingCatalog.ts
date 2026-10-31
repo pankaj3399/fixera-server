@@ -78,7 +78,12 @@ export function normalizeMarketingLanguage(value: unknown): MarketingLocale | un
   if (typeof value !== 'string') return undefined;
   const key = languageKey(value);
   if (!key) return undefined;
-  return LANGUAGE_ALIASES[key] || normalizeMarketingLocale(key);
+  // Own-property check: a bare lookup returns inherited Object.prototype
+  // members for inputs like `constructor`/`toString` and treats them as locales.
+  if (Object.prototype.hasOwnProperty.call(LANGUAGE_ALIASES, key)) {
+    return LANGUAGE_ALIASES[key];
+  }
+  return normalizeMarketingLocale(key);
 }
 
 export function defaultMarketingLocaleForCountry(country: unknown): MarketingLocale {

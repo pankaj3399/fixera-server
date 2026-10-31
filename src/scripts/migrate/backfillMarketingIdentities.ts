@@ -28,6 +28,11 @@ async function main(): Promise<void> {
 
   const services = await loadMarketingServiceOptions();
   const serviceIndex = indexMarketingServiceOptions(services);
+  // Without a catalog every service would be written as a raw label and the
+  // identity hashes would be built from it; never apply in that state.
+  if (services.length === 0 && !dryRun) {
+    throw new Error('No marketing services loaded; refusing to apply the identity backfill');
+  }
 
   const unresolved: Array<{ collection: string; id: string; value: string }> = [];
   const subscriberEmails = new Map<string, string[]>();
@@ -98,6 +103,17 @@ async function main(): Promise<void> {
       ...(Array.isArray(audience.serviceKeys) ? audience.serviceKeys : []),
     ].map(String);
     const canonical = canonicalizeServiceValues(rawServices, serviceIndex);
+    for (const value of rawServices) {
+      const raw = value.trim();
+      if (!raw) continue;
+      if (!resolveMarketingService(raw, undefined, serviceIndex).option) {
+        unresolved.push({
+          collection: 'MarketingCampaign',
+          id: String(campaign._id),
+          value: raw,
+        });
+      }
+    }
     const set: Record<string, unknown> = {
       'audience.serviceKeys': canonical.serviceKeys,
       'audience.interestedServices': canonical.interestedServices,
