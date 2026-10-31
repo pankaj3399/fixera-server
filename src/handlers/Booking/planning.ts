@@ -104,6 +104,11 @@ const resolveCandidateResources = async (booking: any) => {
 };
 
 const resolveExecutionDays = (project: any, booking: any): number => {
+  const scheduledExecution = booking?.scheduleSnapshot?.executionDuration;
+  if (scheduledExecution?.unit === 'days' && Number(scheduledExecution.value) > 0) {
+    return Math.max(1, Math.ceil(Number(scheduledExecution.value)));
+  }
+  if (scheduledExecution?.unit === 'hours' && Number(scheduledExecution.value) > 0) return 1;
   let execution = project?.executionDuration;
   const subIndex = booking?.selectedSubprojectIndex;
   if (

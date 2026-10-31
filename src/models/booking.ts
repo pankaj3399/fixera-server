@@ -180,6 +180,7 @@ export interface IBookingSnapshot {
   selectedSubproject?: Record<string, unknown>;
   selectedExtraOptions?: Array<Record<string, unknown>>;
   checkoutSnapshot?: Record<string, unknown>;
+  scheduleSnapshot?: { quantity?: number; executionDuration?: { value: number; unit: 'hours' | 'days' }; preparationDuration?: { value: number; unit: 'hours' | 'days' }; bufferDuration?: { value: number; unit: 'hours' | 'days' }; version?: number };
   parties?: Record<string, unknown>;
   serviceConfigurationId?: string;
 }
@@ -298,6 +299,17 @@ export interface IBooking extends Document {
       quantity: number;
       totalPrice: number;
     }[];
+  };
+  /**
+   * Frozen quantity/duration captured at checkout. Written and read on the
+   * top-level booking document (not inside `bookingSnapshot`).
+   */
+  scheduleSnapshot?: {
+    quantity?: number;
+    executionDuration?: { value: number; unit: 'hours' | 'days' };
+    preparationDuration?: { value: number; unit: 'hours' | 'days' };
+    bufferDuration?: { value: number; unit: 'hours' | 'days' };
+    version?: number;
   };
   vatDecision?: {
     action: 'standard_rate' | 'reduced_rate' | 'rfq';
@@ -708,6 +720,7 @@ const BookingSnapshotSchema = new Schema(
     selectedSubproject: { type: Schema.Types.Mixed },
     selectedExtraOptions: { type: [Schema.Types.Mixed], default: undefined },
     checkoutSnapshot: { type: Schema.Types.Mixed },
+    scheduleSnapshot: { type: Schema.Types.Mixed },
     parties: { type: Schema.Types.Mixed },
     serviceConfigurationId: { type: String, maxlength: 64 },
   },
@@ -1039,6 +1052,24 @@ const BookingSchema = new Schema({
       quantity: { type: Number, min: 0 },
       totalPrice: { type: Number, min: 0 },
     }],
+  },
+  // Frozen scheduling inputs. Without an explicit top-level path, Mongoose
+  // strict mode drops the value written by createBooking.
+  scheduleSnapshot: {
+    quantity: { type: Number, min: 0 },
+    executionDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] },
+    },
+    preparationDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] },
+    },
+    bufferDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] },
+    },
+    version: { type: Number },
   },
   vatDecision: {
     action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'], required: true },
@@ -1549,7 +1580,8 @@ const BookingSchema = new Schema({
     referenceIndex: { type: Number },
     estimatedUnits: { type: Number },
     actualUnits: { type: Number },
-    unitPrice: { type: Number }
+    unitPrice: { type: Number },
+    unit: { type: String, maxlength: 50 }
   }],
   extraCostStatus: {
     type: String,

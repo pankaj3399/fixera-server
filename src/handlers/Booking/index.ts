@@ -6,6 +6,8 @@ import Project from "../../models/project";
 import mongoose from "mongoose";
 import {
   buildProjectScheduleWindow,
+  resolveProjectScheduleQuantity,
+  getProjectDurations,
   validateProjectScheduleSelection,
 } from "../../utils/scheduleEngine";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
@@ -229,15 +231,14 @@ export const buildCheckoutSnapshot = (params: {
     typeof params.estimatedUsage === "number"
       ? params.estimatedUsage
       : typeof params.estimatedUsage === "string"
-        ? Number.parseFloat(params.estimatedUsage)
+        ? Number(params.estimatedUsage)
         : Number.NaN;
-  const quantity = pricingType === "unit" && Number.isFinite(usageQuantityRaw)
-    ? usageQuantityRaw
-    : 1;
+  const quantity = pricingType === "unit" ? usageQuantityRaw : 1;
 
   if (pricingType === "unit" && (!Number.isFinite(quantity) || quantity <= 0)) {
     return null;
   }
+  if (pricingType === "unit" && quantity < (Number(params.selectedSubproject?.pricing?.minOrderQuantity) > 0 ? Number(params.selectedSubproject.pricing.minOrderQuantity) : 1)) return null;
 
   const selectedOptionIndexes = normalizeSelectedExtraOptionIndexes(params.project, params.selectedExtraOptions);
   const selectedOptions = selectedOptionIndexes.flatMap((optionIndex) => {
@@ -931,6 +932,27 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         });
       }
 
+      const selectedSubprojectForCheckout =
+        typeof subprojectIndex === "number" &&
+        Array.isArray(project.subprojects) &&
+        subprojectIndex >= 0 &&
+        subprojectIndex < project.subprojects.length
+          ? project.subprojects[subprojectIndex]
+          : undefined;
+      const checkoutSnapshot = selectedSubprojectForCheckout
+        ? buildCheckoutSnapshot({
+            project,
+            selectedSubproject: selectedSubprojectForCheckout,
+            selectedExtraOptions,
+            estimatedUsage,
+          })
+        : null;
+      const scheduleQuantity = resolveProjectScheduleQuantity(project, subprojectIndex, estimatedUsage);
+      if (!scheduleQuantity.valid) return res.status(400).json({ success: false, msg: scheduleQuantity.error });
+      if (selectedSubprojectForCheckout?.pricing?.type === 'unit' && !checkoutSnapshot) {
+        return res.status(400).json({ success: false, msg: 'A valid quantity and price are required for unit bookings' });
+      }
+
       const isRfqSubproject =
         typeof subprojectIndex === "number" &&
         Array.isArray(project.subprojects) &&
@@ -945,6 +967,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startDate: normalizedStartDate,
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
+          quantity: scheduleQuantity.quantity,
         });
 
         if (!validation.valid) {
@@ -962,6 +985,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startDate: normalizedStartDate,
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
+          quantity: scheduleQuantity.quantity,
         });
 
         if (!window) {
@@ -1038,21 +1062,19 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
       }
 
-      const selectedSubprojectForCheckout =
-        typeof subprojectIndex === "number" &&
-        Array.isArray(project.subprojects) &&
-        subprojectIndex >= 0 &&
-        subprojectIndex < project.subprojects.length
-          ? project.subprojects[subprojectIndex]
-          : undefined;
-      const checkoutSnapshot = selectedSubprojectForCheckout
-        ? buildCheckoutSnapshot({
-            project,
-            selectedSubproject: selectedSubprojectForCheckout,
-            selectedExtraOptions,
-            estimatedUsage,
-          })
-        : null;
+      if (selectedSubprojectForCheckout && checkoutSnapshot) {
+        const durations = getProjectDurations(project, subprojectIndex, undefined, checkoutSnapshot.quantity);
+        if (!durations && selectedSubprojectForCheckout.pricing?.type === 'unit') {
+          return res.status(400).json({ success: false, msg: 'The selected unit package has no valid execution duration' });
+        }
+        if (durations) bookingData.scheduleSnapshot = {
+          quantity: checkoutSnapshot.quantity,
+          executionDuration: durations.execution,
+          preparationDuration: durations.preparation || { value: 0, unit: 'hours' },
+          bufferDuration: durations.buffer || { value: 0, unit: 'hours' },
+          version: 1,
+        };
+      }
       if (checkoutSnapshot) {
         bookingData.checkoutSnapshot = checkoutSnapshot;
         if (checkoutSnapshot.selectedOptions.length > 0) {

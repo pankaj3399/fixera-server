@@ -1,10 +1,12 @@
 import { Router } from "express";
 import { search, autocomplete, getPopularServices, getPopularProjects } from "../../handlers/Search";
 
+import { optionalProtect } from "../../middlewares/auth";
+
 const router = Router();
 
 // Public route for unified search (professionals and projects)
-router.route("/").get(search);
+router.route("/").get(optionalProtect, search);
 
 // Public route for autocomplete suggestions
 router.route("/autocomplete").get(autocomplete);

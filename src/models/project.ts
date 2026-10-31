@@ -33,6 +33,7 @@ export interface IRenovationPlanning {
 export interface IMedia {
   images: string[];
   video?: string;
+  videos?: string[];
 }
 
 export interface IPricing {
@@ -41,6 +42,7 @@ export interface IPricing {
   priceRange?: { min: number; max: number };
   minOrderQuantity?: number; // Unit pricing: minimum order quantity
   unit?: string; // Real service unit for unit pricing (m², hour, room...). Persisted from service config.
+  durationBasis?: "per_booking" | "per_unit";
 }
 
 export interface IIncludedItem {
@@ -335,6 +337,7 @@ const RenovationPlanningSchema = new Schema<IRenovationPlanning>({
 const MediaSchema = new Schema<IMedia>({
   images: [{ type: String }],
   video: { type: String },
+  videos: [{ type: String }],
 });
 
 // Pricing Schema
@@ -347,6 +350,7 @@ const PricingSchema = new Schema<IPricing>({
   },
   minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
   unit: { type: String, maxlength: 50 },
+  durationBasis: { type: String, enum: ["per_booking", "per_unit"] },
 });
 
 // Included Item Schema

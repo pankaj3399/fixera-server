@@ -13,6 +13,7 @@ import {
   DAY_KEYS,
   fromZonedTime,
   getProjectAvailableSlotsForDate,
+  resolveProjectScheduleQuantity,
   getResourcePolicy,
   getUnbookableStartDates,
   getWorkingRangeUtc,
@@ -1267,6 +1268,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     let executionDays: number | null = null;
 
     const projectData = project as any;
+    const scheduleQuantity = resolveProjectScheduleQuantity(projectData, subprojectIndex, req.query.quantity);
+    if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
 
     // If subprojectIndex is provided, use that specific subproject's execution duration
     if (typeof subprojectIndex === 'number' &&
@@ -1274,7 +1277,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         Array.isArray(projectData.subprojects) &&
         projectData.subprojects[subprojectIndex]?.executionDuration?.value &&
         projectData.subprojects[subprojectIndex]?.executionDuration?.unit === 'days') {
-      executionDays = Math.max(1, Math.ceil(projectData.subprojects[subprojectIndex].executionDuration.value));
+      const durationMultiplier = projectData.subprojects[subprojectIndex].pricing?.type === 'unit' && projectData.subprojects[subprojectIndex].pricing?.durationBasis === 'per_unit' ? scheduleQuantity.quantity : 1;
+      executionDays = Math.max(1, Math.ceil(projectData.subprojects[subprojectIndex].executionDuration.value * durationMultiplier));
     } else if (projectData.executionDuration?.value && projectData.executionDuration?.unit === 'days') {
       // Use project-level execution duration
       executionDays = Math.max(1, Math.ceil(projectData.executionDuration.value));
@@ -1387,6 +1391,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         to: rangeEnd,
         subprojectIndex:
           typeof subprojectIndex === "number" ? subprojectIndex : undefined,
+        quantity: scheduleQuantity.quantity,
         excludeBookingId,
       });
 
@@ -1407,7 +1412,8 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       id as string,
       subprojectIndex,
       undefined,
-      excludeBookingId
+      excludeBookingId,
+      scheduleQuantity.quantity
     );
 
     // Build response
@@ -1586,7 +1592,14 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
       ? { execution: executionParsed.value, preparation: preparationParsed.value, buffer: bufferParsed.value }
       : undefined;
 
-    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, durationOverride, excludeBookingId);
+    const projectForQuantity = await Project.findById(id).select("subprojects");
+    const scheduleQuantity = resolveProjectScheduleQuantity(projectForQuantity, subprojectIndex, req.query.quantity);
+    if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
+    const selectedPricing = projectForQuantity?.subprojects?.[subprojectIndex as number]?.pricing;
+    const safeDurationOverride = selectedPricing?.type === 'unit' && selectedPricing.durationBasis === 'per_unit'
+      ? { ...durationOverride, execution: undefined }
+      : durationOverride;
+    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, safeDurationOverride, excludeBookingId, scheduleQuantity.quantity);
 
     if (!proposals) {
       return res.status(404).json({
@@ -1655,10 +1668,14 @@ export const getProjectAvailableSlots = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: subprojectIndexResult.error });
     }
 
+    const scheduleQuantity = resolveProjectScheduleQuantity(project, subprojectIndexResult.index, req.query.quantity);
+    if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
+
     const result = await getProjectAvailableSlotsForDate({
       projectId: id as string,
       subprojectIndex: subprojectIndexResult.index,
       startDate: date,
+      quantity: scheduleQuantity.quantity,
     });
 
     if (!result) {
@@ -1721,6 +1738,9 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
     }
     const subprojectIndex = subprojectIndexResult.index;
 
+    const scheduleQuantityW = resolveProjectScheduleQuantity(project, subprojectIndex, req.query.quantity);
+    if (!scheduleQuantityW.valid) return res.status(400).json({ success: false, error: scheduleQuantityW.error });
+
     const parseDurW = (v: unknown, u: unknown): { ok: true; value?: { value: number; unit: 'hours' | 'days' } } | { ok: false; error: string } => {
       if (v == null && u == null) return { ok: true };
       const value = Number(v);
@@ -1747,13 +1767,18 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
     const durationOverrideW = executionParsedW.value || preparationParsedW.value || bufferParsedW.value
       ? { execution: executionParsedW.value, preparation: preparationParsedW.value, buffer: bufferParsedW.value }
       : undefined;
+    const selectedPricingW = project.subprojects?.[subprojectIndex as number]?.pricing;
+    const safeDurationOverrideW = selectedPricingW?.type === 'unit' && selectedPricingW.durationBasis === 'per_unit'
+      ? { ...durationOverrideW, execution: undefined }
+      : durationOverrideW;
 
     const window = await buildProjectScheduleWindow({
       projectId: id as string,
       subprojectIndex,
       startDate: startDate as string,
       startTime: typeof startTime === "string" ? startTime : undefined,
-      durationOverride: durationOverrideW,
+      durationOverride: safeDurationOverrideW,
+      quantity: scheduleQuantityW.quantity,
     });
 
     if (!window) {
