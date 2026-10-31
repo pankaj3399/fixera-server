@@ -42,8 +42,12 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       type: String,
       lowercase: true,
       trim: true,
-      default: function (this: IMarketingSubscriber) {
-        return this.email?.trim().toLowerCase();
+      // bulkWrite upserts evaluate this default with `this === null`. A
+      // non-null-safe default silently aborted every new subscriber upsert
+      // (mongoose returned it in validationErrors), which is the sync defect
+      // behind professionals never appearing. Keep the default inert.
+      default: function (this: IMarketingSubscriber | null) {
+        return this?.email?.trim().toLowerCase();
       },
     },
     name: { type: String, trim: true },

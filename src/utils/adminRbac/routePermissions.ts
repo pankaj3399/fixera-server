@@ -33,6 +33,8 @@ const ROUTE_RULES: Array<{ prefix: string; permission: AdminPermission; area: Ad
   { prefix: '/site-announcements', permission: 'cms.manage', area: 'cms' },
   { prefix: '/marketing-campaigns', permission: 'campaigns.manage', area: 'campaigns' },
   { prefix: '/marketing-subscribers', permission: 'campaigns.manage', area: 'campaigns' },
+  { prefix: '/marketing-leads', permission: 'campaigns.manage', area: 'campaigns' },
+  { prefix: '/marketing-lead-imports', permission: 'campaigns.manage', area: 'campaigns' },
   { prefix: '/discount-codes', permission: 'discounts.manage', area: 'discounts' },
   { prefix: '/loyalty', permission: 'loyalty.manage', area: 'loyalty' },
   { prefix: '/points', permission: 'loyalty.manage', area: 'loyalty' },

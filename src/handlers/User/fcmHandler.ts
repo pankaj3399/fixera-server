@@ -2,7 +2,9 @@ import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import MarketingSuppression from '../../models/marketingSuppression';
-import { syncPendingBrevoResubscribes, enablePromotionalEmail } from '../../utils/marketing/audience';
+import MarketingLead from '../../models/marketingLead';
+import { syncPendingBrevoResubscribes, enablePromotionalEmail, refreshSubscriberProfileFromUser } from '../../utils/marketing/audience';
+import { normalizeEmail } from '../../utils/marketing/normalizeEmail';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
@@ -229,11 +231,14 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
           userId,
           { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
           { new: true, ...(session ? { session } : {}) },
-        ).select('_id'));
+        ).select(
+          '_id email role name serviceCategories location companyAddress businessInfo marketingLocale preferredLocale locale language',
+        ));
       if (!updatedUser) {
         res.status(404).json({ success: false, msg: 'User not found' });
         return;
       }
+      await refreshSubscriberProfileFromUser(updatedUser);
       res.status(200).json({ success: true, msg: 'Marketing language updated' });
       return;
     }
@@ -281,7 +286,7 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     }
 
     if (type === 'promotions' && channel === 'email') {
-      const normalizedEmail = updatedUser.email.toLowerCase().trim();
+      const normalizedEmail = normalizeEmail(updatedUser.email);
       const consentUpdatedAt = new Date();
       if (enabled) {
         await MarketingSuppression.deleteOne({ emailNormalized: normalizedEmail, reason: 'unsubscribe' });
@@ -304,7 +309,34 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
             $unset: { consentVerifiedAt: 1 },
           },
         );
+        // A lead re-import must not bypass this opt-out. $setOnInsert keeps an
+        // existing provider/admin reason stronger than a local unsubscribe.
+        try {
+          await MarketingSuppression.findOneAndUpdate(
+            { emailNormalized: normalizedEmail },
+            {
+              $setOnInsert: {
+                emailNormalized: normalizedEmail,
+                reason: 'unsubscribe',
+                source: 'subscriber',
+              },
+            },
+            { upsert: true, setDefaultsOnInsert: true },
+          );
+        } catch (error: unknown) {
+          if ((error as { code?: unknown })?.code !== 11000) throw error;
+        }
+        // The mailbox opted out; keep imported lead rows opted out too. Do not
+        // clear this on a later subscriber re-opt-in.
+        await MarketingLead.updateMany(
+          { emailNormalized: normalizedEmail, status: 'active', unsubscribedAt: null },
+          { $set: { unsubscribedAt: consentUpdatedAt } },
+        );
       }
+    }
+
+    if (marketingLocale !== undefined) {
+      await refreshSubscriberProfileFromUser(updatedUser);
     }
 
     res.status(200).json({ success: true, msg: 'Preference updated' });

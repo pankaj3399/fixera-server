@@ -17,6 +17,7 @@ import { parseBlockedRanges } from '../../utils/blockedRanges';
 import { safeErrorSummary } from '../../utils/safeErrorLog';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
+import { refreshSubscriberProfileFromUser } from '../../utils/marketing/audience';
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 
@@ -458,6 +459,10 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     console.log(`✅ Profile: Successfully updated professional profile for ${user.email}`);
     console.log('💾 Saved companyBlockedDates:', user.companyBlockedDates);
     console.log('💾 Saved companyBlockedRanges:', user.companyBlockedRanges);
+
+    // Keep an already-consented subscriber row canonical after country,
+    // language or service changes. This never creates a row or consent.
+    await refreshSubscriberProfileFromUser(user);
 
     // Return updated user data (without password)
     const userResponse = {

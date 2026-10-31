@@ -29,6 +29,20 @@ const UNSUBSCRIBE_COPY: Record<MarketingLocale, { optedIn: string; unsubscribe: 
   de: { optedIn: 'Sie erhalten diese E-Mail, weil Sie Fixtract-Werbung abonniert haben.', unsubscribe: 'Abmelden', preferences: 'Benachrichtigungseinstellungen' },
 };
 
+/**
+ * Imported leads have no subscriber consent record. A campaign that includes
+ * them must not claim the recipient opted in, and must not link a preferences
+ * page that a lead without an account cannot use.
+ */
+const INVITATION_COPY: Record<MarketingLocale, string> = {
+  en: 'You received this professional invitation from Fixtract. You can stop future marketing emails at any time.',
+  nl: 'Je ontvangt deze professionele uitnodiging van Fixtract. Je kunt je op elk moment afmelden voor marketing-e-mails.',
+  fr: 'Vous recevez cette invitation professionnelle de Fixtract. Vous pouvez vous désabonner des e-mails marketing à tout moment.',
+  de: 'Sie erhalten diese professionelle Einladung von Fixtract. Sie können Marketing-E-Mails jederzeit abbestellen.',
+};
+
+export type MarketingFooterVariant = 'subscriber' | 'invitation';
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -67,11 +81,21 @@ export function resolveGreeting(firstName: unknown, locale: MarketingLocale): st
   return `${prefix} ${escapeHtml(name)},`;
 }
 
-export function renderMarketingFooter(locale: MarketingLocale, unsubscribeToken = '{{ contact.UNSUB_TOKEN }}'): string {
+export function renderMarketingFooter(
+  locale: MarketingLocale,
+  unsubscribeToken = '{{ contact.UNSUB_TOKEN }}',
+  variant: MarketingFooterVariant = 'subscriber',
+): string {
   const copy = UNSUBSCRIBE_COPY[locale] || UNSUBSCRIBE_COPY.en;
   const base = getFrontendUrl();
   const unsubUrl = `${base}/unsubscribe?token=${unsubscribeToken}`;
   const prefsUrl = `${base}/profile?tab=notifications`;
+  if (variant === 'invitation') {
+    const invitation = INVITATION_COPY[locale] || INVITATION_COPY.en;
+    return `<div data-fixera-marketing-footer="true" style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;text-align:center;">` +
+      `<p style="margin:0 0 8px 0;">${invitation}</p><p style="margin:0;">` +
+      `<a href="${escapeHtml(unsubUrl)}" style="color:#6b7280;text-decoration:underline;">${copy.unsubscribe}</a></p></div>`;
+  }
   return `<div data-fixera-marketing-footer="true" style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;text-align:center;">` +
     `<p style="margin:0 0 8px 0;">${copy.optedIn}</p><p style="margin:0;">` +
     `<a href="${escapeHtml(unsubUrl)}" style="color:#6b7280;text-decoration:underline;">${copy.unsubscribe}</a>` +
@@ -84,6 +108,7 @@ export function renderMarketingEmail(input: {
   firstName?: string;
   country?: string;
   unsubscribeToken?: string;
+  footerVariant?: MarketingFooterVariant;
 }): { subject: string; previewText?: string; htmlContent: string } {
   const locale = input.locale || defaultMarketingLocaleForCountry(input.country);
   const body = input.content.htmlContent || '';
@@ -92,7 +117,10 @@ export function renderMarketingEmail(input: {
     subject: input.content.subject,
     previewText: input.content.previewText,
     htmlContent: applyPreviewText(
-      appendMarketingFooter(`${greeting}${body}`, renderMarketingFooter(locale, input.unsubscribeToken)),
+      appendMarketingFooter(
+        `${greeting}${body}`,
+        renderMarketingFooter(locale, input.unsubscribeToken, input.footerVariant),
+      ),
       input.content.previewText,
     ),
   };
@@ -110,6 +138,7 @@ export function renderMarketingTemplateEmail(input: {
   locale: MarketingLocale;
   firstName?: string;
   unsubscribeToken?: string;
+  footerVariant?: MarketingFooterVariant;
 }): { subject: string; previewText?: string; htmlContent: string } {
   assertTemplateGreetingContract(input.templateHtml, input.locale);
   const genericName: Record<MarketingLocale, string> = { en: 'there', nl: 'daar', fr: 'là', de: 'dort' };
@@ -121,7 +150,10 @@ export function renderMarketingTemplateEmail(input: {
     subject: input.content.subject,
     previewText: input.content.previewText,
     htmlContent: applyPreviewText(
-      appendMarketingFooter(body, renderMarketingFooter(input.locale, input.unsubscribeToken)),
+      appendMarketingFooter(
+        body,
+        renderMarketingFooter(input.locale, input.unsubscribeToken, input.footerVariant),
+      ),
       input.content.previewText,
     ),
   };
