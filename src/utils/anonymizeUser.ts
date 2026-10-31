@@ -74,22 +74,34 @@ const ACTIVE_MEETING_REQUEST_STATUSES = ["pending", "scheduled"] as const;
 const ACTIVE_MEETING_STATUSES = ["scheduled", "rescheduled"] as const;
 
 /** A recorded professional payout with no settled transfer is still owed. */
+/**
+ * Payment states that can never produce a transfer: a failed payment captured
+ * nothing, and a fully refunded one is paid back. Without this guard, such a
+ * row with a leftover `professionalPayout` looked owed forever and blocked the
+ * account from being anonymized with no resolution path.
+ */
+const TERMINAL_PAYMENT_STATUSES = ["failed", "refunded"] as const;
+
 const transferObligationConditions = (path = "") => {
   const field = (name: string) => (path ? `${path}.${name}` : name);
+  const stillSettleable = { [field("status")]: { $nin: TERMINAL_PAYMENT_STATUSES } };
   return [
     { [field("transferStatus")]: "pending" },
     {
+      ...stillSettleable,
       [field("transferStatus")]: "failed",
       [field("transferredAt")]: null,
       [field("professionalPayout")]: { $gt: 0 },
     },
     {
+      ...stillSettleable,
       [field("metadata.transferFailed")]: true,
       [field("transferStatus")]: { $ne: "succeeded" },
       [field("transferredAt")]: null,
       [field("professionalPayout")]: { $gt: 0 },
     },
     {
+      ...stillSettleable,
       [field("transferStatus")]: null,
       [field("stripeTransferId")]: null,
       [field("professionalPayout")]: { $gt: 0 },
@@ -100,11 +112,13 @@ const transferObligationConditions = (path = "") => {
 const extraCostTransferObligationConditions = [
   { extraCostTransferStatus: "pending" },
   {
+    extraCostStatus: { $nin: TERMINAL_PAYMENT_STATUSES },
     extraCostTransferStatus: "failed",
     extraCostPaymentSucceeded: true,
     extraCostProfessionalPayout: { $gt: 0 },
   },
   {
+    extraCostStatus: { $nin: TERMINAL_PAYMENT_STATUSES },
     extraCostTransferStatus: null,
     extraCostTransferId: null,
     extraCostPaymentSucceeded: true,
@@ -1038,7 +1052,9 @@ export async function listRecoverableAnonymizations(
     role: { $in: ["customer", "professional"] },
     $or: [
       ...(guardIds.length > 0 ? [{ _id: { $in: guardIds } }] : []),
-      { deletedAt: { $type: "date" } },
+      // Completed anonymizations accumulate forever; without this filter they
+      // would eventually fill the capped window and hide real recovery work.
+      { deletedAt: { $type: "date" }, isAnonymized: { $ne: true } },
     ],
   })
     .select("_id role deletedAt isAnonymized anonymizedAt name email phone")

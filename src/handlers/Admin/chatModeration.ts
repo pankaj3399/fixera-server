@@ -857,6 +857,10 @@ export const adminListSupportConversations = async (req: Request, res: Response)
                     name: "$supportTargetUserId.name",
                     email: "$supportTargetUserId.email",
                     username: "$supportTargetUserId.username",
+                    // Masking needs the status fields; without them the search
+                    // branch returns an anonymized target unmasked.
+                    isAnonymized: "$supportTargetUserId.isAnonymized",
+                    deletedAt: "$supportTargetUserId.deletedAt",
                   },
                 },
               },

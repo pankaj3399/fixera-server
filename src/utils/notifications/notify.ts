@@ -13,6 +13,7 @@ import { resolveChannels, type NotificationEntityType } from './types';
 import { withAnonymizationWriteFence } from '../support/accountGuard';
 import { UserFacingError } from '../appErrors';
 import { runWithEmailActor } from '../emailActorContext';
+import { SYSTEM_USER_ID } from '../../constants/system';
 
 export interface NotifyDeliveryOptions {
   /** When false, skip in-app inbox row. Default true. */
@@ -54,7 +55,7 @@ export interface NotifyResult {
 const DELIVERY_CLAIM_LEASE_MS = 5 * 60 * 1000;
 
 const optionalObjectId = (value: string | undefined): mongoose.Types.ObjectId | undefined =>
-  value && mongoose.Types.ObjectId.isValid(value)
+  value && value !== SYSTEM_USER_ID.toString() && mongoose.Types.ObjectId.isValid(value)
     ? new mongoose.Types.ObjectId(value)
     : undefined;
 
@@ -62,7 +63,11 @@ const optionalObjectId = (value: string | undefined): mongoose.Types.ObjectId | 
 async function notificationSubjectsActive(args: NotifyArgs): Promise<boolean> {
   const ids = [...new Set(
     [args.userId, args.actorId, args.subjectUserId]
-      .filter((value): value is string => Boolean(value && mongoose.Types.ObjectId.isValid(value))),
+      // The system actor has no User row. Counting it as a subject made every
+      // system-triggered notification look like a tombstoned recipient.
+      .filter((value): value is string =>
+        Boolean(value && value !== SYSTEM_USER_ID.toString() && mongoose.Types.ObjectId.isValid(value)))
+      .map((value) => value),
   )];
   if (ids.length === 0) return true;
   const active = await User.countDocuments({
@@ -146,6 +151,9 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     console.error(
       `[notify] ${args.eventKey} embeds another user's identity but no actorId/subjectUserId was supplied`,
     );
+    if (strict) {
+      throw new Error(`[notify] ${args.eventKey} requires actorId or subjectUserId`);
+    }
     return {
       notificationId: null,
       emailSent: false,
@@ -167,6 +175,9 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     console.error(
       `[notify] ${args.eventKey} names a counterparty but no subjectUserId was supplied`,
     );
+    if (strict) {
+      throw new Error(`[notify] ${args.eventKey} requires subjectUserId for the named counterparty`);
+    }
     return {
       notificationId: null,
       emailSent: false,

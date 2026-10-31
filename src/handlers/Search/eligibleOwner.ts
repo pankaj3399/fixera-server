@@ -22,10 +22,13 @@ export const eligibleProjectOwnerStages = (): PipelineStage[] => [
   {
     $lookup: {
       from: "users",
-      localField: "professionalId",
-      foreignField: "_id",
+      // `let` + `$expr` instead of localField/foreignField: the combined form
+      // is only supported from MongoDB 5.0, and the codebase still has
+      // pre-5.0 fallbacks elsewhere.
+      let: { ownerId: "$professionalId" },
       as: "eligibleOwner",
       pipeline: [
+        { $match: { $expr: { $eq: ["$_id", "$$ownerId"] } } },
         { $match: { ...eligibleProjectOwnerMatch } },
         { $project: { _id: 1 } },
       ],
