@@ -929,7 +929,7 @@ export async function previewAccountAnonymization(
   }
   if (cleanup.pendingCalendarReleases > 0) {
     warnings.push(
-      `${cleanup.pendingCalendarReleases} calendar cleanup task${cleanup.pendingCalendarReleases === 1 ? "" : "s"} still need a retry.`,
+      `${cleanup.pendingCalendarReleases} calendar cleanup task${cleanup.pendingCalendarReleases === 1 ? "" : "s"} still ${cleanup.pendingCalendarReleases === 1 ? "needs" : "need"} a retry.`,
     );
   }
   if (recoveryRequired && !legacyAnonymized) {
@@ -2536,7 +2536,7 @@ const buildResult = (
   }
   if (cleanup.pendingCalendarReleases > 0) {
     warnings.push(
-      `${cleanup.pendingCalendarReleases} calendar cleanup task${cleanup.pendingCalendarReleases === 1 ? "" : "s"} still need a retry.`,
+      `${cleanup.pendingCalendarReleases} calendar cleanup task${cleanup.pendingCalendarReleases === 1 ? "" : "s"} still ${cleanup.pendingCalendarReleases === 1 ? "needs" : "need"} a retry.`,
     );
   }
   if (outcome === "already_anonymized" && !user?.isAnonymized && isLegacyAnonymized(user)) {
