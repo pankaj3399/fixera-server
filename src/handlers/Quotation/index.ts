@@ -22,6 +22,12 @@ import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
 import { buildQuoteCustomerTotals, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
 import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { UserFacingError } from '../../utils/appErrors';
+import {
+  isAnonymizedAccount,
+  maskAnonymizedUser,
+} from '../../utils/accountAnonymity';
 
 const getSafeCommissionPercent = async (): Promise<number> => {
   try {
@@ -252,7 +258,7 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'customerType location vatNumber isVatVerified businessName companyAddress')
+      .populate('customer', 'customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', '_id')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
@@ -497,8 +503,8 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress')
-      .populate('professional', 'name username email businessInfo')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
@@ -524,7 +530,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       const rfqDeadline = addWorkingDays(now, 4);
       // Conditional update keeps a duplicate/overlapping RFQ response from
       // appending a second history entry or overwriting a later status.
-      const updatedBooking = await Booking.findOneAndUpdate(
+      const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
         { _id: booking._id, status: 'rfq' },
         {
           $set: {
@@ -541,8 +547,8 @@ export const respondToRFQ = async (req: Request, res: Response) => {
             },
           },
         },
-        { new: true },
-      );
+        { new: true, ...(session ? { session } : {}) },
+      ));
       if (!updatedBooking) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'RFQ can only be responded to when status is rfq' } });
       }
@@ -552,6 +558,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
         if (customerId) {
           await notify({
             userId: customerId,
+            actorId: userId,
             eventKey: 'customer.rfq_accepted',
             entityType: 'booking',
             entityId: String(booking._id),
@@ -580,7 +587,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'Rejection reason is required' } });
     }
 
-    const rejectedBooking = await Booking.findOneAndUpdate(
+    const rejectedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
       { _id: booking._id, status: 'rfq' },
       {
         $set: {
@@ -601,8 +608,8 @@ export const respondToRFQ = async (req: Request, res: Response) => {
           },
         },
       },
-      { new: true },
-    );
+      { new: true, ...(session ? { session } : {}) },
+    ));
     if (!rejectedBooking) {
       return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'RFQ can only be responded to when status is rfq' } });
     }
@@ -612,6 +619,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       if (customerId) {
         await notify({
           userId: customerId,
+          actorId: userId,
           eventKey: 'customer.rfq_rejected',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -631,6 +639,9 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       data: { message: 'RFQ rejected', booking: bookingForRequest(rejectedBooking, (req as any).user) }
     });
   } catch (error: any) {
+    if (error instanceof UserFacingError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     console.error('Error responding to RFQ:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
@@ -707,8 +718,8 @@ export const submitQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress')
-      .populate('professional', 'name username email businessInfo')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
@@ -796,7 +807,9 @@ export const submitQuotation = async (req: Request, res: Response) => {
     }
     booking.quoteVersions[0].quotationNumber = `${booking.quotationNumber}-v${versionNumber}`;
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     const customer = booking.customer as any;
     const professional = booking.professional as any;
@@ -809,6 +822,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       if (customerId) {
         await notify({
           userId: customerId,
+          actorId: userId,
           eventKey: 'customer.quotation_received',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -836,6 +850,9 @@ export const submitQuotation = async (req: Request, res: Response) => {
       }
     });
   } catch (error: any) {
+    if (error instanceof UserFacingError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     console.error('Error submitting quotation:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
@@ -902,8 +919,8 @@ export const editQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress')
-      .populate('professional', 'name username email businessInfo')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
@@ -997,33 +1014,39 @@ export const editQuotation = async (req: Request, res: Response) => {
       note: `Quotation updated (v${newVersionNumber}): ${changeNote}`
     });
 
-    const savedBooking = await Booking.findOneAndUpdate(
-      {
-        _id: booking._id,
-        status: baseStatus,
-        ...(baseVersion != null
-          ? { currentQuoteVersion: baseVersion }
-          : { $or: [{ currentQuoteVersion: null }, { currentQuoteVersion: { $exists: false } }] }),
-      },
-      {
-        $set: {
-          quotationNumber: booking.quotationNumber,
-          quoteVersions: booking.quoteVersions,
-          currentQuoteVersion: newVersionNumber,
-          status: 'quoted',
+    let savedBooking: any = null;
+    // Anonymization write fence + optimistic guard: the update only applies when
+    // the booking is still in the state this edit was based on, and it stays
+    // inside the fence so a concurrent anonymization cannot interleave.
+    await withAnonymizationWriteFence([userId], async (session) => {
+      savedBooking = await Booking.findOneAndUpdate(
+        {
+          _id: booking._id,
+          status: baseStatus,
+          ...(baseVersion != null
+            ? { currentQuoteVersion: baseVersion }
+            : { $or: [{ currentQuoteVersion: null }, { currentQuoteVersion: { $exists: false } }] }),
         },
-        $unset: { customerRejectionReason: 1 },
-        $push: {
-          statusHistory: {
+        {
+          $set: {
+            quotationNumber: booking.quotationNumber,
+            quoteVersions: booking.quoteVersions,
+            currentQuoteVersion: newVersionNumber,
             status: 'quoted',
-            timestamp: now,
-            updatedBy: new mongoose.Types.ObjectId(userId),
-            note: `Quotation updated (v${newVersionNumber}): ${changeNote}`,
+          },
+          $unset: { customerRejectionReason: 1 },
+          $push: {
+            statusHistory: {
+              status: 'quoted',
+              timestamp: now,
+              updatedBy: new mongoose.Types.ObjectId(userId),
+              note: `Quotation updated (v${newVersionNumber}): ${changeNote}`,
+            },
           },
         },
-      },
-      { new: true },
-    );
+        { new: true, ...(session ? { session } : {}) },
+      );
+    });
     if (!savedBooking) {
       return res.status(409).json({
         success: false,
@@ -1042,6 +1065,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       if (customerId) {
         await notify({
           userId: customerId,
+          actorId: userId,
           eventKey: 'customer.quotation_updated',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -1068,6 +1092,9 @@ export const editQuotation = async (req: Request, res: Response) => {
       }
     });
   } catch (error: any) {
+    if (error instanceof UserFacingError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     console.error('Error editing quotation:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
@@ -1093,8 +1120,8 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email')
-      .populate('professional', 'name username email businessInfo');
+      .populate('customer', 'name email isAnonymized deletedAt')
+      .populate('professional', 'name username email businessInfo isAnonymized deletedAt');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -1134,7 +1161,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
             }
           : {}),
       };
-      const rejectedBooking = await Booking.findOneAndUpdate(
+      const rejectedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
         { _id: booking._id, status: 'quoted', ...versionGuard },
         {
           $set: rejectFields,
@@ -1152,8 +1179,9 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
           ...(currentVersion
             ? { arrayFilters: [{ 'rejectedVersion.version': Number(currentVersion.version) }] }
             : {}),
+          ...(session ? { session } : {}),
         },
-      );
+      ));
       if (!rejectedBooking) {
         return res.status(400).json({
           success: false,
@@ -1166,6 +1194,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         if (professionalId) {
           await notify({
             userId: professionalId,
+            actorId: userId,
             eventKey: 'professional.quote_rejected',
             entityType: 'booking',
             entityId: String(booking._id),
@@ -1220,7 +1249,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
     const versionGuard = booking.currentQuoteVersion != null
       ? { currentQuoteVersion: booking.currentQuoteVersion }
       : {};
-    const acceptedBooking = await Booking.findOneAndUpdate(
+    const acceptedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
       { _id: booking._id, status: 'quoted', ...versionGuard },
       {
         $set: acceptSet,
@@ -1233,8 +1262,8 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
           },
         },
       },
-      { new: true },
-    );
+      { new: true, ...(session ? { session } : {}) },
+    ));
     if (!acceptedBooking) {
       return res.status(400).json({
         success: false,
@@ -1247,6 +1276,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       if (professionalId) {
         await notify({
           userId: professionalId,
+          actorId: userId,
           eventKey: 'professional.quote_accepted',
           entityType: 'booking',
           entityId: String(booking._id),
@@ -1270,6 +1300,9 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       }
     });
   } catch (error: any) {
+    if (error instanceof UserFacingError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     console.error('Error responding to quotation:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
@@ -1303,6 +1336,16 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
 
     if (!customer || customer.role !== 'customer') {
       return res.status(400).json({ success: false, error: { code: 'INVALID_CUSTOMER', message: 'Customer not found' } });
+    }
+
+    if (isAnonymizedAccount(customer) || isAnonymizedAccount(professional)) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'ACCOUNT_UNAVAILABLE',
+          message: 'One of the accounts is no longer available for a new quotation.',
+        },
+      });
     }
 
     if (!customer.location || !customer.location.coordinates || customer.location.coordinates.length !== 2) {
@@ -1416,7 +1459,13 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       vatQuestions: vatQuestionsForSnapshot,
     });
 
-    const booking = await Booking.create(bookingData);
+    const booking = await withAnonymizationWriteFence(
+      [userId, customerId],
+      async (session) => {
+        const [created] = await Booking.create([bookingData], { session });
+        return created;
+      },
+    );
 
     return res.status(201).json({
       success: true,
@@ -1427,6 +1476,9 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       }
     });
   } catch (error: any) {
+    if (error instanceof UserFacingError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     console.error('Error creating direct quotation:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
@@ -1447,12 +1499,13 @@ export const getActiveCustomers = async (req: Request, res: Response) => {
       professionalId: new mongoose.Types.ObjectId(userId),
       status: 'active',
     })
-      .populate('customerId', 'name email phone customerType location')
+      .populate('customerId', 'name email phone customerType location isAnonymized deletedAt')
       .sort({ lastMessageAt: -1 });
 
     const customers = conversations
       .map((conv: any) => conv.customerId)
       .filter(Boolean)
+      .map((customer: any) => maskAnonymizedUser(customer))
       // Deduplicate by _id
       .filter((customer: any, index: number, arr: any[]) =>
         arr.findIndex((c: any) => c._id.toString() === customer._id.toString()) === index
@@ -1633,7 +1686,9 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
       }
     }
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     const customerId = booking.customer?.toString?.();
     if (customerId && customerEvent) {
@@ -1643,6 +1698,10 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
           .lean();
         await notify({
           userId: customerId,
+          actorId: userId,
+          ...(customerEvent === 'customer.booking_started'
+            ? { subjectUserId: userId }
+            : {}),
           eventKey: customerEvent,
           entityType: 'booking',
           entityId: String(booking._id),
@@ -1770,7 +1829,9 @@ export const createMilestonePaymentIntent = async (req: Request, res: Response) 
     // Store payment intent on milestone only after successful payment
     booking.milestonePayments[milestoneIndex].stripePaymentIntentId = paymentResult.paymentIntentId;
     booking.milestonePayments[milestoneIndex].stripeClientSecret = paymentResult.clientSecret;
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     return res.json({
       success: true,

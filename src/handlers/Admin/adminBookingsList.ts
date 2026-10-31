@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import Booking from "../../models/booking";
 import User from "../../models/user";
+import { maskBookingForAnonymizedParties } from "../../utils/accountAnonymity";
 
 const BOOKING_STATUSES = [
   "rfq",
@@ -63,8 +64,8 @@ export const listAdminBookings = async (req: Request, res: Response) => {
         .select(
           "bookingNumber status scheduledStartDate createdAt payment.totalWithVat payment.amount payment.currency payment.status customer professional project"
         )
-        .populate("customer", "name email")
-        .populate("professional", "name email username")
+        .populate("customer", "name email isAnonymized deletedAt")
+        .populate("professional", "name email username isAnonymized deletedAt")
         .populate("project", "title category service")
         .lean(),
       Booking.countDocuments(filter),
@@ -72,7 +73,12 @@ export const listAdminBookings = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { items, total, page, limit },
+      data: {
+        items: items.map((item) => maskBookingForAnonymizedParties(item)),
+        total,
+        page,
+        limit,
+      },
     });
   } catch (error: any) {
     console.error("List admin bookings error:", error);

@@ -4,6 +4,7 @@ import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
+import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
 export function parsePostalCity(lastLine: string): { postalCode?: string; city: string } {
   const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-][\dA-Z]{2,5})?)\s+(.+)$/i)
@@ -231,7 +232,9 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
       }
     }
 
-    await user.save();
+    await withAnonymizationWriteFence([user._id], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
     return res.status(200).json({
       success: true,
       msg: "VAT validated and information updated successfully",
@@ -320,7 +323,9 @@ export const updateUserVAT = async (req: Request, res: Response, next: NextFunct
     console.log(`💾 VAT Save: Updating user ${user.email} - VAT: ${formattedVAT || 'REMOVED'}, Verified: ${isVatVerified}`);
     user.vatNumber = formattedVAT || undefined;
     user.isVatVerified = isVatVerified;
-    await user.save();
+    await withAnonymizationWriteFence([user._id], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
     console.log(`✅ VAT Save: User updated successfully`);
 
     // Return updated user data (without password)

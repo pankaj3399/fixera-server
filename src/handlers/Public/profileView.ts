@@ -4,6 +4,8 @@ import mongoose from 'mongoose';
 import ProfileView from '../../models/profileView';
 import User from '../../models/user';
 import { params } from '../../utils/requestParams';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { UserFacingError } from '../../utils/appErrors';
 
 const hashVisitor = (ip: string, userAgent: string): string =>
   crypto.createHash('sha256').update(`${ip}|${userAgent}`).digest('hex').slice(0, 32);
@@ -16,7 +18,12 @@ export const recordProfessionalView = async (req: Request, res: Response) => {
     }
 
     const professionalId = new mongoose.Types.ObjectId(id);
-    const pro = await User.findOne({ _id: professionalId, role: 'professional' }).select('_id');
+    const pro = await User.findOne({
+      _id: professionalId,
+      role: 'professional',
+      deletedAt: null,
+      isAnonymized: { $ne: true },
+    }).select('_id');
     if (!pro) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Professional not found' } });
     }
@@ -33,14 +40,19 @@ export const recordProfessionalView = async (req: Request, res: Response) => {
     const dayKey = new Date().toISOString().slice(0, 10);
 
     try {
-      await ProfileView.create({
-        professional: professionalId,
-        viewer: viewerId,
-        visitorKey,
-        dayKey,
+      await withAnonymizationWriteFence([professionalId, viewerId], async (session) => {
+        return ProfileView.create([{
+          professional: professionalId,
+          viewer: viewerId,
+          visitorKey,
+          dayKey,
+        }], { session });
       });
       return res.json({ success: true, data: { recorded: true } });
     } catch (err: any) {
+      if (err instanceof UserFacingError) {
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Professional not found' } });
+      }
       if (err?.code === 11000) {
         return res.json({ success: true, data: { recorded: false, reason: 'duplicate' } });
       }

@@ -193,6 +193,66 @@ const def = (
   };
 };
 
+const EVENT_REQUIRES_COUNTERPARTY_PROVENANCE = new Set<string>([
+  'user.chat_message',
+  'customer.unread_chat',
+  'professional.unread_chat',
+  'user.unread_support_chat',
+  'admin.unread_support_chat',
+  'customer.rfq_rejected',
+  'customer.rfq_accepted',
+  'customer.payment_confirmed',
+  'customer.quotation_received',
+  'customer.quotation_updated',
+  'customer.cancellation_request_received',
+  'customer.refund_counter_offer',
+  'customer.warranty_proposal_sent',
+  'customer.reschedule_requested',
+  'customer.booking_cancelled_refunded',
+  'customer.booking_started',
+  'customer.completion_requested',
+  'customer.review_received',
+  'professional.rfq_received',
+  'professional.quote_rejected',
+  'professional.quote_accepted',
+  'professional.booking_created',
+  'professional.booking_scheduled',
+  'professional.completion_confirmed_by_customer',
+  'professional.reschedule_accepted',
+  'professional.reschedule_declined',
+  'professional.reschedule_requested',
+  'professional.booking_cancelled_refunded',
+  'professional.cancellation_request_received',
+  'professional.warranty_claim_opened',
+  'professional.dispute_started',
+  'professional.review_received',
+]);
+
+/** These event bodies/emails embed another user's identity or words. */
+export const eventRequiresCounterpartyProvenance = (eventKey: string): boolean =>
+  EVENT_REQUIRES_COUNTERPARTY_PROVENANCE.has(eventKey);
+
+/**
+ * Events whose copy names a counterparty who may differ from the recorded
+ * actor, for example an admin or customer updating a booking status while the
+ * message names the professional. When the builder receives that party's name,
+ * `notify` requires a trusted `subjectUserId`; the actor alone is not proof of
+ * who the message describes.
+ */
+type NamedSubjectContextField = 'professionalName' | 'customerName';
+
+const EVENT_NAMED_SUBJECT_CONTEXT: Record<string, NamedSubjectContextField> = {
+  'customer.booking_started': 'professionalName',
+  'customer.payment_confirmed': 'professionalName',
+  'customer.booking_cancelled_refunded': 'professionalName',
+  'professional.booking_cancelled_refunded': 'customerName',
+};
+
+/** Context field that carries the named subject for these events. */
+export const eventNamedSubjectContextKey = (
+  eventKey: string,
+): NamedSubjectContextField | undefined => EVENT_NAMED_SUBJECT_CONTEXT[eventKey];
+
 /** Registry of product notification events. Handlers must use keys from this map. */
 export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
   // --- Phase 0 / chat ---

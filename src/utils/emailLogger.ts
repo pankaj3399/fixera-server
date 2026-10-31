@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import EmailLog, { EmailLogStatus } from '../models/emailLog';
+import { currentEmailActorId } from './emailActorContext';
 
 interface LogEmailInput {
   to: string;
@@ -9,6 +10,7 @@ interface LogEmailInput {
   errorMessage?: string;
   relatedBooking?: string | mongoose.Types.ObjectId;
   relatedUser?: string | mongoose.Types.ObjectId;
+  actorId?: string | mongoose.Types.ObjectId;
 }
 
 const toObjectId = (value?: string | mongoose.Types.ObjectId): mongoose.Types.ObjectId | undefined => {
@@ -30,6 +32,7 @@ export const logEmail = async (input: LogEmailInput): Promise<void> => {
       errorMessage: input.errorMessage,
       relatedBooking: toObjectId(input.relatedBooking),
       relatedUser: toObjectId(input.relatedUser),
+      actorId: toObjectId(input.actorId || currentEmailActorId()),
     });
   } catch (err: any) {
     console.error('Failed to write EmailLog entry:', err?.message || err);

@@ -8,6 +8,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MIRROR_LIMIT = 8;
 
 export type ChatMirrorLine = {
+  senderId: string;
   senderLabel: string;
   text: string;
   sentAtIso: string;
@@ -160,8 +161,9 @@ export async function loadUnreadMirrorLines(
   return messages
     .reverse()
     .map((message) => {
-      const sender = message.senderId as { name?: string } | null;
+      const sender = message.senderId as { _id?: unknown; name?: string } | null;
       return {
+        senderId: String(sender?._id || ''),
         senderLabel: sender?.name?.trim() || 'Someone',
         text: formatMessageMirrorText(message),
         sentAtIso: new Date(message.createdAt).toISOString(),

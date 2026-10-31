@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'FORBIDDEN'
   | 'NOT_FOUND'
   | 'CONFLICT'
+  | 'ACCOUNT_UNAVAILABLE'
   | 'SLOT_UNAVAILABLE'
   | 'RATE_LIMITED'
   | 'UNAVAILABLE'

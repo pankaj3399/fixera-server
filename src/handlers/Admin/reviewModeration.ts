@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import Booking from "../../models/booking";
 import mongoose from "mongoose";
 import { params } from "../../utils/requestParams";
+import { maskBookingForAnonymizedParties } from "../../utils/accountAnonymity";
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -88,8 +89,8 @@ const fetchReviewList = async ({
   const [reviews, totalCount, stats] = await Promise.all([
     Booking.find(query)
       .select("bookingNumber customerReview customer professional project createdAt")
-      .populate("customer", "name profileImage")
-      .populate("professional", "name businessInfo profileImage")
+      .populate("customer", "name profileImage isAnonymized deletedAt")
+      .populate("professional", "name businessInfo profileImage isAnonymized deletedAt")
       .populate("project", "title")
       .sort({ [sortField]: -1, createdAt: -1 })
       .skip(skip)
@@ -100,7 +101,7 @@ const fetchReviewList = async ({
   ]);
 
   return {
-    reviews,
+    reviews: reviews.map((review) => maskBookingForAnonymizedParties(review)),
     stats,
     filters: {
       status,

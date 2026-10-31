@@ -35,7 +35,7 @@ import { MAX_RESCHEDULES_PER_BOOKING } from '../../constants/booking';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { releaseScheduleSlots } from '../../utils/scheduleRelease';
-import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import {
   resolveScheduleTimeZone,
 } from '../../utils/bookingDetails/capture';
@@ -514,7 +514,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
             }
           : {}),
       };
-      const updatedBooking = await Booking.findOneAndUpdate(
+      const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
         { _id: booking._id, status: 'quoted', ...versionGuard },
         {
           $set: rejectFields,
@@ -529,8 +529,12 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
             },
           },
         },
-        { new: true, ...(versionArrayFilter ? { arrayFilters: versionArrayFilter } : {}) },
-      );
+        {
+          new: true,
+          ...(versionArrayFilter ? { arrayFilters: versionArrayFilter } : {}),
+          ...(session ? { session } : {}),
+        },
+      ));
       if (!updatedBooking) {
         return res.status(400).json({
           success: false,
@@ -550,7 +554,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
         acceptedFields.acceptedQuoteVersion = Number(currentVersion.version);
         acceptedFields.acceptedQuotationNumber = currentVersion.quotationNumber;
       }
-      const updatedBooking = await Booking.findOneAndUpdate(
+      const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => Booking.findOneAndUpdate(
         { _id: booking._id, status: 'quoted', ...versionGuard },
         {
           $set: { status: 'quote_accepted', ...acceptedFields },
@@ -563,8 +567,8 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
             },
           },
         },
-        { new: true },
-      );
+        { new: true, ...(session ? { session } : {}) },
+      ));
       if (!updatedBooking) {
         return res.status(400).json({
           success: false,
@@ -742,6 +746,8 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
+        // Payment is already captured and the status is already completed; the
+        // settlement record must not depend on either party's account state.
         await booking.save();
 
         if (!finalizeResult.alreadyCompleted) {
@@ -842,6 +848,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
         markMilestonesCompleted(booking, completionDate);
         await ensureWarrantyCoverageSnapshot(booking);
+        // Same rule as the already-captured branch: the money has moved.
         await booking.save();
 
         // Process referral completion for the customer
@@ -931,7 +938,14 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       );
     }
 
-    await booking.save();
+    // Fence the updater: a tombstoned requester cannot write. The target
+    // professional/customer is intentionally not fenced because booking
+    // lifecycle and settlement must remain possible after a counterparty
+    // tombstone; the personalized notification below fences the named subject
+    // separately. The status/history fields written here contain no target PII.
+    await withAnonymizationWriteFence([userIdStr], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
@@ -953,10 +967,15 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       const customerId =
         booking.customer?._id?.toString?.() || booking.customer?.toString?.();
       if (customerId) {
-        let professionalName = 'Your professional';
+        // The body/email names the professional, not necessarily the user who
+        // changed the status (customer or admin). Keep the trusted subject id
+        // that produced the name, and never infer it from the caller input.
+        let professionalName: string | undefined;
+        let professionalSubjectId: string | undefined;
         try {
           const professionalId = await getProfessionalId(booking);
           if (professionalId) {
+            professionalSubjectId = String(professionalId);
             const professionalUser = await User.findById(professionalId)
               .select('name username businessInfo')
               .lean();
@@ -972,9 +991,11 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           eventKey: 'customer.booking_started',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userIdStr,
+          ...(professionalSubjectId ? { subjectUserId: professionalSubjectId } : {}),
           context: {
             bookingId: String(booking._id),
-            professionalName,
+            ...(professionalName ? { professionalName } : {}),
           },
         });
       }
@@ -1120,8 +1141,8 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
     }
 
     const refreshedBooking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     return res.json({
@@ -1160,8 +1181,8 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!booking) {
@@ -1248,7 +1269,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       });
     }
 
-    const updatedBooking = await withCalendarTransactionIfConnected(async (session) => {
+    const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => {
       await replaceBookingCalendar(candidate as any, session);
       await booking.save(session ? { session } : undefined);
       return booking;
@@ -1264,6 +1285,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
           eventKey: 'professional.booking_scheduled',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userId,
           context: {
             bookingId: String(booking._id),
             customerName: customer?.name,
@@ -1319,8 +1341,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!booking) {
@@ -1417,7 +1439,9 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       )
     );
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     try {
       const customer = booking.customer as any;
@@ -1431,6 +1455,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           eventKey: 'customer.reschedule_requested',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userId,
           context: {
             bookingId: String(booking._id),
             professionalName: getProfessionalDisplayName(professional),
@@ -1445,6 +1470,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           eventKey: 'professional.reschedule_requested',
           entityType: 'booking',
           entityId: String(booking._id),
+          actorId: userId,
           context: {
             bookingId: String(booking._id),
             customerName: customer?.name,
@@ -1484,8 +1510,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     }
 
     const loadedBooking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!loadedBooking) {
@@ -1578,7 +1604,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       booking.statusHistory.push(
         createStatusHistoryEntry('booked', (req as any).user._id, 'Customer accepted the rescheduling request')
       );
-      booking = await withCalendarTransactionIfConnected(async (session) => {
+      booking = await withAnonymizationWriteFence([userId], async (session) => {
         await replaceBookingCalendar(calendarCandidate as any, session);
         await booking.save(session ? { session } : undefined);
         return booking;
@@ -1677,7 +1703,9 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     } as any);
     booking.rescheduleRequest = undefined;
 
-    await booking.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await booking.save(session ? { session } : undefined);
+    });
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {
@@ -1723,6 +1751,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
                 : 'professional.reschedule_declined',
             entityType: 'booking',
             entityId: String(booking._id),
+            actorId: userId,
             context: {
               bookingId: String(booking._id),
               responseNote: typeof note === 'string' ? note.trim() : undefined,
@@ -1775,8 +1804,8 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     if (!booking) {
@@ -1867,7 +1896,7 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
     booking.statusHistory = booking.statusHistory || [];
     booking.statusHistory.push(statusEntry);
 
-    const updatedBooking = await withCalendarTransactionIfConnected(async (session) => {
+    const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => {
       await replaceBookingCalendar(candidate as any, session);
       await booking.save(session ? { session } : undefined);
       return booking;

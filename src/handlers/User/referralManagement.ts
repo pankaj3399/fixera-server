@@ -6,6 +6,7 @@ import ReferralConfig from '../../models/referralConfig';
 import PointsConfig from '../../models/pointsConfig';
 import { generateReferralCode, getUserReferralStats, validateReferralCode, createReferral } from '../../utils/referralSystem';
 import { params } from '../../utils/requestParams';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 /**
  * GET /api/user/referral/stats
@@ -85,7 +86,9 @@ export const generateUserReferralCode = async (req: Request, res: Response, next
 
     const code = await generateReferralCode(user.name);
     user.referralCode = code;
-    await user.save();
+    await withAnonymizationWriteFence([user._id], async (session) => {
+      await user.save(session ? { session } : undefined);
+    });
 
     return res.status(200).json({
       success: true,

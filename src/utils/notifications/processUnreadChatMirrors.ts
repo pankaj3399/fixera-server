@@ -92,12 +92,14 @@ async function processConversationMirror(
       const lines = await loadUnreadMirrorLines(String(conv._id), target.userId);
       if (lines.length === 0) return { delivery: 'empty' as const };
       const counterpartyName = lines[lines.length - 1]?.senderLabel;
+      const senderUserId = lines[lines.length - 1]?.senderId;
 
       const notifyResult = await notify({
         userId: target.userId,
         eventKey: target.eventKey,
         entityType: 'conversation',
         entityId: String(conv._id),
+        ...(senderUserId ? { actorId: senderUserId, subjectUserId: senderUserId } : {}),
         delivery: { persistInbox: false, sendPush: false },
         context: {
           conversationId: String(conv._id),

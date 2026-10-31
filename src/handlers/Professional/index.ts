@@ -25,6 +25,8 @@ export const getProfessionalsByCategory = async (
       role: "professional",
       professionalStatus: "approved",
       serviceCategories: categorySlug,
+      deletedAt: null,
+      isAnonymized: { $ne: true },
     })
       .select(
         "name username businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage"
@@ -50,6 +52,8 @@ export const getAllProfessionals = async (req: Request, res: Response) => {
     const professionals = await User.find({
       role: "professional",
       professionalStatus: "approved",
+      deletedAt: null,
+      isAnonymized: { $ne: true },
     })
       .select(
         "name username businessInfo.description businessInfo.city businessInfo.country businessInfo.website hourlyRate currency serviceCategories profileImage"

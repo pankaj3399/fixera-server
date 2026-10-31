@@ -110,6 +110,7 @@ export function buildUserResponse(user: any, adminAccessLevels?: AdminPermission
     manualProfessionalLevelOverride: user.manualProfessionalLevelOverride,
     adminTags: user.adminTags || [],
     accountStatus: user.accountStatus || 'active',
+    isAnonymized: Boolean(user.isAnonymized),
     totalReferrals: user.totalReferrals || 0,
     completedReferrals: user.completedReferrals || 0,
     createdAt: user.createdAt,
@@ -474,14 +475,14 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
       email: email.toLowerCase().trim()
     }).select("+password");
 
-    if (!userExists) {
+    if (!userExists || !userExists.password) {
       return res.status(401).json({
         success: false,
         msg: "Invalid email or password"
       });
     }
     // Compare password first to avoid leaking account existence/status
-    const checkPassword = await bcrypt.compare(password, userExists.password!);
+    const checkPassword = await bcrypt.compare(password, userExists.password);
 
     if (!checkPassword) {
       return res.status(401).json({
@@ -490,7 +491,7 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
       });
     }
 
-    if (userExists.deletedAt) {
+    if (userExists.deletedAt || userExists.isAnonymized) {
       return res.status(403).json({
         success: false,
         msg: "This account has been deleted"

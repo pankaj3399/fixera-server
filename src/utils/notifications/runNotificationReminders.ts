@@ -173,6 +173,7 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
             eventKey: 'professional.reschedule_requested',
             entityType: 'booking',
             entityId: String(booking._id),
+            ...(customerId ? { subjectUserId: customerId } : {}),
             meta: { reminder: true },
             context: { bookingId: String(booking._id) },
           });

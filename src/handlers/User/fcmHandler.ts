@@ -9,6 +9,8 @@ import {
 } from '../../utils/fcmTokenUtils';
 import { MARKETING_LOCALES, isMarketingLocale } from '../../utils/marketing/marketingCatalog';
 import { isPromotionalEmailEnabled } from '../../utils/marketing/promotionalConsent';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import { UserFacingError } from '../../utils/appErrors';
 
 // ------------------------------------------------------------------
 // Register / Unregister FCM tokens
@@ -58,7 +60,7 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
     );
 
     // Atomic update: preserve other-origin tokens, dedupe within origin, cap total.
-    await User.findByIdAndUpdate(userId, [
+    await withAnonymizationWriteFence([userId], async (session) => User.findByIdAndUpdate(userId, [
       {
         $set: {
           fcmTokens: {
@@ -100,11 +102,15 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
           },
         },
       },
-    ]);
+    ], session ? { session } : undefined));
 
     res.status(200).json({ success: true, msg: 'FCM token registered' });
   } catch (err) {
     console.error('registerFcmToken error:', err);
+    if (err instanceof UserFacingError) {
+      res.status(err.status).json({ success: false, msg: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ success: false, msg: "We couldn't register push notifications on this device. Please try again." });
   }
 };
@@ -128,13 +134,20 @@ export const unregisterFcmToken = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    await User.findByIdAndUpdate(userId, {
-      $pull: { fcmTokens: { token: token.trim() } },
-    });
+    await withAnonymizationWriteFence([userId], async (session) =>
+      User.findByIdAndUpdate(
+        userId,
+        { $pull: { fcmTokens: { token: token.trim() } } },
+        session ? { session } : undefined,
+      ));
 
     res.status(200).json({ success: true, msg: 'FCM token removed' });
   } catch (err) {
     console.error('unregisterFcmToken error:', err);
+    if (err instanceof UserFacingError) {
+      res.status(err.status).json({ success: false, msg: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ success: false, msg: "We couldn't update push notification settings. Please try again." });
   }
 };
@@ -211,11 +224,12 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     // Language-only updates are intentionally supported by the same preference
     // endpoint used for channel toggles.
     if (marketingLocale !== undefined && type === undefined && channel === undefined && enabled === undefined) {
-      const updatedUser = await User.findByIdAndUpdate(
-        userId,
-        { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
-        { new: true },
-      ).select('_id');
+      const updatedUser = await withAnonymizationWriteFence([userId], async (session) =>
+        User.findByIdAndUpdate(
+          userId,
+          { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
+          { new: true, ...(session ? { session } : {}) },
+        ).select('_id'));
       if (!updatedUser) {
         res.status(404).json({ success: false, msg: 'User not found' });
         return;
@@ -254,11 +268,13 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
         userUpdate.$unset = { marketingConsentAt: 1 };
       }
     }
-    const updatedUser = await User.findByIdAndUpdate(userId, userUpdate, {
-      new: true,
-    }).select(
-      'email role name serviceCategories location companyAddress businessInfo marketingLocale preferredLocale locale language',
-    );
+    const updatedUser = await withAnonymizationWriteFence([userId], async (session) =>
+      User.findByIdAndUpdate(userId, userUpdate, {
+        new: true,
+        ...(session ? { session } : {}),
+      }).select(
+        'email role name serviceCategories location companyAddress businessInfo marketingLocale preferredLocale locale language',
+      ));
     if (!updatedUser) {
       res.status(404).json({ success: false, msg: 'User not found' });
       return;
@@ -294,6 +310,10 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     res.status(200).json({ success: true, msg: 'Preference updated' });
   } catch (err) {
     console.error('updateNotificationPreferences error:', err);
+    if (err instanceof UserFacingError) {
+      res.status(err.status).json({ success: false, msg: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ success: false, msg: "We couldn't save notification preferences. Please try again." });
   }
 };

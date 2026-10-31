@@ -9,6 +9,8 @@ import mongoose from 'mongoose';
 import { normalizePendingOldValue } from "../../utils/pendingIdChanges";
 import { auditLog } from "../../utils/auditLogger";
 
+const ACTIVE_PROFESSIONAL_FILTER = { deletedAt: null, isAnonymized: { $ne: true } } as const;
+
 const getS3KeyFromValue = (value?: string): string | null => {
   if (!value) return null;
   if (value.startsWith('id-proof/')) return value;
@@ -100,6 +102,7 @@ export const requireAdmin = async (req: Request, res: Response, next: NextFuncti
       !adminUser ||
       adminUser.role !== 'admin' ||
       adminUser.deletedAt ||
+      adminUser.isAnonymized ||
       ['suspended', 'rejected'].includes(adminUser.accountStatus || '')
     ) {
       return res.status(403).json({
@@ -133,7 +136,8 @@ export const getPendingProfessionals = async (req: Request, res: Response, next:
 
     const professionals = await User.find({
       role: 'professional',
-      professionalStatus: status
+      professionalStatus: status,
+      ...ACTIVE_PROFESSIONAL_FILTER,
     })
     .select('-password -verificationCode -verificationCodeExpires')
     .sort({ createdAt: -1 })
@@ -142,7 +146,8 @@ export const getPendingProfessionals = async (req: Request, res: Response, next:
 
     const total = await User.countDocuments({
       role: 'professional',
-      professionalStatus: status
+      professionalStatus: status,
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     console.log(`👑 Admin: Retrieved ${professionals.length} professionals with status ${status} for ${adminUser.email}`);
@@ -183,7 +188,8 @@ export const getProfessionalDetails = async (req: Request, res: Response, next: 
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     }).select('-password -verificationCode -verificationCodeExpires');
 
     if (!professional) {
@@ -223,7 +229,8 @@ export const approveProfessional = async (req: Request, res: Response, next: Nex
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     if (!professional) {
@@ -357,7 +364,8 @@ export const rejectProfessional = async (req: Request, res: Response, next: Next
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     if (!professional) {
@@ -445,7 +453,8 @@ export const suspendProfessional = async (req: Request, res: Response, next: Nex
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     if (!professional) {
@@ -528,7 +537,8 @@ export const reactivateProfessional = async (req: Request, res: Response, next: 
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     if (!professional) {
@@ -614,7 +624,8 @@ export const verifyIdProof = async (req: Request, res: Response, next: NextFunct
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     if (!professional) {
@@ -679,7 +690,8 @@ export const reviewIdChanges = async (req: Request, res: Response, next: NextFun
 
     const professional = await User.findOne({
       _id: professionalId,
-      role: 'professional'
+      role: 'professional',
+      ...ACTIVE_PROFESSIONAL_FILTER,
     });
 
     if (!professional) {
@@ -834,10 +846,10 @@ export const getApprovalStats = async (req: Request, res: Response, next: NextFu
 
     // Get counts for each status
     const stats = await Promise.all([
-      User.countDocuments({ role: 'professional', professionalStatus: 'pending' }),
-      User.countDocuments({ role: 'professional', professionalStatus: 'approved' }),
-      User.countDocuments({ role: 'professional', professionalStatus: 'rejected' }),
-      User.countDocuments({ role: 'professional', professionalStatus: 'suspended' })
+      User.countDocuments({ role: 'professional', professionalStatus: 'pending', ...ACTIVE_PROFESSIONAL_FILTER }),
+      User.countDocuments({ role: 'professional', professionalStatus: 'approved', ...ACTIVE_PROFESSIONAL_FILTER }),
+      User.countDocuments({ role: 'professional', professionalStatus: 'rejected', ...ACTIVE_PROFESSIONAL_FILTER }),
+      User.countDocuments({ role: 'professional', professionalStatus: 'suspended', ...ACTIVE_PROFESSIONAL_FILTER })
     ]);
 
     const [pending, approved, rejected, suspended] = stats;

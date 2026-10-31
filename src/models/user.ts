@@ -157,6 +157,15 @@ export interface IUser extends Document {
     accountStatus?: 'active' | 'suspended' | 'rejected';
     deletedAt?: Date;
     deletedBy?: Types.ObjectId;
+    /** True only after the account's personal data has been redacted. */
+    isAnonymized?: boolean;
+    anonymizedAt?: Date;
+    /**
+     * Short-lived write claim for an admin/self anonymization. The claim makes
+     * concurrent requests single-owner; an expired claim can be recovered.
+     */
+    anonymizationClaimId?: string;
+    anonymizationClaimExpiresAt?: Date;
     // Referral system fields
     referralCode?: string;
     referredBy?: Types.ObjectId;
@@ -610,6 +619,31 @@ const UserSchema = new Schema({
         type: Schema.Types.ObjectId,
         ref: 'User',
         required: false
+    },
+    isAnonymized: {
+        type: Boolean,
+        default: false,
+        index: true,
+    },
+    anonymizedAt: {
+        type: Date,
+        required: false,
+    },
+    anonymizationClaimId: {
+        type: String,
+        required: false,
+        select: false,
+    },
+    anonymizationClaimExpiresAt: {
+        type: Date,
+        required: false,
+    },
+    /** Internal monotonic fence so business writes conflict with a concurrent account removal. */
+    writeFenceVersion: {
+        type: Number,
+        default: 0,
+        min: 0,
+        select: false,
     },
     // Referral system fields
     referralCode: {

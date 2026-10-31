@@ -106,6 +106,9 @@ vi.mock('../../../utils/support/emails', () => ({
   sendSupportMeetingCancelledEmail: sendCancelled,
   supportEmailWouldSend: (user: any) => Boolean(user?.email && !user?.deletedAt && user?.isEmailVerified !== false),
 }));
+vi.mock('../../../utils/support/accountGuard', () => ({
+  fenceAccountWritesInSession: vi.fn(async () => undefined),
+}));
 vi.mock('../../../utils/support/meetingNotifications', () => ({
   claimSupportMeetingNotification: claimNotification,
   markSupportMeetingNotificationSent: markSent,

@@ -28,6 +28,13 @@ import {
 } from '../../utils/support/bookingCalendar';
 import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
 import { UserFacingError } from '../../utils/appErrors';
+import {
+  isAnonymizedAccount,
+  maskAnonymizedUser,
+  maskBookingForAnonymizedParties,
+  maskCancellationRequestForAnonymizedParties,
+  maskWarrantyClaimForAnonymizedParties,
+} from '../../utils/accountAnonymity';
 import { param, params } from '../../utils/requestParams';
 import { notify } from '../../utils/notifications/notify';
 
@@ -186,20 +193,21 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
   const [warrantyClaims, refundRequests] = await Promise.all([
     WarrantyClaim.find({ status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } })
       .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
-      .populate('customer', 'name email')
-      .populate('professional', 'name email username')
+      .populate('customer', 'name email isAnonymized deletedAt')
+      .populate('professional', 'name email username isAnonymized deletedAt')
       .sort({ openedAt: -1 })
       .limit(50)
       .lean(),
     CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
       .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
-      .populate('requestedBy', 'name email')
+      .populate('requestedBy', 'name email isAnonymized deletedAt')
       .sort({ escalatedAt: -1 })
       .limit(50)
       .lean(),
   ]);
 
-  const warrantyRows = warrantyClaims.map((claim: any) => {
+  const warrantyRows = warrantyClaims.map((rawClaim: any) => {
+    const claim = maskWarrantyClaimForAnonymizedParties(rawClaim);
     const booking = claim.booking || {};
     const hasProposal = !!claim.proposal?.proposedAt;
     return {
@@ -232,7 +240,8 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
     };
   });
 
-  const refundRows = refundRequests.map((request: any) => {
+  const refundRows = refundRequests.map((rawRequest: any) => {
+    const request = maskCancellationRequestForAnonymizedParties(rawRequest);
     const booking = request.booking || {};
     const reasonCategoryLabel = request.reasonCategory
       ? CANCELLATION_REASON_LABELS[request.reasonCategory as keyof typeof CANCELLATION_REASON_LABELS]
@@ -253,7 +262,10 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       scheduledStartDate: booking.scheduledStartDate,
       cancellation: {
         ...(booking.cancellation || {}),
-        reason: reasonCategoryLabel ?? booking.cancellation?.reason,
+        reason: reasonCategoryLabel
+          ?? (isAnonymizedAccount(request.requestedBy)
+            ? '[deleted]'
+            : booking.cancellation?.reason),
       },
       dispute: {
         raisedBy: request.requestedBy?._id || request.requestedBy,
@@ -282,8 +294,8 @@ export const getDisputes = async (req: Request, res: Response) => {
 
     const [disputes, total] = await Promise.all([
       Booking.find(filter)
-        .populate('customer', 'name email phone')
-        .populate('professional', 'name email username')
+        .populate('customer', 'name email phone isAnonymized deletedAt')
+        .populate('professional', 'name email username isAnonymized deletedAt')
         .populate('project', 'title category service')
         .select(
           'bookingNumber status customer professional project payment extraCosts extraCostTotal extraCostStatus completionAttestation dispute createdAt actualEndDate actualStartDate scheduledStartDate scheduledEndTime scheduledStartTime scheduledExecutionEndDate rescheduleRequest warrantyCoverage cancellation'
@@ -309,8 +321,12 @@ export const getDisputes = async (req: Request, res: Response) => {
     return res.json({
       success: true,
       data: {
-        disputes,
-        externalDisputes: externalRows,
+        disputes: disputes.map((dispute) => maskBookingForAnonymizedParties(dispute)),
+        externalDisputes: externalRows.map((row) => ({
+          ...row,
+          customer: maskAnonymizedUser(row.customer),
+          professional: maskAnonymizedUser(row.professional),
+        })),
         pagination: {
           page: pageNum,
           limit: limitNum,
@@ -333,8 +349,8 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
     const { bookingId } = params(req.params);
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType')
-      .populate('professional', 'name email username businessInfo')
+      .populate('customer', 'name email phone customerType isAnonymized deletedAt')
+      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
       .populate('project', 'title category service extraOptions termsConditions subprojects');
 
     if (!booking) {
@@ -359,7 +375,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { booking: bookingObj }
+      data: { booking: maskBookingForAnonymizedParties(bookingObj) }
     });
   } catch (error: any) {
     console.error('Error fetching dispute details:', error);

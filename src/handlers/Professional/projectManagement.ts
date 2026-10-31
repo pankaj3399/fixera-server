@@ -4,6 +4,7 @@ import User from '../../models/user';
 import Favorite from '../../models/favorite';
 import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
+import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 
 /**
  * Save project draft (create or update)
@@ -34,18 +35,22 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
 
     if (projectData._id) {
       // Update existing draft
-      project = await Project.findOneAndUpdate(
-        { _id: projectData._id, professionalId: userId },
-        { ...projectData, autoSaveTimestamp: new Date() },
-        { new: true, runValidators: true }
-      );
+      project = await withAnonymizationWriteFence([userId], async (session) =>
+        Project.findOneAndUpdate(
+          { _id: projectData._id, professionalId: userId },
+          { ...projectData, autoSaveTimestamp: new Date() },
+          { new: true, runValidators: true, ...(session ? { session } : {}) },
+        ));
     } else {
       // Create new draft
-      project = await Project.create({
-        ...projectData,
-        professionalId: userId,
-        status: 'draft',
-        autoSaveTimestamp: new Date()
+      project = await withAnonymizationWriteFence([userId], async (session) => {
+        const [created] = await Project.create([{
+          ...projectData,
+          professionalId: userId,
+          status: 'draft',
+          autoSaveTimestamp: new Date()
+        }], session ? { session } : undefined);
+        return created;
       });
     }
 
@@ -197,7 +202,9 @@ export const submitProject = async (req: Request, res: Response) => {
     project.status = 'pending';
     project.submittedAt = new Date();
     project.qualityChecks = qualityChecks;
-    await project.save();
+    await withAnonymizationWriteFence([userId], async (session) => {
+      await project.save(session ? { session } : undefined);
+    });
 
     res.status(200).json({
       success: true,

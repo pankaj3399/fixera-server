@@ -581,6 +581,7 @@ export interface IBooking extends Document {
   cancellation?: {
     cancelledBy: Types.ObjectId; // User who cancelled
     reason: string;
+    adminResolutionNote?: string;
     cancelledAt: Date;
     refundAmount?: number;
   };
@@ -1502,6 +1503,10 @@ const BookingSchema = new Schema({
       ref: 'User'
     },
     reason: {
+      type: String,
+      maxlength: 500
+    },
+    adminResolutionNote: {
       type: String,
       maxlength: 500
     },

@@ -1,3 +1,5 @@
+import { maskBookingForAnonymizedParties } from "./accountAnonymity";
+
 export type InvoiceViewerRole = "admin" | "customer" | "professional";
 
 /**
@@ -256,10 +258,13 @@ export const filterInvoiceFieldsByRole = (booking: any, viewerRole: InvoiceViewe
  * documents or lean objects and returns a plain object safe for the viewer.
  */
 export const bookingForViewer = (booking: any, viewerRole: InvoiceViewerRole) => {
-  if (!booking || typeof booking !== "object" || viewerRole === "admin") return booking;
+  if (!booking || typeof booking !== "object") return booking;
 
   const source = typeof booking.toObject === "function" ? booking.toObject() : { ...booking };
-  const visible = filterInvoiceFieldsByRole(source, viewerRole);
+  const safeSource = maskBookingForAnonymizedParties(source);
+  if (viewerRole === "admin") return safeSource;
+
+  const visible = filterInvoiceFieldsByRole(safeSource, viewerRole);
 
   // Internal booking notes and admin-only dispute internals are not part of
   // any participant payload. They must be removed here as well as in details,

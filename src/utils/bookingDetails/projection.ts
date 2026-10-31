@@ -43,6 +43,12 @@ import { refundCountsAsCash } from '../paymentRefunds';
 import { resolveAcceptedQuoteVersion } from './quoteTotals';
 import { isBookingSnapshotComplete, isValidIanaTimeZone } from './snapshot';
 import { parseS3KeyFromUrl } from '../s3Upload';
+import {
+  isAnonymizedAccount,
+  maskBookingForAnonymizedParties,
+  maskCancellationRequestForAnonymizedParties,
+  maskWarrantyClaimForAnonymizedParties,
+} from '../accountAnonymity';
 
 const CUSTOMER_INVOICE_KEYS = [
   'invoiceNumber',
@@ -850,15 +856,46 @@ export const buildBookingDetails = async (params: {
   adminAccess?: { bookings?: boolean; disputes: boolean; warranty: boolean; cancellations: boolean; payments: boolean };
   quotationAlias?: boolean;
 }): Promise<BookingDetailsDto> => {
-  const { booking, payments, cancellations, warrantyClaims, actors, viewerRole } = params;
+  const { payments, cancellations, warrantyClaims, actors, viewerRole } = params;
+  const rawProject = params.booking?.project && typeof params.booking.project === 'object'
+    ? params.booking.project
+    : null;
+  const projectProfessionalId = referenceId(rawProject?.professionalId);
+  const projectProfessionalActor = projectProfessionalId ? actors.get(projectProfessionalId) : undefined;
+  // Project bookings often carry no booking.professional at all; the owner is
+  // only reachable through booking.project. Record the flag once so every
+  // downstream mask sees it.
+  const projectOwnerAnonymized = Boolean(projectProfessionalActor?.isAnonymized);
+  const booking = maskBookingForAnonymizedParties(params.booking, {
+    professional:
+      isAnonymizedAccount(params.booking?.professional)
+      || projectOwnerAnonymized,
+    ...(projectProfessionalId ? { professionalId: projectProfessionalId } : {}),
+  });
   const isAdminViewer = viewerRole === 'admin';
   const maySeeAdminArea = (area: 'bookings' | 'disputes' | 'warranty' | 'cancellations' | 'payments') =>
     !isAdminViewer || params.adminAccess?.[area] === true;
+  // Admin-authored text is not participant-facing, even for the areas the
+  // participant can otherwise read.
+  const maySeeAdminNotes = isAdminViewer && params.adminAccess?.cancellations === true;
   const customer = booking.customer && typeof booking.customer === 'object' ? booking.customer : null;
   const professional = booking.professional && typeof booking.professional === 'object' ? booking.professional : null;
   const project = booking.project && typeof booking.project === 'object' ? booking.project : null;
   const customerId = objectId(booking.customer);
   const professionalId = objectId(booking.professional || project?.professionalId);
+  const customerMasked = isAnonymizedAccount(customer);
+  const professionalMasked = isAnonymizedAccount(professional) || projectOwnerAnonymized;
+  const maskedCancellations = cancellations.map((request) =>
+    maskCancellationRequestForAnonymizedParties(request, {
+      customerId: customerId || undefined,
+      professionalId: professionalId || undefined,
+      customerAnonymized: customerMasked,
+      professionalAnonymized: professionalMasked,
+    }),
+  );
+  const maskedWarrantyClaims = warrantyClaims.map((claim) =>
+    maskWarrantyClaimForAnonymizedParties(claim),
+  );
   const projectId = referenceId(booking.project) || str((booking.bookingSnapshot as any)?.project?.id);
   const captured = booking.bookingSnapshot || null;
   const capturedAt = iso(captured?.capturedAt);
@@ -1535,7 +1572,7 @@ export const buildBookingDetails = async (params: {
   }
 
   const cancellationDtos: CancellationRequestDto[] = [];
-  const visibleCancellations = maySeeAdminArea('cancellations') ? cancellations : [];
+  const visibleCancellations = maySeeAdminArea('cancellations') ? maskedCancellations : [];
   for (const [index, request] of visibleCancellations.entries()) {
     const evidence = await attachmentUrlList(
       request.evidence,
@@ -1548,6 +1585,7 @@ export const buildBookingDetails = async (params: {
       status: request.status,
       reasonCategory: str(request.reasonCategory),
       reason: String(request.reason || ''),
+      adminResolutionNote: maySeeAdminNotes ? str(request.adminResolutionNote) : null,
       evidence,
       requestedBy: actorForId(request.requestedBy, actors, viewerRole, {
         roleHint: request.requestedRole === 'professional' ? 'professional' : 'customer',
@@ -1573,7 +1611,7 @@ export const buildBookingDetails = async (params: {
     });
   }
 
-  const visibleWarrantyClaims = maySeeAdminArea('warranty') ? warrantyClaims : [];
+  const visibleWarrantyClaims = maySeeAdminArea('warranty') ? maskedWarrantyClaims : [];
   const warrantyDtos: WarrantyClaimSummaryDto[] = visibleWarrantyClaims.map((claim) => ({
     id: String(claim._id),
     claimNumber: str(claim.claimNumber),
@@ -1678,11 +1716,13 @@ export const buildBookingDetails = async (params: {
           role: 'professional',
           name: str(professional?.name) || str(professional?.username),
           companyName: str(professional?.businessInfo?.companyName),
+          ...(professionalMasked ? { isAnonymized: true } : {}),
         }
       : {
           role: 'customer',
           name: str(customer?.name),
           companyName: str(customer?.businessName),
+          ...(isAnonymizedAccount(customer) ? { isAnonymized: true } : {}),
         },
     quote: quoteDto,
     payment: booking.payment
@@ -1740,50 +1780,80 @@ export const buildBookingDetails = async (params: {
   const professionalContactVisible = viewerRole === 'admin';
   const recordedCustomer = captured?.parties?.customer || null;
   const recordedProfessional = captured?.parties?.professional || null;
+  const customerAnonymized = isAnonymizedAccount(customer);
+  const professionalAnonymized = professionalMasked;
   const parties: PartiesDto = {
     customer: {
       id: customerId,
-      name: str(recordedCustomer?.displayName) || str(customer?.name),
-      username: str(customer?.username),
-      customerType: recordedCustomer?.customerType === 'business' || recordedCustomer?.customerType === 'individual'
-        ? recordedCustomer.customerType
-        : customer?.customerType || null,
-      businessName: str(recordedCustomer?.businessName) || str(customer?.businessName),
-      email: customerEmailVisible ? str(customer?.email) : null,
-      phone: customerPhoneVisible ? str(customer?.phone) : null,
-      vatNumber: viewerRole === 'admin' ? str(customer?.vatNumber) : null,
-      address: customer?.location
-        ? {
-            city: str(recordedCustomer?.city) || str(customer.location.city),
-            country: str(recordedCustomer?.country) || str(customer.location.country),
-            postalCode: str(customer.location.postalCode),
-          }
-        : null,
-      timeZone: isValidIanaTimeZone(customer?.timeZone) ? customer.timeZone : null,
+      name: customerAnonymized ? '[deleted user]' : str(recordedCustomer?.displayName) || str(customer?.name),
+      username: customerAnonymized ? null : str(customer?.username),
+      customerType: customerAnonymized
+        ? null
+        : recordedCustomer?.customerType === 'business' || recordedCustomer?.customerType === 'individual'
+          ? recordedCustomer.customerType
+          : customer?.customerType || null,
+      businessName: customerAnonymized
+        ? null
+        : str(recordedCustomer?.businessName) || str(customer?.businessName),
+      email: customerAnonymized ? null : customerEmailVisible ? str(customer?.email) : null,
+      phone: customerAnonymized ? null : customerPhoneVisible ? str(customer?.phone) : null,
+      vatNumber: customerAnonymized ? null : viewerRole === 'admin' ? str(customer?.vatNumber) : null,
+      address: customerAnonymized
+        ? customer?.location
+          ? { city: null, country: str(customer.location.country), postalCode: null }
+          : null
+        : customer?.location
+          ? {
+              city: str(recordedCustomer?.city) || str(customer.location.city),
+              country: str(recordedCustomer?.country) || str(customer.location.country),
+              postalCode: str(customer.location.postalCode),
+            }
+          : null,
+      timeZone: customerAnonymized
+        ? null
+        : isValidIanaTimeZone(customer?.timeZone) ? customer.timeZone : null,
+      ...(customerAnonymized ? { isAnonymized: true } : {}),
     },
     professional: {
       id: professionalId,
-      name: str(recordedProfessional?.displayName) || str(professional?.name),
-      username: str(professional?.username),
-      companyName: str(recordedProfessional?.companyName) || str(professional?.businessInfo?.companyName),
-      email: professionalContactVisible ? str(professional?.email) : null,
-      phone: professionalContactVisible ? str(professional?.phone) : null,
-      vatNumber: professionalContactVisible ? str(professional?.vatNumber) : null,
-      website: str(professional?.businessInfo?.website),
-      address: professional?.businessInfo
-        ? {
-            city: str(recordedProfessional?.city) || str(professional.businessInfo.city),
-            country: str(recordedProfessional?.country) || str(professional.businessInfo.country),
-            postalCode: str(professional.businessInfo.postalCode),
-          }
-        : null,
-      timeZone: isValidIanaTimeZone(recordedProfessional?.timezone)
-        ? recordedProfessional.timezone
-        : isValidIanaTimeZone(professional?.businessInfo?.timezone)
-          ? professional.businessInfo.timezone
-          : isValidIanaTimeZone(professional?.timeZone)
-            ? professional.timeZone
-            : null,
+      name: professionalAnonymized
+        ? '[deleted user]'
+        : str(recordedProfessional?.displayName) || str(professional?.name),
+      username: professionalAnonymized ? null : str(professional?.username),
+      companyName: professionalAnonymized
+        ? null
+        : str(recordedProfessional?.companyName) || str(professional?.businessInfo?.companyName),
+      email: professionalAnonymized
+        ? null
+        : professionalContactVisible ? str(professional?.email) : null,
+      phone: professionalAnonymized
+        ? null
+        : professionalContactVisible ? str(professional?.phone) : null,
+      vatNumber: professionalAnonymized
+        ? null
+        : professionalContactVisible ? str(professional?.vatNumber) : null,
+      website: professionalAnonymized ? null : str(professional?.businessInfo?.website),
+      address: professionalAnonymized
+        ? professional?.businessInfo
+          ? { city: null, country: str(professional.businessInfo.country), postalCode: null }
+          : null
+        : professional?.businessInfo
+          ? {
+              city: str(recordedProfessional?.city) || str(professional.businessInfo.city),
+              country: str(recordedProfessional?.country) || str(professional.businessInfo.country),
+              postalCode: str(professional.businessInfo.postalCode),
+            }
+          : null,
+      timeZone: professionalAnonymized
+        ? null
+        : isValidIanaTimeZone(recordedProfessional?.timezone)
+          ? recordedProfessional.timezone
+          : isValidIanaTimeZone(professional?.businessInfo?.timezone)
+            ? professional.businessInfo.timezone
+            : isValidIanaTimeZone(professional?.timeZone)
+              ? professional.timeZone
+              : null,
+      ...(professionalAnonymized ? { isAnonymized: true } : {}),
     },
     recordedAt: capturedAt,
     source: captured?.parties ? 'booking_snapshot' : 'current_profile',

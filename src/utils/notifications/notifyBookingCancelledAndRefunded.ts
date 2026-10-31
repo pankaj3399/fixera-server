@@ -36,6 +36,12 @@ export function notifyBookingCancelledAndRefunded(
 
   const customerId = args.customerUser?._id?.toString?.();
   const professionalId = args.professionalUser?._id?.toString?.();
+  const actorId =
+    args.cancelledBy === 'customer'
+      ? customerId
+      : args.cancelledBy === 'professional'
+        ? professionalId
+        : undefined;
 
   if (customerId) {
     if (typeof args.refundAmount === 'number' && args.refundAmount > 0) {
@@ -44,6 +50,7 @@ export function notifyBookingCancelledAndRefunded(
         eventKey: 'customer.refund_processed',
         entityType: 'booking',
         entityId: args.bookingId,
+        ...(actorId ? { actorId } : {}),
         context: {
           bookingId: args.bookingId,
           refundAmount: args.refundAmount,
@@ -57,6 +64,9 @@ export function notifyBookingCancelledAndRefunded(
       eventKey: 'customer.booking_cancelled_refunded',
       entityType: 'booking',
       entityId: args.bookingId,
+      // The email names the professional and repeats the cancellation reason.
+      ...(actorId ? { actorId } : {}),
+      ...(professionalId ? { subjectUserId: professionalId } : {}),
       context: cancelContext,
     });
   }
@@ -67,6 +77,9 @@ export function notifyBookingCancelledAndRefunded(
       eventKey: 'professional.booking_cancelled_refunded',
       entityType: 'booking',
       entityId: args.bookingId,
+      // The email names the customer and repeats the cancellation reason.
+      ...(actorId ? { actorId } : {}),
+      ...(customerId ? { subjectUserId: customerId } : {}),
       context: cancelContext,
     });
   }

@@ -3,6 +3,7 @@ import Project from "../../models/project";
 import User from "../../models/user";
 import { popularServiceMatch } from "../../utils/popularServiceMatch";
 import { aggregateProjectRatings } from "./aggregateRatings";
+import { eligibleProjectOwnerStages } from "./eligibleOwner";
 
 /**
  * Get popular published projects for the homepage / service carousels.
@@ -27,6 +28,9 @@ export const getPopularProjects = async (req: Request, res: Response) => {
 
     const projects: any[] = await Project.aggregate([
       { $match: match },
+      // Owner eligibility runs as a lookup so the public, cached endpoint no
+      // longer loads every professional id on each cache miss.
+      ...eligibleProjectOwnerStages(),
       {
         $lookup: {
           from: "bookings",

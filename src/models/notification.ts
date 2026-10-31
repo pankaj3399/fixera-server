@@ -6,6 +6,10 @@ export type { NotificationEntityType };
 
 export interface INotification extends Document {
   userId: Types.ObjectId;
+  /** User whose action produced this notification, when known. */
+  actorId?: Types.ObjectId;
+  /** User the notification is about, when the actor is not the subject. */
+  subjectUserId?: Types.ObjectId;
   eventKey: string;
   category: PrefCategory;
   title: string;
@@ -31,6 +35,8 @@ export interface INotification extends Document {
 const notificationSchema = new Schema<INotification>(
   {
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    actorId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    subjectUserId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     eventKey: { type: String, required: true, trim: true, maxlength: 120 },
     category: {
       type: String,

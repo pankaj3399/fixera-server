@@ -88,6 +88,7 @@ export async function notifyBookingPaymentConfirmed(args: {
         eventKey: 'customer.payment_confirmed',
         entityType: 'booking',
         entityId: bookingId,
+        subjectUserId: professionalId,
         idempotencyKey: customerKey,
         context: {
           bookingId,
@@ -105,6 +106,8 @@ export async function notifyBookingPaymentConfirmed(args: {
         eventKey: 'professional.booking_created',
         entityType: 'booking',
         entityId: bookingId,
+        actorId: customerId,
+        subjectUserId: customerId,
         idempotencyKey: professionalKey,
         context: {
           bookingId,
