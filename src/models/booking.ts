@@ -300,6 +300,17 @@ export interface IBooking extends Document {
       totalPrice: number;
     }[];
   };
+  /**
+   * Frozen quantity/duration captured at checkout. Written and read on the
+   * top-level booking document (not inside `bookingSnapshot`).
+   */
+  scheduleSnapshot?: {
+    quantity?: number;
+    executionDuration?: { value: number; unit: 'hours' | 'days' };
+    preparationDuration?: { value: number; unit: 'hours' | 'days' };
+    bufferDuration?: { value: number; unit: 'hours' | 'days' };
+    version?: number;
+  };
   vatDecision?: {
     action: 'standard_rate' | 'reduced_rate' | 'rfq';
     country?: string;
@@ -1041,6 +1052,24 @@ const BookingSchema = new Schema({
       quantity: { type: Number, min: 0 },
       totalPrice: { type: Number, min: 0 },
     }],
+  },
+  // Frozen scheduling inputs. Without an explicit top-level path, Mongoose
+  // strict mode drops the value written by createBooking.
+  scheduleSnapshot: {
+    quantity: { type: Number, min: 0 },
+    executionDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] },
+    },
+    preparationDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] },
+    },
+    bufferDuration: {
+      value: { type: Number, min: 0 },
+      unit: { type: String, enum: ['hours', 'days'] },
+    },
+    version: { type: Number },
   },
   vatDecision: {
     action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'], required: true },

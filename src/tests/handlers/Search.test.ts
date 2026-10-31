@@ -78,7 +78,7 @@ vi.mock("../../models/project", () => {
   };
 });
 vi.mock("../../models/professionalLevelConfig", () => ({ default: { getCurrentConfig: vi.fn() } }));
-vi.mock("../../models/loyaltyConfig", () => ({ default: { getCurrentConfig: async () => ({ tiers: [
+vi.mock("../../models/loyaltyConfig", () => ({ default: { getCurrentConfig: async () => ({ globalSettings: { isEnabled: true }, tiers: [
   { name: "Bronze", minSpendingAmount: 0, discountPercentage: 0, isActive: true },
   { name: "Gold", minSpendingAmount: 1000, discountPercentage: 10, maxDiscountAmount: 5, isActive: true },
 ] }) } }));

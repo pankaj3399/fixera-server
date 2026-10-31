@@ -61,6 +61,15 @@ describe('booking schedule snapshot consumers', () => {
     expect(mocks.window).toHaveBeenCalledWith(expect.objectContaining(expected));
   });
 
+  it('declares the top-level schedule snapshot on the booking schema', async () => {
+    const actual = await vi.importActual<any>('../../../models/booking');
+    const schema = actual.default.schema;
+    // Mongoose creates the child paths, not a parent path for a nested object.
+    expect(schema.path('scheduleSnapshot.quantity')).toBeTruthy();
+    expect(schema.path('scheduleSnapshot.executionDuration.value')).toBeTruthy();
+    expect(schema.path('scheduleSnapshot.executionDuration.unit')).toBeTruthy();
+  });
+
   it('passes the frozen snapshot through admin dispute rescheduling', async () => {
     mocks.window.mockResolvedValue(null); // Stop at the real window boundary before any writes/providers.
     const res = response();

@@ -58,6 +58,14 @@ import { getCurrentTier } from "../../utils/loyaltySystem";
 const escapeSearchRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const SEARCH_BATCH_SIZE = 500;
+/**
+ * Upper bound on the in-memory candidate set. Facet counts, rating filters and
+ * date windows need the whole matching set, but an unbounded load makes a
+ * public endpoint scale linearly with the catalogue. Above this bound the
+ * response is truncated (with a warning), matching the earlier PROJECT_CAP
+ * behaviour.
+ */
+const SEARCH_FULL_SET_CAP = 2000;
 const aggregateProjectRatingsInBatches = async (ids: any[]) => {
   const ratings = new Map<string, { avgRating: number; totalReviews: number }>();
   for (let index = 0; index < ids.length; index += SEARCH_BATCH_SIZE) {
@@ -143,8 +151,10 @@ export const search = async (req: Request, res: Response) => {
     let loyaltyMaxValue: number | undefined;
     if (type === "projects" && (priceMinBound.value !== undefined || priceMaxBound.value !== undefined) && req.user?.role === "customer") {
       const config = await LoyaltyConfig.getCurrentConfig();
-      const tiers = config.tiers.filter(tier => tier.isActive !== false);
-      if (tiers.length > 0) {
+      const tiers = (config.tiers || []).filter(tier => tier.isActive !== false);
+      // Match checkout: a disabled program or a missing tier list grants no
+      // discount, and a missing config must not 500 the public route.
+      if (config.globalSettings?.isEnabled && tiers.length > 0) {
         const preferred = req.user.manualCustomerLevelOverride || req.user.loyaltyLevel;
         const tier = tiers.find(tier => tier.name === preferred) || getCurrentTier(tiers, req.user.totalSpent || 0);
         loyaltyPercentValue = tier.discountPercentage || 0;
@@ -683,6 +693,7 @@ async function searchProjects(
       } else {
         geoPipeline.push({ $sort: { createdAt: -1, _id: 1 } });
       }
+      geoPipeline.push({ $limit: SEARCH_FULL_SET_CAP });
 
       geoPipeline.push({
         $project: {
@@ -710,6 +721,8 @@ async function searchProjects(
       projects = await Project.aggregate([
         { $match: filter },
         ...eligibleProjectOwnerStages(),
+        { $sort: { createdAt: -1, _id: 1 } },
+        { $limit: SEARCH_FULL_SET_CAP },
       ]);
       total = projects.length;
       // Performance warning: location filtering loads all projects into memory
@@ -724,6 +737,7 @@ async function searchProjects(
         { $match: filter },
         ...eligibleProjectOwnerStages(),
         { $sort: { createdAt: -1, _id: 1 } },
+        { $limit: SEARCH_FULL_SET_CAP },
       ]);
       total = projects.length;
     } else {
@@ -780,6 +794,18 @@ async function searchProjects(
     }
 
     let locationCandidates: any[] = filteredResults ?? projects;
+    if (locationCandidates.length >= SEARCH_FULL_SET_CAP) {
+      console.warn(
+        `[Search Performance] Candidate set hit the ${SEARCH_FULL_SET_CAP}-project cap; ` +
+        `facets and totals are truncated. Narrow the filters or move facets into an aggregation.`
+      );
+    }
+    // Apply the cheap in-memory dimension/price filters before the schedule
+    // step: a date-window search must not compute proposals for projects that
+    // can never match.
+    let dimensionCandidates = locationCandidates.filter((project: any) =>
+      projectMatchesDimensions(project, dimensions)
+    );
     const locationProfessionalIds = Array.from(new Set(locationCandidates.map((project: any) => toObjectIdString(project.professionalId)).filter(Boolean)));
     const professionalsData: any[] = [];
     for (let index = 0; index < locationProfessionalIds.length; index += SEARCH_BATCH_SIZE) {
@@ -793,8 +819,14 @@ async function searchProjects(
 
     if (startDateFrom || startDateTo) {
       const hasDateWindow = true;
+      if (dimensionCandidates.length > SEARCH_FULL_SET_CAP) {
+        console.warn(
+          `[Search Performance] Date-window search truncated to ${SEARCH_FULL_SET_CAP} candidates.`
+        );
+        dimensionCandidates = dimensionCandidates.slice(0, SEARCH_FULL_SET_CAP);
+      }
       const chunks: any[][] = [];
-      for (let index = 0; index < locationCandidates.length; index += 8) chunks.push(locationCandidates.slice(index, index + 8));
+      for (let index = 0; index < dimensionCandidates.length; index += 8) chunks.push(dimensionCandidates.slice(index, index + 8));
       for (const chunk of chunks) {
         await Promise.all(chunk.map(async (project: any) => {
           const professionalId = toObjectIdString(project.professionalId);
@@ -831,10 +863,12 @@ async function searchProjects(
           }
         }));
       }
-      locationCandidates = locationCandidates.filter((project: any) => scheduleResults.get(project._id.toString())?.matchesWindow);
+      dimensionCandidates = dimensionCandidates.filter(
+        (project: any) => scheduleResults.get(project._id.toString())?.matchesWindow
+      );
     }
 
-    const candidateResults = locationCandidates.filter((project: any) => projectMatchesDimensions(project, dimensions));
+    const candidateResults = dimensionCandidates;
     let baseResults: any[] = candidateResults;
     let projectRatingMap: Map<string, { avgRating: number; totalReviews: number }> | null = null;
 
