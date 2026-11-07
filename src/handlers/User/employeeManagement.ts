@@ -290,7 +290,12 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
             success: true,
             data: {
                 employees: employeesWithBookingBlocks,
-                totalCount: employees.length
+                totalCount: employees.length,
+                // Company closures (client bug list #21): the professional's
+                // employee-availability calendar reads this source, so closures
+                // are exposed here for the UI to render on every employee.
+                companyBlockedDates: professional.companyBlockedDates || [],
+                companyBlockedRanges: professional.companyBlockedRanges || []
             }
         });
 

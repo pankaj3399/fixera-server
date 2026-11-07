@@ -39,7 +39,7 @@ describe('booking schedule snapshot consumers', () => {
     mocks.project = { _id: projectId, status: 'published', professionalId, distance: { countryCode: 'BE' }, resources: [professionalId], extraOptions: [],
       subprojects: [{ pricing: { type: 'unit', amount: 10, unit: 'm2', minOrderQuantity: 1, durationBasis: 'per_unit' }, executionDuration: { value: 99, unit: 'days' } }] };
     mocks.booking = { _id: new Types.ObjectId(), project: projectId, selectedSubprojectIndex: 0, customerBlocks: {},
-      scheduleSnapshot: { quantity: 6, executionDuration: { value: 12, unit: 'days' } }, status: 'disputed', dispute: { type: 'reschedule', raisedAt: new Date() } };
+      scheduleSnapshot: { quantity: 6, executionDuration: { value: 12, unit: 'days' } }, status: 'dispute', dispute: { type: 'reschedule', raisedAt: new Date(), raisedBy: customerId, reason: 'Move the start date' } };
     mocks.validate.mockResolvedValue({ valid: true });
     mocks.window.mockResolvedValue({ scheduledStartDate: new Date('2027-01-10'), scheduledExecutionEndDate: new Date('2027-01-22') });
   });

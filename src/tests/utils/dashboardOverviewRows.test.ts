@@ -52,6 +52,21 @@ describe("shared bookings overview rows", () => {
     expect(row.actualEnd).toBeNull();
   });
 
+  it("ends the planned window at the execution end, never the buffer end (client bug list #22c)", () => {
+    const row = buildSharedBookingsRow({
+      _id: "b1",
+      bookingNumber: "BK-2026-000110",
+      status: "booked",
+      scheduledStartDate: new Date("2026-11-02T00:00:00.000Z"),
+      scheduledExecutionEndDate: new Date("2026-11-03T00:00:00.000Z"),
+      scheduledBufferEndDate: new Date("2026-11-06T00:00:00.000Z"),
+      payment: { totalWithVat: 1210, currency: "EUR" },
+    }, "customer");
+    // The timeline/duration frontend must consume plannedEnd (execution),
+    // not the buffer/delivery window end.
+    expect(row.plannedEnd).toBe(new Date("2026-11-03T00:00:00.000Z").toISOString());
+  });
+
   it("keeps pro payout fields for professionals but strips them for customers", () => {
     const booking = {
       _id: "b1",

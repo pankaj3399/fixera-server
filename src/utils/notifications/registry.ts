@@ -31,6 +31,9 @@ import {
   sendWarrantyClaimOpenedProfessionalPartyEmail,
   sendWarrantyClaimOpenedAdminEmail,
   sendWarrantyProposalSentEmail,
+  sendWarrantyProposalDeclinedEmail,
+  sendLoyaltyTierUpEmail,
+  sendProfessionalLevelUpEmail,
   sendRfqDeadlineReminderEmail,
   sendRfqDeadlineExpiredProfessionalEmail,
   sendRfqDeadlineExpiredCustomerEmail,
@@ -38,6 +41,7 @@ import {
   sendRefundCounterOfferEmail,
   sendRefundEscalatedEmail,
   sendRefundDeniedEmail,
+  sendMilestonePaymentDueEmail,
   sendChatMirrorEmail,
   sendUnfinishedCheckoutEmail,
   sendPaymentFailedEmail,
@@ -81,8 +85,12 @@ export interface NotifyContext {
   isPartialRefund?: boolean;
   resolution?: string;
   adjustedAmount?: number;
+  milestoneTitle?: string;
+  milestoneAmount?: number;
+  milestoneOrder?: number;
   claimNumber?: string;
   warrantyMessage?: string;
+  clarification?: string;
   daysRemaining?: number;
   requesterName?: string;
   requesterRole?: 'customer' | 'professional';
@@ -279,7 +287,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Request declined',
       body: ctx.professionalName
         ? `${ctx.professionalName} declined your request${ctx.reason ? `: ${ctx.reason}` : '.'}`
-        : 'Your booking request was declined.',
+        : 'Your quotation request was declined.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
       sendEmail: async ({ email, name }) =>
         sendRfqRejectedEmail(
@@ -357,6 +365,29 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     }),
     'booking',
   ),
+  'customer.milestone_payment_due': def(
+    'customer.milestone_payment_due',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Milestone payment due',
+      body: ctx.milestoneTitle
+        ? `A new milestone payment is due for your booking: "${ctx.milestoneTitle}".`
+        : 'A new milestone payment is due for your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}/payment`),
+      sendEmail: async ({ email, name }) =>
+        sendMilestonePaymentDueEmail(
+          email,
+          name,
+          String(ctx.bookingId || ''),
+          String(ctx.milestoneTitle || 'Upcoming milestone'),
+          typeof ctx.milestoneAmount === 'number' ? ctx.milestoneAmount : undefined,
+          String(ctx.currency || 'EUR'),
+        ),
+    }),
+    'booking',
+  ),
   'customer.rfq_accepted': def(
     'customer.rfq_accepted',
     'booking_updates',
@@ -365,8 +396,8 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     (ctx) => ({
       title: 'Request accepted',
       body: ctx.professionalName
-        ? `${ctx.professionalName} accepted your booking request.`
-        : 'Your booking request was accepted.',
+        ? `${ctx.professionalName} accepted your quotation request.`
+        : 'Your quotation request was accepted.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
       sendEmail: async ({ email, name }) =>
         sendRfqAcceptedEmail(
@@ -585,6 +616,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
           ctx.newDate,
           String(ctx.reason || ''),
           String(ctx.bookingId || ''),
+          typeof ctx.description === 'string' ? ctx.description : undefined,
         ),
     }),
     'booking',
@@ -834,6 +866,8 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
         ? `Congratulations — you reached ${ctx.levelName}.`
         : 'Congratulations — you reached a new loyalty tier.',
       clickUrl: frontend('/dashboard/benefits'),
+      sendEmail: async ({ email, name }) =>
+        sendLoyaltyTierUpEmail(email, name, String(ctx.levelName || 'a new tier')),
     }),
     'user',
   ),
@@ -930,10 +964,10 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'email_always',
     'professional',
     (ctx) => ({
-      title: 'New booking request',
+      title: 'New quotation request',
       body: ctx.customerName
-        ? `${ctx.customerName} sent you a new booking request.`
-        : 'You received a new booking request.',
+        ? `${ctx.customerName} sent you a new quotation request.`
+        : 'You received a new quotation request.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
       sendEmail: async ({ email, name }) =>
         sendRfqReceivedEmail(
@@ -953,7 +987,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'professional',
     (ctx) => ({
       title: 'Reminder: respond to request',
-      body: 'A booking request is still waiting for your accept or reject.',
+      body: 'A quotation request is still waiting for your accept or reject.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
     }),
     'booking',
@@ -1018,6 +1052,20 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
           typeof ctx.amount === 'number' ? ctx.amount : undefined,
           String(ctx.currency || 'EUR'),
         ),
+    }),
+    'booking',
+  ),
+  'professional.milestone_payment_due': def(
+    'professional.milestone_payment_due',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Milestone payment pending',
+      body: ctx.milestoneTitle
+        ? `The milestone "${ctx.milestoneTitle}" is awaiting the customer payment.`
+        : 'A milestone payment is awaiting the customer payment.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
     }),
     'booking',
   ),
@@ -1146,6 +1194,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
           ctx.newDate,
           String(ctx.reason || ''),
           String(ctx.bookingId || ''),
+          typeof ctx.description === 'string' ? ctx.description : undefined,
         ),
     }),
     'booking',
@@ -1288,6 +1337,29 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     }),
     'booking',
   ),
+  'professional.warranty_proposal_declined': def(
+    'professional.warranty_proposal_declined',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Warranty proposal declined',
+      body: ctx.customerName
+        ? `${ctx.customerName} declined your warranty proposal${ctx.clarification ? `: ${String(ctx.clarification)}` : '.'}`
+        : 'Your warranty proposal was declined and escalated to Fixtract.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendWarrantyProposalDeclinedEmail({
+          professionalEmail: email,
+          professionalName: name,
+          customerName: String(ctx.customerName || 'The customer'),
+          claimNumber: String(ctx.claimNumber || ''),
+          bookingId: String(ctx.bookingId || ''),
+          clarification: String(ctx.clarification || ''),
+        }),
+    }),
+    'booking',
+  ),
   'professional.rfq_deadline_reminder': def(
     'professional.rfq_deadline_reminder',
     'booking_updates',
@@ -1426,6 +1498,8 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
         ? `Congratulations — you reached ${ctx.levelName}.`
         : 'Congratulations — you reached a new professional level.',
       clickUrl: frontend('/dashboard/benefits'),
+      sendEmail: async ({ email, name }) =>
+        sendProfessionalLevelUpEmail(email, name, String(ctx.levelName || 'a new level')),
     }),
     'user',
   ),

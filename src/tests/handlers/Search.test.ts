@@ -41,6 +41,9 @@ vi.mock("../../models/project", () => {
       .map((person) => String(person._id)),
   );
   const runPipeline = (pipeline: any[]) => {
+    // $geoNear cannot be emulated in memory; an unhandled geo pipeline behaves
+    // like an empty result so the handler's address fallback is exercised.
+    if (pipeline.some((stage) => stage.$geoNear)) return [];
     let rows = [...mocks.projects];
     const eligible = eligibleOwners();
     for (const stage of pipeline) {
@@ -84,6 +87,7 @@ vi.mock("../../models/loyaltyConfig", () => ({ default: { getCurrentConfig: asyn
 ] }) } }));
 vi.mock("../../models/platformSettings", () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: mocks.commission }) } }));
 vi.mock("../../utils/scheduleEngine", () => ({
+  resolveEffectiveScheduleTimeZone: vi.fn((professional: any) => professional?.businessInfo?.timezone || "UTC"),
   buildProjectScheduleProposalsWithData: vi.fn(async (project: any, professional: any, subprojectIndex: number | undefined, durationOverride: any, _exclude: any, quantity: number) => {
     mocks.scheduleCalls.push({ project, professional, subprojectIndex, durationOverride, quantity });
     return { earliestBookableDate: mocks.schedules.get(project._id.toString()) || "2026-11-03T09:00:00.000Z" };
@@ -320,5 +324,112 @@ describe("project search handler", () => {
     expect(invalidPrice.status).toHaveBeenCalledWith(400);
     const invalidRange = await execute({ startDateFrom: "2026-10-20", startDateTo: "2026-10-19" });
     expect(invalidRange.status).toHaveBeenCalledWith(400);
+  });
+
+  it("finds a 10km project on the same street when it has no geocoded location (geo address fallback)", async () => {
+    // $geoNear cannot see projects without distance.location; the handler
+    // falls back to address matching for them (client bug list #20).
+    vi.mocked(Project.aggregate).mockResolvedValueOnce([]);
+    const unlocated = project("507f1f77bcf86cd799439081", {
+      distance: { address: "Rue de la Loi 1, 1000 Bruxelles, Belgium", maxKmRange: 10 },
+    });
+    delete (unlocated as any).distance.location;
+    mocks.projects = [unlocated];
+    const response = await execute({
+      loc: "Rue de la Loi 1",
+      customerCity: "Bruxelles",
+      customerCountry: "belgium",
+      customerLat: "50.8466",
+      customerLon: "4.3523",
+    });
+    const body = response.json.mock.calls[0][0];
+    expect(body.pagination.total).toBe(1);
+    expect(body.results[0]._id.toString()).toBe("507f1f77bcf86cd799439081");
+  });
+
+  it("builds a crash-safe radius expression for the geo search", async () => {
+    vi.mocked(Project.aggregate).mockResolvedValueOnce([]);
+    mocks.projects = [];
+    await execute({
+      loc: "Rue de la Loi 1",
+      customerCountry: "belgium",
+      customerLat: "50.8466",
+      customerLon: "4.3523",
+    });
+    const pipeline = vi.mocked(Project.aggregate).mock.calls.find(([stages]: any) => stages.some((stage: any) => stage.$geoNear))![0] as any[];
+    const radiusStage = pipeline.find((stage) => stage?.$match?.$expr?.$lte);
+    // $convert keeps a non-numeric maxKmRange from failing the whole search.
+    expect(JSON.stringify(radiusStage)).toContain("$convert");
+    expect(JSON.stringify(radiusStage)).toContain('"onError":null');
+  });
+
+  it("matches noBorders country codes from customer country names", async () => {
+    vi.mocked(Project.aggregate).mockResolvedValueOnce([]);
+    mocks.projects = [];
+    await execute({
+      loc: "Bruxelles",
+      customerCountry: "belgium",
+      customerLat: "50.8466",
+      customerLon: "4.3523",
+    });
+    const pipeline = vi.mocked(Project.aggregate).mock.calls.find(([stages]: any) => stages.some((stage: any) => stage.$geoNear))![0] as any[];
+    const countryStage = pipeline.find((stage) =>
+      JSON.stringify(stage).includes("distance.noBorders")
+    );
+    // "belgium" must also match projects storing ISO code "BE".
+    expect(JSON.stringify(countryStage)).toContain('"BE"');
+  });
+
+  it("keeps noBorders projects with a country code in the non-geo address filter", async () => {
+    mocks.projects = [
+      project("507f1f77bcf86cd799439082", {
+        distance: { address: "Rue de la Loi 1, 1000 Bruxelles", countryCode: "BE", noBorders: true, maxKmRange: 10 },
+      }),
+    ];
+    const response = await execute({ loc: "Rue de la Loi 1", customerCountry: "belgium" });
+    const body = response.json.mock.calls[0][0];
+    expect(body.pagination.total).toBe(1);
+    expect(body.results[0]._id.toString()).toBe("507f1f77bcf86cd799439082");
+  });
+
+  it.each([{ deletedAt: new Date() }, { isAnonymized: true }])('excludes ineligible owners in the unlocated geo fallback: %s', async flags => {
+    Object.assign(mocks.professionals[0], flags);
+    mocks.projects = [project('507f1f77bcf86cd799439084', {
+      distance: { address: 'Rue de la Loi 1, Bruxelles, Belgium', maxKmRange: 10 },
+    })];
+    const response = await execute({ loc: 'Rue de la Loi 1', customerCountry: 'belgium', customerLat: '50.8466', customerLon: '4.3523' });
+    expect(response.json.mock.calls[0][0].pagination.total).toBe(0);
+    const fallback = vi.mocked(Project.aggregate).mock.calls.find(([stages]: any) =>
+      !stages.some((stage: any) => stage.$geoNear) && JSON.stringify(stages).includes('distance.location'));
+    expect(fallback).toBeDefined();
+    expect(JSON.stringify(fallback)).toContain('eligibleOwner.0');
+  });
+
+  it('does not treat a derived city as a street in the geo fallback', async () => {
+    mocks.projects = [project('507f1f77bcf86cd799439085', { distance: { address: 'Bruxelles, Belgium' } })];
+    const response = await execute({ customerCity: 'Bruxelles', customerCountry: 'Belgium', customerLat: '50.8466', customerLon: '4.3523' });
+    expect(response.json.mock.calls[0][0].pagination.total).toBe(0);
+  });
+
+  it("excludes location-less projects from the geo fallback without a street-level match", async () => {
+    vi.mocked(Project.aggregate).mockResolvedValueOnce([]);
+    mocks.projects = [
+      project("507f1f77bcf86cd799439083", {
+        distance: { address: "Rue de la Loi 1, 1000 Bruxelles, Belgium", maxKmRange: 10 },
+      }),
+    ];
+    // Coordinates only: no street-level part, so the unverifiable radius
+    // project stays excluded even though the city matches.
+    const coordsOnly = await execute({ customerLat: "50.8466", customerLon: "4.3523" });
+    expect(coordsOnly.json.mock.calls[0][0].pagination.total).toBe(0);
+    // A matching derived city alone is not enough: locationParts[0] (the
+    // typed location) must match for the fallback.
+    const cityOnly = await execute({
+      loc: "Antwerp",
+      customerCity: "Bruxelles",
+      customerLat: "50.8466",
+      customerLon: "4.3523",
+    });
+    expect(cityOnly.json.mock.calls[0][0].pagination.total).toBe(0);
   });
 });

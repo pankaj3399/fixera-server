@@ -21,19 +21,32 @@ const baseBooking = {
 };
 
 describe('booking calendar reservation keys', () => {
-  it('reserves only the assigned professional and employees, never unrelated users', () => {
-    expect(bookingCalendarMemberIds(baseBooking).sort()).toEqual([professionalId, employeeId]);
+  it('reserves only the attending resources, never uninvolved users (client bug list #24b)', () => {
+    // assignedTeamMembers=[employee] with no plan: only the employee attends,
+    // so the professional must not be blocked (no double booking).
+    expect(bookingCalendarMemberIds(baseBooking).sort()).toEqual([employeeId]);
     expect(bookingCalendarMemberIds(baseBooking)).not.toContain(unrelatedId);
 
     const keys = buildBookingCalendarKeys(baseBooking);
     expect(new Set(keys.map((key) => key.userId.toString()))).toEqual(
-      new Set([professionalId, employeeId]),
+      new Set([employeeId]),
     );
-    // 08:00-09:30 covers six 15-minute buckets per member.
-    expect(keys).toHaveLength(12);
+    // 08:00-09:30 covers six 15-minute buckets for the single attendee.
+    expect(keys).toHaveLength(6);
     expect(keys.map((key) => key.key)).toContain(
-      `professional:${professionalId}:2026-11-04T08:00:00.000Z`,
+      `professional:${employeeId}:2026-11-04T08:00:00.000Z`,
     );
+  });
+
+  it('falls back to the professional for legacy rows without attendees', () => {
+    const legacy = {
+      _id: baseBooking._id,
+      professional: new Types.ObjectId(professionalId),
+      scheduledStartDate: baseBooking.scheduledStartDate,
+      scheduledExecutionEndDate: baseBooking.scheduledExecutionEndDate,
+      scheduledBufferEndDate: baseBooking.scheduledBufferEndDate,
+    };
+    expect(bookingCalendarMemberIds(legacy)).toEqual([professionalId]);
   });
 
   it('uses the buffer end as the occupied interval and ignores incomplete schedules', () => {

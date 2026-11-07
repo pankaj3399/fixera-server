@@ -1,7 +1,9 @@
+import { retryPendingRefundInvoices } from '../refundFinalization';
 import Booking from '../../models/booking';
 import User from '../../models/user';
 import CancellationRequest from '../../models/cancellationRequest';
 import { notify } from './notify';
+import { notifyMilestonePaymentDue } from './milestonePaymentDue';
 import { daysAgo, hasUnpaidExtras, shouldSendReminder } from './reminderRules';
 import { processUnreadChatMirrorReminders } from './processUnreadChatMirrors';
 
@@ -14,6 +16,7 @@ export interface ReminderJobCounts {
   review: number;
   rfqPending: number;
   notStarted: number;
+  milestoneDue: number;
   unreadChat: number;
   idExpiry: number;
   errors: string[];
@@ -45,6 +48,7 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     review: 0,
     rfqPending: 0,
     notStarted: 0,
+    milestoneDue: 0,
     unreadChat: 0,
     idExpiry: 0,
     errors: [],
@@ -454,6 +458,22 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     counts.errors.push(`notStarted query: ${e?.message || e}`);
   }
 
+  try {
+    await retryPendingRefundInvoices(now);
+  } catch (error: any) {
+    counts.errors.push(`refundInvoices query: ${error?.message || error}`);
+  }
+
+  // --- Milestone payment due (payable but unpaid) ---
+  // Covers custom_date milestones whose due date passed and any transition the
+  // event-driven notifies missed. The per-milestone delivery key dedupes
+  // repeats, so each payable milestone notifies exactly once.
+  try {
+    await sweepMilestonePaymentDue(counts);
+  } catch (e: any) {
+    counts.errors.push(`milestoneDue query: ${e?.message || e}`);
+  }
+
   // --- Unread chat ≥ 24h (email mirror) ---
   try {
     const { sent, errors } = await processUnreadChatMirrorReminders();
@@ -511,4 +531,27 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
 
   console.log('[Notification Reminders] Done', counts);
   return counts;
+}
+
+
+/** Cursor pagination prevents already-notified early rows starving later bookings. */
+export async function sweepMilestonePaymentDue(counts: Pick<ReminderJobCounts, 'milestoneDue' | 'errors'>): Promise<void> {
+  let after: unknown;
+  while (true) {
+    const bookings = await Booking.find({
+      status: { $in: ['booked', 'in_progress', 'professional_completed'] },
+      milestonePayments: { $elemMatch: { status: { $ne: 'paid' } } },
+      ...(after ? { _id: { $gt: after } } : {}),
+    }).select('_id').sort({ _id: 1 }).limit(200);
+    if (bookings.length === 0) break;
+    for (const candidate of bookings) {
+      after = candidate._id;
+      try {
+        const result = await notifyMilestonePaymentDue(String(candidate._id), { notifyProfessional: true });
+        if (result.notified) counts.milestoneDue++;
+      } catch (e: any) {
+        counts.errors.push(`milestoneDue ${candidate._id}: ${e?.message || e}`);
+      }
+    }
+  }
 }

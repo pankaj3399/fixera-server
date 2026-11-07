@@ -28,6 +28,7 @@
     "migrate:professional-usernames": "npx tsx src/scripts/migrate/migrateProfessionalUsernames.ts",
     "migrate:team-member-to-employee": "npx tsx src/scripts/migrate/migrateTeamMemberToEmployee.ts",
     "migrate:employee-fields-cleanup": "npx tsx src/scripts/migrate/migrateEmployeeFieldsCleanup.ts",
+    "migrate:hour-mode-schedule-timezones": "npx tsx src/scripts/migrate/migrateHourModeScheduleTimeZones.ts",
     "migrate:drop-unique-phone-index": "npx tsx src/scripts/migrate/dropUniquePhoneIndex.ts",
     "migrate:merge-solar": "npx tsx src/scripts/fix/mergeDuplicateSolarServices.ts",
     "migrate:fix-conversation-indexes": "npx tsx src/scripts/fix/fixConversationIndexes.ts",

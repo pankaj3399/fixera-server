@@ -3,7 +3,7 @@ import { withReferralDiscount } from '../referralDiscount';
 import User from '../../models/user';
 import type { IQuoteCustomerTotals, IQuoteVersion } from '../../models/booking';
 import { calculateVatFromPricingLines } from '../vatLineCalculation';
-import { commissionedQuoteAmount } from '../customerPricing';
+import { commissionedPricingLines, commissionedQuoteAmount } from '../customerPricing';
 
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -39,25 +39,32 @@ export const buildQuoteCustomerTotals = (params: {
   );
 
   const customerNetAmount = params.discountBreakdown?.finalAmount ?? amountBeforeDiscounts;
-  const pricingLines = Array.isArray(params.pricingLines)
+  // VAT is calculated on the price AFTER commission is included: every
+  // pricing line is commissioned first, then VAT is allocated across the
+  // customer-facing lines by the same helper checkout uses.
+  const sourceLines = Array.isArray(params.pricingLines)
     ? params.pricingLines.filter((line) => finite(line?.price) != null && finite(line?.vatRate) != null)
     : [];
+  const commissionedLines =
+    sourceLines.length > 0
+      ? commissionedPricingLines(
+          sourceLines.map((line) => ({
+            description: line.description,
+            price: Number(line.price),
+            vatRate: Number(line.vatRate),
+            vatCountry: line.vatCountry,
+            vatLabel: line.vatLabel,
+          })),
+          amountBeforeDiscounts,
+          params.commissionPercent,
+        )
+      : [];
   const originalLineNet = roundMoney(
-    pricingLines.reduce((sum, line) => sum + Number(line.price), 0),
+    commissionedLines.reduce((sum, line) => sum + Number(line.price), 0),
   );
-  // `createPaymentIntent` only discounts line VAT when the customer amount is
-  // not larger than the recorded line net; otherwise VAT is calculated on the
-  // recorded lines and commission is added on top of net. Mirror that exact
-  // existing calculation rather than inventing a commission-inclusive VAT base.
-  const vatCalculation = pricingLines.length > 0
+  const vatCalculation = commissionedLines.length > 0
     ? calculateVatFromPricingLines(
-        pricingLines.map((line) => ({
-          description: line.description,
-          price: Number(line.price),
-          vatRate: Number(line.vatRate),
-          vatCountry: line.vatCountry,
-          vatLabel: line.vatLabel,
-        })),
+        commissionedLines,
         customerNetAmount <= originalLineNet ? customerNetAmount : undefined,
       )
     : null;
@@ -83,6 +90,11 @@ export const buildQuoteCustomerTotals = (params: {
     totals.vatRate = vatCalculation.vatRate;
     totals.totalWithVat = roundMoney(customerNetAmount + vatCalculation.vatAmount);
     totals.totalAmount = totals.totalWithVat;
+    totals.vatBreakdown = vatCalculation.vatBreakdown;
+    if (totals.discount) {
+      const beforeDiscount = calculateVatFromPricingLines(commissionedLines);
+      if (beforeDiscount) totals.discount.totalDiscountWithVat = roundMoney(beforeDiscount.total - totals.totalWithVat);
+    }
   }
   return totals;
 };

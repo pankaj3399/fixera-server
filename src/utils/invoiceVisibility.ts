@@ -24,6 +24,7 @@ const INTERNAL_PAYMENT_DIAGNOSTIC_FIELDS = [
   "extraCostTransferFailureReason",
   "extraCostRefundPending",
   "refundNotes",
+  "refundInvoiceRetryAt",
 ] as const;
 
 /**

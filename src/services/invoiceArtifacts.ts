@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
@@ -19,7 +19,9 @@ import { getInvoicePayment } from "../utils/invoiceSettlement";
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
+  effectiveVatRateForCredit,
   getCustomerExtraCostNet,
+  resolveExtraCostScale,
   type InvoiceAccountingLine,
 } from "../utils/invoiceAccounting";
 import {
@@ -29,6 +31,10 @@ import {
   type ManualInvoiceLine,
   type ManualInvoiceOverride,
 } from "./invoiceGenerator";
+import { invoiceRefundFacts, invoiceSettledServiceLines } from "../utils/invoiceSettlements";
+import type { InvoiceSettlementBasis, RefundCreditFact } from "../models/invoiceSettlement";
+import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
+import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
 import { isUserFacingError, UserFacingError } from "../utils/appErrors";
 import { safeErrorSummary } from "../utils/safeErrorLog";
@@ -99,6 +105,12 @@ export type ManualInvoiceCorrectionInput = ManualInvoiceOverride & {
   side: "customer" | "supplier";
   documentType: "invoice" | "credit_note";
   relatedInvoiceNumber?: string;
+  /**
+   * Render the override lines and totals verbatim (partial-refund credits).
+   * Without it the manual path rescales lines to the stored payment, which
+   * is only valid for corrections that restate the booked amounts.
+   */
+  exactAmounts?: boolean;
 };
 
 const escapeXml = (value: unknown): string =>
@@ -127,14 +139,18 @@ const hasSupplierInvoiceArtifacts = (payment: any) =>
 const hasInvoiceArtifacts = (payment: any) =>
   Boolean(hasCustomerInvoiceArtifacts(payment) && hasSupplierInvoiceArtifacts(payment));
 
-const hasCreditNoteArtifacts = (payment: any) =>
+const hasCustomerCreditArtifacts = (payment: any): boolean =>
   Boolean(
     payment?.creditNoteNumber &&
     payment?.creditNoteUrl &&
-    !String(payment.creditNoteNumber).startsWith("GENERATING-CN-") &&
-    payment?.supplierCreditNoteNumber &&
-    payment?.supplierCreditNoteUrl
+    !String(payment.creditNoteNumber).startsWith("GENERATING-CN-")
   );
+
+const hasSupplierCreditArtifacts = (payment: any): boolean =>
+  Boolean(payment?.supplierCreditNoteNumber && payment?.supplierCreditNoteUrl);
+
+const hasCreditNoteArtifacts = (payment: any) =>
+  Boolean(hasCustomerCreditArtifacts(payment) && hasSupplierCreditArtifacts(payment));
 
 const toInvoiceArtifactResult = (payment: any): InvoiceArtifactResult => ({
   invoiceNumber: payment.invoiceNumber,
@@ -199,8 +215,9 @@ const claimInvoiceGeneration = async (bookingId: string) =>
     { new: true }
   );
 
-const claimCreditNoteGeneration = async (bookingId: string) =>
-  Booking.findOneAndUpdate(
+const claimCreditNoteGeneration = async (bookingId: string) => {
+  const token = `GENERATING-CN-${Date.now()}-${randomUUID()}`;
+  const claimed = await Booking.findOneAndUpdate(
     {
       _id: bookingId,
       "payment.invoiceNumber": { $exists: true, $nin: [null, ""] },
@@ -208,12 +225,13 @@ const claimCreditNoteGeneration = async (bookingId: string) =>
         { "payment.creditNoteGenerationClaim": { $exists: false } },
         { "payment.creditNoteGenerationClaim": null },
         { "payment.creditNoteGenerationClaim": "" },
-        { "payment.creditNoteGenerationClaim": /^GENERATING-CN-/ },
       ],
     },
-    { $set: { "payment.creditNoteGenerationClaim": `GENERATING-CN-${Date.now()}` } },
+    { $set: { "payment.creditNoteGenerationClaim": token } },
     { new: true }
   );
+  return claimed ? token : null;
+};
 
 const clearInvoiceGenerationClaim = async (bookingId: string) => {
   await Booking.updateOne(
@@ -222,9 +240,9 @@ const clearInvoiceGenerationClaim = async (bookingId: string) => {
   );
 };
 
-const clearCreditNoteGenerationClaim = async (bookingId: string) => {
+const clearCreditNoteGenerationClaim = async (bookingId: string, token?: string) => {
   await Booking.updateOne(
-    { _id: bookingId, "payment.creditNoteGenerationClaim": /^GENERATING-CN-/ },
+    { _id: bookingId, "payment.creditNoteGenerationClaim": token || /^GENERATING-CN-/ },
     { $unset: { "payment.creditNoteGenerationClaim": "" } }
   );
 };
@@ -288,10 +306,12 @@ const releaseSupplierInvoiceGenerationClaim = async (
 
 /** Short TTL so a hung/background generation does not block admin retries for 15 minutes. */
 const GENERATION_CLAIM_TTL_MS = 60 * 1000;
+// Credit PDFs, XML uploads and dispatch can exceed a minute.
+export const CREDIT_GENERATION_CLAIM_TTL_MS = 15 * 60 * 1000;
 
 const parseGenerationClaimTimestamp = (value: string, prefix: string): number | null => {
   if (!value.startsWith(prefix)) return null;
-  const timestamp = Number(value.slice(prefix.length));
+  const timestamp = Number(value.slice(prefix.length).split("-")[0]);
   return Number.isFinite(timestamp) ? timestamp : null;
 };
 
@@ -299,7 +319,8 @@ const isStaleGenerationClaim = (value?: string | null, prefix = "GENERATING-"): 
   if (!value?.startsWith(prefix)) return false;
   const timestamp = parseGenerationClaimTimestamp(value, prefix);
   if (timestamp == null) return true;
-  return Date.now() - timestamp > GENERATION_CLAIM_TTL_MS;
+  return Date.now() - timestamp > (prefix === "GENERATING-CN-"
+    ? CREDIT_GENERATION_CLAIM_TTL_MS : GENERATION_CLAIM_TTL_MS);
 };
 
 const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
@@ -310,7 +331,7 @@ const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
     await clearInvoiceGenerationClaim(bookingId);
   }
   if (isStaleGenerationClaim(booking?.payment?.creditNoteGenerationClaim, "GENERATING-CN-")) {
-    await clearCreditNoteGenerationClaim(bookingId);
+    await clearCreditNoteGenerationClaim(bookingId, booking!.payment!.creditNoteGenerationClaim);
   }
   const staleSupplierClaim = booking?.payment?.supplierInvoiceGenerationClaim;
   if (isStaleSupplierGenerationClaim(staleSupplierClaim)) {
@@ -354,9 +375,11 @@ const persistPaymentArtifactUpdate = async (
   paymentId: string | undefined,
   update: Record<string, unknown>,
   historyEntry?: InvoiceArtifactHistoryEntry,
+  creditFact?: RefundCreditFact,
 ) => {
   const updateDocument: Record<string, unknown> = { $set: update };
   if (historyEntry) updateDocument.$push = { invoiceArtifactHistory: historyEntry };
+  if (creditFact) updateDocument.$push = { ...(updateDocument.$push as object), refundCreditLedger: creditFact };
   if (paymentId && mongoose.Types.ObjectId.isValid(paymentId)) {
     await Payment.findByIdAndUpdate(paymentId, updateDocument);
     return;
@@ -439,7 +462,17 @@ const getExtraCostLinesForUbl = (
   const targetTotal = customerSide
     ? Math.round((getCustomerExtraCostNet(booking.payment, rawTotal) + customerDiscount) * 100) / 100
     : rawTotal;
-  const scale = rawTotal > 0 ? targetTotal / rawTotal : 1;
+  // A dispute-resolved total (and a partial refund on the supplier side)
+  // scales the rendered lines away from the originally booked amounts.
+  const resolvedScale = resolveExtraCostScale(booking.extraCosts, booking.extraCostTotal);
+  const refundScale = customerSide
+    ? 1
+    : normalizeInvoiceBasis(
+        booking,
+        Number.isFinite(Number(booking.__commissionPercent)) ? Number(booking.__commissionPercent) : 0,
+      ).supplierScale;
+  const adjustedTarget = Math.round(targetTotal * resolvedScale * refundScale * 100) / 100;
+  const scale = rawTotal > 0 ? adjustedTarget / rawTotal : 1;
   // Charged per unit (see customerPricing): each line at its own customer
   // price, so unit lines keep whole-cent unit prices.
   const commissionPercent = Number(booking.__commissionPercent);
@@ -447,7 +480,7 @@ const getExtraCostLinesForUbl = (
     ? (booking.extraCosts || []).map((cost: any) => commissionedExtraCostAmount(cost, commissionPercent))
     : [];
   const chargedPerLine = perLine.length > 0
-    && Math.abs(Math.round(perLine.reduce((sum: number, amount: number) => sum + amount, 0) * 100) / 100 - targetTotal) < 0.005;
+    && Math.abs(Math.round(perLine.reduce((sum: number, amount: number) => sum + amount, 0) * 100) / 100 - adjustedTarget) < 0.005;
   const fallbackUnit = resolveInvoiceServiceUnit({
     checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
     subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
@@ -456,13 +489,14 @@ const getExtraCostLinesForUbl = (
       booking.checkoutSnapshot?.pricingType,
     pricingOptions: (booking as any).__serviceConfigPricingOptions,
   });
-  return (booking.extraCosts || []).map((cost: any, index: number) => {
+  const pricedLines: Array<UblLine | undefined> = (booking.extraCosts || [])
+    .map((cost: any, index: number): UblLine | undefined => {
     const price = chargedPerLine ? perLine[index] : Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
     const lineVatRate = reverseCharge ? 0 : vatRate;
     const units = getExtraCostQuantity(cost);
     const hasUnits = units != null;
     const unit = tryNormalizeInvoiceUnit(cost.unit) || fallbackUnit;
-    return {
+    const line: UblLine = {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: price,
       price,
@@ -476,7 +510,9 @@ const getExtraCostLinesForUbl = (
       // serializer would turn a fixed-price extra cost into "1 <unit>".
       ...(hasUnits && unit ? { unit } : {}),
     };
-  });
+    return Math.abs(line.amount) >= 0.005 ? line : undefined;
+    });
+  return pricedLines.filter((line): line is UblLine => Boolean(line));
 };
 
 const getSupplierVatContext = (booking: any, platform: UblPlatformParty): VatDecision => {
@@ -511,6 +547,12 @@ const getRawPricingLinesForUbl = (
 ): { lines: UblLine[]; totals: ReturnType<typeof calculateInvoiceSideTotals> } => {
   const currentQuote = getCurrentQuote(booking);
   const manualLines = Array.isArray(booking.__manualInvoiceLines) ? booking.__manualInvoiceLines : undefined;
+  const commissionPercent = Number.isFinite(Number(booking.__commissionPercent))
+    ? Number(booking.__commissionPercent)
+    : 0;
+  // Same basis as the PDF builder: milestone scope, recovered full discount,
+  // and any partial-refund reduction. Keeps both documents in lockstep.
+  const basis = normalizeInvoiceBasis(booking, commissionPercent);
   const supplierVat = options.selfBilling ? getSupplierVatContext(booking, options.platform) : null;
   const reverseCharge = options.selfBilling
     ? Boolean(supplierVat?.reverseCharge)
@@ -539,7 +581,24 @@ const getRawPricingLinesForUbl = (
     });
     return { lines, totals };
   }
-  let baseLines: UblLine[] = Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0 && !options.selfBilling
+  // Milestone bookings: the stored breakdown only covers the last charged
+  // milestone, so the full-scope quote pricing lines describe the service.
+  const preferQuoteLines = !options.selfBilling
+    && basis.useQuotePricingLines
+    && Array.isArray(currentQuote?.pricingLines)
+    && currentQuote.pricingLines.length > 0;
+  let baseLines: UblLine[] = basis.milestoneActive && !options.selfBilling
+    ? invoiceSettledServiceLines(booking).map(line => ({ ...line, price: line.amount }))
+    : preferQuoteLines
+    ? currentQuote.pricingLines.map((line: any) => ({
+      description: line.description,
+      amount: moneyNumber(line.price),
+      price: moneyNumber(line.price),
+      vatRate: moneyNumber(line.vatRate),
+      vatAmount: 0,
+      vatLabel: line.vatLabel,
+    }))
+    : Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0 && !options.selfBilling
     ? booking.payment.vatBreakdown.map((line: any) => ({
       description: line.description,
       amount: moneyNumber(line.netAmount),
@@ -564,20 +623,62 @@ const getRawPricingLinesForUbl = (
                 quoteAmount: booking.quote?.amount,
                 checkoutSnapshot: booking.checkoutSnapshot,
                 selectedExtraOptions: booking.selectedExtraOptions,
+                quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
               })
-            : moneyNumber(booking.payment?.netAmount ?? booking.payment?.amount),
+            : moneyNumber(basis.serviceNet > 0 ? basis.serviceNet : (booking.payment?.netAmount ?? booking.payment?.amount)),
           price: options.selfBilling
             ? calculateSupplierInvoiceNet({
                 quoteAmount: booking.quote?.amount,
                 checkoutSnapshot: booking.checkoutSnapshot,
                 selectedExtraOptions: booking.selectedExtraOptions,
+                quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
               })
-            : moneyNumber(booking.payment?.netAmount ?? booking.payment?.amount),
+            : moneyNumber(basis.serviceNet > 0 ? basis.serviceNet : (booking.payment?.netAmount ?? booking.payment?.amount)),
           vatRate,
           vatAmount: 0,
       }];
 
-  if (!options.selfBilling && !booking.payment?.vatBreakdown?.length && !currentQuote?.pricingLines?.length) {
+  const appendScaledOptions = (): void => {
+    const selectedOptions: UblLine[] = (booking.selectedExtraOptions || []).map((option: any, index: number) => {
+      const projectOption = booking.project?.extraOptions?.find((entry: any, entryIndex: number) =>
+        String(entry?._id || entryIndex) === String(option.extraOptionId) || String(entryIndex) === String(option.extraOptionId)
+      );
+      return {
+        description: `Option: ${projectOption?.name || option.name || option.extraOptionId || `Option ${index + 1}`}`,
+        amount: moneyNumber(option.bookedPrice),
+        price: moneyNumber(option.bookedPrice),
+        vatRate,
+        vatAmount: 0,
+      } as UblLine;
+    });
+    if (selectedOptions.length > 0) {
+      const supplierNetForScale = calculateSupplierInvoiceNet({
+        quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
+        checkoutSnapshot: booking.checkoutSnapshot,
+        selectedExtraOptions: booking.selectedExtraOptions,
+        repeatBuyerDiscount: basis.discount?.repeatBuyerAmount,
+        quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
+      });
+      const scale = supplierNetForScale > 0 ? moneyNumber(basis.serviceNet) / supplierNetForScale : 1;
+      baseLines = [
+        ...baseLines,
+        ...selectedOptions.map((line: UblLine) => ({
+          ...line,
+          amount: Math.round(line.amount * scale * 100) / 100,
+          price: Math.round(line.price * scale * 100) / 100,
+        })),
+      ];
+    }
+  };
+
+  if (!options.selfBilling && !basis.milestoneActive && preferQuoteLines) {
+    // Quote pricing lines never contain the selected options; append them
+    // scaled to the customer net like the no-lines fallback below does, so
+    // the plug line only carries the commission instead of the options too.
+    appendScaledOptions();
+  }
+
+  if (!options.selfBilling && !basis.milestoneActive && !preferQuoteLines && !booking.payment?.vatBreakdown?.length && !currentQuote?.pricingLines?.length) {
     const selectedOptions: UblLine[] = (booking.selectedExtraOptions || []).map((option: any, index: number) => {
       const projectOption = booking.project?.extraOptions?.find((entry: any, entryIndex: number) =>
         String(entry?._id || entryIndex) === String(option.extraOptionId) || String(entryIndex) === String(option.extraOptionId)
@@ -591,12 +692,13 @@ const getRawPricingLinesForUbl = (
       } as UblLine;
     });
     const rawOptionTotal = selectedOptions.reduce((sum: number, line: UblLine) => sum + line.amount, 0);
-    const supplierNet = calculateSupplierInvoiceNet({
+    const supplierNet = basis.supplierServiceNet ?? calculateSupplierInvoiceNet({
       quoteAmount: booking.quote?.amount,
       checkoutSnapshot: booking.checkoutSnapshot,
       selectedExtraOptions: booking.selectedExtraOptions,
+      quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
     });
-    const customerNet = moneyNumber(booking.payment?.netAmount ?? booking.payment?.amount);
+    const customerNet = moneyNumber(basis.serviceNet);
     const scale = supplierNet > 0 ? customerNet / supplierNet : 1;
     const scaledOptions = selectedOptions.map((line: UblLine) => ({
       ...line,
@@ -638,11 +740,15 @@ const getRawPricingLinesForUbl = (
   }
 
   if (options.selfBilling) {
-    const supplierNet = calculateSupplierInvoiceNet({
+    if (basis.milestoneActive && basis.supplierServiceNet == null) {
+      throw new Error("Cannot invoice milestone supplier amounts without recorded professional payouts.");
+    }
+    const supplierNet = basis.supplierServiceNet ?? calculateSupplierInvoiceNet({
       quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
       checkoutSnapshot: booking.checkoutSnapshot,
       selectedExtraOptions: booking.selectedExtraOptions,
-      repeatBuyerDiscount: booking.payment?.discount?.repeatBuyerAmount,
+      repeatBuyerDiscount: basis.discount?.repeatBuyerAmount,
+      quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
     });
     const selectedOptions = (booking.selectedExtraOptions || []).reduce(
       (sum: number, option: any) => sum + moneyNumber(option.bookedPrice),
@@ -658,8 +764,8 @@ const getRawPricingLinesForUbl = (
     });
     const serviceLine: UblLine = {
       description: booking.rfqData?.serviceType || currentQuote?.description || booking.quote?.description || "Service",
-      amount: Math.max(0, supplierNet - selectedOptions),
-      price: Math.max(0, supplierNet - selectedOptions),
+      amount: Math.max(0, Math.round((supplierNet - selectedOptions) * basis.supplierScale * 100) / 100),
+      price: Math.max(0, Math.round((supplierNet - selectedOptions) * basis.supplierScale * 100) / 100),
       vatRate,
       vatAmount: 0,
       quantity: booking.checkoutSnapshot?.pricingType === "unit" ? moneyNumber(booking.checkoutSnapshot.quantity) : undefined,
@@ -670,7 +776,7 @@ const getRawPricingLinesForUbl = (
       const projectOption = booking.project?.extraOptions?.find((entry: any, entryIndex: number) =>
         String(entry?._id || entryIndex) === String(option.extraOptionId) || String(entryIndex) === String(option.extraOptionId)
       );
-      const price = moneyNumber(option.bookedPrice);
+      const price = Math.round(moneyNumber(option.bookedPrice) * basis.supplierScale * 100) / 100;
       return {
         description: `Option: ${projectOption?.name || option.name || option.extraOptionId || `Option ${index + 1}`}`,
         amount: price,
@@ -684,8 +790,13 @@ const getRawPricingLinesForUbl = (
     return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
   }
 
+  if (basis.milestoneActive || basis.refund) {
+    baseLines = scaleLineItemsToTotal(baseLines, basis.serviceNet).map(line => ({ ...line, price: line.amount }));
+  }
   const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
-  const targetBaseNet = moneyNumber(booking.payment?.netAmount ?? baseNet);
+  const targetBaseNet = (basis.milestoneActive || basis.serviceNet > 0)
+    ? moneyNumber(basis.serviceNet)
+    : baseNet;
   if (Math.abs(targetBaseNet - baseNet) >= 0.01) {
     baseLines.push({
       description: targetBaseNet > baseNet ? "Platform commission" : "Payment discount adjustment",
@@ -695,25 +806,48 @@ const getRawPricingLinesForUbl = (
       vatAmount: 0,
     });
   }
-  const lines = withCustomerDiscountLines(booking, baseLines, vatRate, reverseCharge)
+  const serviceAndDiscountLines = withCustomerDiscountLines(booking, baseLines, vatRate, reverseCharge, basis.discount)
     ?? [...baseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true)];
+  // normalizeInvoiceBasis already deducts the refund. Keep its facts in the
+  // header note; another negative line would deduct it a second time.
+  const lines = serviceAndDiscountLines;
   const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: booking.payment?.vatLabel });
-  return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
+  const reconciledLines = lines.map(line => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 }));
+  if (booking.payment?.totalWithVat != null || basis.milestoneActive) {
+    const rawExtra = (booking.extraCosts || []).reduce((sum: number, cost: any) => sum + moneyNumber(cost.amount), 0);
+    const resolved = resolveExtraCostScale(booking.extraCosts, booking.extraCostTotal);
+    const extraNet = roundCreditMoney(getCustomerExtraCostNet(booking.payment, rawExtra) * resolved);
+    const extraGross = booking.payment?.extraCostAmount != null
+      ? roundCreditMoney(Number(booking.payment.extraCostAmount) * resolved)
+      : roundCreditMoney(extraNet * (1 + (reverseCharge ? 0 : vatRate) / 100));
+    totals.netAmount = roundCreditMoney(basis.serviceNet + extraNet);
+    totals.totalWithVat = roundCreditMoney(basis.serviceTotal + extraGross);
+    totals.vatAmount = roundCreditMoney(totals.totalWithVat - totals.netAmount);
+    // Keep independently rounded settlement VAT, rather than recalculating
+    // it from an aggregate and silently losing a cent across installments.
+    const vatDelta = roundCreditMoney(totals.vatAmount - reconciledLines.reduce((sum, line) => sum + line.vatAmount, 0));
+    if (reconciledLines.length && vatDelta) reconciledLines[reconciledLines.length - 1].vatAmount =
+      roundCreditMoney(reconciledLines[reconciledLines.length - 1].vatAmount + vatDelta);
+  }
+  return { lines: reconciledLines, totals };
 };
 
 /**
  * Customer lines at their full price with the discounts on their own lines,
  * as on the Fixtract PDF. Folding a discount into the lines would make every
- * unit price a fraction of a cent again (e.g. (492.90 - 24.65) / 30). Only
- * when every line shares one VAT rate, so the VAT stays exactly the same.
+ * unit price a fraction of a cent again (e.g. (492.90 - 24.65) / 30). The
+ * discount is apportioned across the VAT rates present (largest remainder in
+ * cents), so every discount stays visible as its own line(s) and the VAT
+ * stays exactly the same as without the split.
  */
 const withCustomerDiscountLines = (
   booking: any,
   baseLines: UblLine[],
   vatRate: number,
   reverseCharge: boolean,
+  discountOverride?: any,
 ): UblLine[] | undefined => {
-  const discount = booking.payment?.discount || {};
+  const discount = discountOverride !== undefined ? discountOverride || {} : booking.payment?.discount || {};
   const serviceDiscounts = [
     { label: "Loyalty discount", amount: moneyNumber(discount.loyaltyAmount) },
     { label: "Repeat buyer discount", amount: moneyNumber(discount.repeatBuyerAmount) },
@@ -721,35 +855,87 @@ const withCustomerDiscountLines = (
     { label: "Points discount", amount: moneyNumber(discount.pointsDiscountAmount) },
     { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: moneyNumber(discount.codeDiscountAmount) },
   ].filter((entry) => entry.amount > 0);
-  const extraCostDiscount = Math.max(0, moneyNumber(booking.payment?.extraCostCustomerDiscount));
+  const extraCostDiscount = Math.round(Math.max(0, moneyNumber(booking.payment?.extraCostCustomerDiscount))
+    * resolveExtraCostScale(booking.extraCosts, booking.extraCostTotal) * 100) / 100;
   if (serviceDiscounts.length === 0 && extraCostDiscount === 0) return undefined;
-  const lineRate = reverseCharge ? 0 : vatRate;
-  if (baseLines.some((line) => (reverseCharge ? 0 : moneyNumber(line.vatRate ?? vatRate)) !== lineRate)) return undefined;
+  const lineRateOf = (line: UblLine): number =>
+    reverseCharge ? 0 : moneyNumber(line.vatRate ?? vatRate);
+  const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
+  if (!(baseNet > 0)) return undefined;
 
   const serviceDiscountTotal = Math.round(serviceDiscounts.reduce((sum, entry) => sum + entry.amount, 0) * 100) / 100;
-  const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
-  const fullBaseLines = serviceDiscountTotal > 0
-    ? scaleLineItemsToTotal(baseLines, Math.round((baseNet + serviceDiscountTotal) * 100) / 100)
-        .map((line) => ({ ...line, price: line.amount }))
-    : baseLines;
-  const discountLines: UblLine[] = [
-    ...serviceDiscounts.map((entry) => ({
-      ...entry,
-      amount: entry.label === "Loyalty discount"
-        ? Math.round((entry.amount + extraCostDiscount) * 100) / 100
-        : entry.amount,
-    })),
-    ...(extraCostDiscount > 0 && !serviceDiscounts.some((entry) => entry.label === "Loyalty discount")
-      ? [{ label: "Loyalty discount", amount: extraCostDiscount }]
-      : []),
-  ].map((entry) => ({
-    description: entry.label,
-    amount: -entry.amount,
-    price: -entry.amount,
-    vatRate: lineRate,
-    vatAmount: 0,
+  // Loyalty also carries the extra-cost loyalty reduction (as on the PDF);
+  // fold it into the loyalty label before splitting by rate.
+  const labels = serviceDiscounts.map((entry) => ({
+    ...entry,
+    amount: entry.label === "Loyalty discount"
+      ? Math.round((entry.amount + extraCostDiscount) * 100) / 100
+      : entry.amount,
   }));
+  if (serviceDiscounts.length === 0 && extraCostDiscount > 0) {
+    labels.push({ label: "Loyalty discount", amount: Math.round(extraCostDiscount * 100) / 100 });
+  }
+  const totalDiscount = Math.round(labels.reduce((sum, entry) => sum + entry.amount, 0) * 100) / 100;
+  if (!(totalDiscount > 0)) return undefined;
+
+  const distinctRates = [...new Set(baseLines.map(lineRateOf))].sort((a, b) => a - b);
+  // Apportion the discount across rates by base share (largest remainder).
+  // Service lines are grossed up by the service discount only, exactly as
+  // before; the extra-cost reduction lives in the extra-cost lines. Discount
+  // lines carry the full reduction (service + extra-cost part), so the lines
+  // always reconcile with the charged total.
+  const baseByRate = distinctRates.map((rate) =>
+    baseLines.filter((line) => lineRateOf(line) === rate).reduce((sum, line) => sum + line.amount, 0),
+  );
+  const serviceDiscountByRate = apportionByShare(serviceDiscountTotal, baseByRate);
+  const totalDiscountByRate = apportionByShare(totalDiscount, baseByRate);
+
+  const fullBaseLines: UblLine[] = [];
+  const discountLines: UblLine[] = [];
+  distinctRates.forEach((rate, rateIndex) => {
+    const group = baseLines.filter((line) => lineRateOf(line) === rate);
+    const grossUp = serviceDiscountByRate[rateIndex];
+    const rateDiscount = totalDiscountByRate[rateIndex];
+    const groupBase = baseByRate[rateIndex];
+    fullBaseLines.push(
+      ...(grossUp > 0 && groupBase > 0
+        ? scaleLineItemsToTotal(group, Math.round((groupBase + grossUp) * 100) / 100).map((line) => ({ ...line, price: line.amount }))
+        : group),
+    );
+    if (!(rateDiscount > 0)) return;
+    // Split each discount label by the same base shares (largest remainder).
+    const labelShares = apportionByShare(rateDiscount, labels.map((entry) => entry.amount));
+    labels.forEach((entry, labelIndex) => {
+      const share = labelShares[labelIndex];
+      if (!(share > 0)) return;
+      discountLines.push({
+        description: entry.label,
+        amount: -share,
+        price: -share,
+        vatRate: rate,
+        vatAmount: 0,
+      });
+    });
+  });
   return [...fullBaseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true, true), ...discountLines];
+};
+
+/** Split `total` across `weights` proportionally, in cents, largest remainder. */
+const apportionByShare = (total: number, weights: number[]): number[] => {
+  const totalCents = Math.round(total * 100);
+  const weightSum = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
+  if (!(totalCents > 0) || !(weightSum > 0)) return weights.map(() => 0);
+  const floors = weights.map((weight) => Math.floor((totalCents * Math.max(0, weight)) / weightSum));
+  let remainder = totalCents - floors.reduce((sum, cents) => sum + cents, 0);
+  const fractions = weights
+    .map((weight, index) => ({ index, frac: (totalCents * Math.max(0, weight)) / weightSum - floors[index] }))
+    .sort((a, b) => b.frac - a.frac);
+  for (const { index } of fractions) {
+    if (remainder <= 0) break;
+    floors[index] += 1;
+    remainder -= 1;
+  }
+  return floors.map((cents) => cents / 100);
 };
 
 const getPeppolLineItems = (pricing: { lines: UblLine[] }) => pricing.lines.map((line) => ({
@@ -759,6 +945,22 @@ const getPeppolLineItems = (pricing: { lines: UblLine[] }) => pricing.lines.map(
   quantity: line.quantity,
   unitPrice: line.unitPrice,
 }));
+
+/** Human-readable refund facts for the UBL header note (both invoice sides). */
+const describeRefundForUbl = (booking: any, currency: string): string | undefined => {
+  const refund = normalizeInvoiceBasis(
+    booking,
+    Number.isFinite(Number(booking?.__commissionPercent)) ? Number(booking.__commissionPercent) : 0,
+  ).refund;
+  if (!refund) return undefined;
+  return buildPartialRefundDescription({
+    amount: refund.amount,
+    currency,
+    date: refund.date,
+    reason: refund.reason,
+    description: refund.description,
+  });
+};
 
 const ublPartyXml = (
   tag: "AccountingSupplierParty" | "AccountingCustomerParty",
@@ -962,6 +1164,9 @@ export const buildUblInvoiceXml = (
   const pricing = getPricingLinesForUbl(booking, { selfBilling, platform: options?.platform || {} });
   const pricingLines = pricing.lines;
   const reverseCharge = pricing.totals.reverseCharge;
+  // Partial refunds are billed net of the refund; the note carries the refund
+  // date, amount, reason and description on both the FIX and the SUP document.
+  const refundNote = describeRefundForUbl(booking, currency);
   const parties = buildUblPartiesAndTotals(booking, currency, sign, pricingLines, reverseCharge, {
     selfBilling,
     platform: options?.platform,
@@ -1035,6 +1240,7 @@ const hydrateServiceConfigPricingOptions = async (booking: any) => {
 
 const loadBookingForInvoice = async (bookingId: string) => {
   const booking = await Booking.findById(bookingId)
+    .select("+paymentDiscountLedger +payment.invoiceSettlementBasis +payment.refundCreditLedger")
     .populate("customer")
     .populate("professional")
     .populate(
@@ -1044,10 +1250,12 @@ const loadBookingForInvoice = async (bookingId: string) => {
   await hydrateServiceConfigPricingOptions(booking);
   await hydrateSupplierVatDecision(booking);
   if (booking) {
-    try {
-      (booking as any).__commissionPercent = (await PlatformSettings.getCurrentConfig()).commissionPercent;
-    } catch {
-      // Extra costs then keep their proportional split.
+    const quote = getCurrentQuote(booking);
+    (booking as any).__commissionPercent = Number(quote?.customerTotals?.commissionPercent) || 0;
+    if (booking.milestonePayments?.length || booking.payment?.status === "partially_refunded") {
+      (booking as any).__settledPayments = await Payment.find({
+        booking: booking._id, status: { $in: ["completed", "partially_refunded", "refunded"] },
+      }).lean();
     }
   }
   return booking;
@@ -1372,6 +1580,8 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
   );
 
   const update: InvoiceArtifactResult = toInvoiceArtifactResult(existing.payment);
+  const invoiceSettlementBasis = { ...booking.payment.invoiceSettlementBasis,
+    supplier: recordedInvoiceSettlementBasis(booking, platform).supplier };
   update.supplierInvoiceNumber = supplierInvoice.invoiceNumber;
   update.supplierInvoiceUrl = supplierInvoiceUrl;
   update.supplierInvoiceUblUrl = supplierInvoiceUblUrl;
@@ -1383,6 +1593,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
     { _id: booking._id },
     {
       $set: {
+        "payment.invoiceSettlementBasis": invoiceSettlementBasis,
         "payment.supplierInvoiceNumber": update.supplierInvoiceNumber,
         "payment.supplierInvoiceUrl": update.supplierInvoiceUrl,
         "payment.supplierInvoiceUblUrl": update.supplierInvoiceUblUrl,
@@ -1393,6 +1604,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
     }
   );
   await persistPaymentArtifactUpdate(booking._id, paymentId, {
+    invoiceSettlementBasis,
     supplierInvoiceNumber: update.supplierInvoiceNumber,
     supplierInvoiceUrl: update.supplierInvoiceUrl,
     supplierInvoiceUblUrl: update.supplierInvoiceUblUrl,
@@ -1542,6 +1754,7 @@ export async function ensureBookingInvoiceArtifacts(
       `attachment; filename="${supplierInvoice.invoiceNumber}.xml"`
     );
 
+    const invoiceSettlementBasis = recordedInvoiceSettlementBasis(booking, platform);
     const update: InvoiceArtifactResult = {
       invoiceNumber: customerInvoice.invoiceNumber,
       invoiceUrl,
@@ -1563,6 +1776,7 @@ export async function ensureBookingInvoiceArtifacts(
       { _id: booking._id },
       {
         $set: {
+          "payment.invoiceSettlementBasis": invoiceSettlementBasis,
           "payment.invoiceNumber": update.invoiceNumber,
           "payment.invoiceUrl": update.invoiceUrl,
           "payment.invoiceUblUrl": update.invoiceUblUrl,
@@ -1578,7 +1792,7 @@ export async function ensureBookingInvoiceArtifacts(
         },
       }
     );
-    await persistPaymentArtifactUpdate(booking._id, paymentId, update);
+    await persistPaymentArtifactUpdate(booking._id, paymentId, { ...update, invoiceSettlementBasis });
 
     try {
       const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
@@ -2121,6 +2335,143 @@ export async function ensureCreditInvoiceArtifacts(
   }
 }
 
+const roundCreditMoney = (value: unknown): number =>
+  Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+
+/** Canonical one-line refund summary shared by the credit lines and UBL notes. */
+export const buildPartialRefundDescription = (args: {
+  amount: number;
+  currency: string;
+  date?: Date | string;
+  reason?: string;
+  description?: string;
+}): string => {
+  const date = args.date ? new Date(args.date) : undefined;
+  const dateLabel = date && !Number.isNaN(date.getTime())
+    ? ` on ${date.toISOString().slice(0, 10)}`
+    : "";
+  const reasonLabel = args.reason ? `: ${args.reason}` : "";
+  const descriptionLabel = args.description ? ` — ${args.description}` : "";
+  return `Partial refund of ${args.amount.toFixed(2)} ${args.currency}${dateLabel}${reasonLabel}${descriptionLabel}`;
+};
+
+/** Manual-correction input for one side of a partial-refund credit note. */
+export const buildPartialRefundCreditInput = (args: {
+  side: "customer" | "supplier";
+  net: number;
+  vat: number;
+  vatRate: number;
+  reverseCharge: boolean;
+  currency: string;
+  relatedInvoiceNumber: string;
+  description: string;
+}): ManualInvoiceCorrectionInput => ({
+  side: args.side,
+  documentType: "credit_note",
+  relatedInvoiceNumber: args.relatedInvoiceNumber,
+  lines: [{ description: args.description, amount: args.net, vatRate: args.vatRate }],
+  payment: {
+    netAmount: args.net,
+    vatAmount: args.vat,
+    vatRate: args.vatRate,
+    totalWithVat: roundCreditMoney(args.net + args.vat),
+    currency: args.currency,
+    reverseCharge: args.reverseCharge,
+  },
+  exactAmounts: true,
+});
+
+const recordedInvoiceSettlementBasis = (booking: any, platform: UblPlatformParty): InvoiceSettlementBasis => {
+  const refundAmount = normalizeInvoiceBasis(booking, 0).refund?.amount || 0;
+  const side = (selfBilling: boolean) => {
+    const totals = getPricingLinesForUbl(booking, { selfBilling, platform }).totals;
+    return { netAmount: totals.netAmount, vatAmount: totals.vatAmount, totalWithVat: totals.totalWithVat, refundAmount };
+  };
+  return { customer: side(false), supplier: side(true) };
+};
+
+/**
+ * Credit only refunds not yet represented by the issued invoice and credit
+ * ledger. Each side has its own durable refund-fact key, so a retry completes
+ * a half-finished pair and a later refund creates a new pair. Original
+ * artifacts remain in history; coverage and URLs are persisted atomically.
+ */
+export async function ensurePartialRefundCreditArtifacts(
+  bookingId: string,
+): Promise<"credited" | "generate" | "skip" | "busy"> {
+  await clearStaleGenerationClaimsIfNeeded(bookingId);
+  const existing = await Booking.findById(bookingId);
+  if (!existing?.payment || existing.payment.status !== "partially_refunded") return "skip";
+  if (!(Number(existing.payment.refundAmount) > 0)) return "skip";
+  if (!hasCustomerInvoiceArtifacts(existing.payment)) return "generate";
+  const claimed = await claimCreditNoteGeneration(bookingId);
+  if (!claimed) return "busy";
+  try {
+    const booking = await loadBookingForInvoice(bookingId);
+    if (!booking?.payment || booking.payment.status !== "partially_refunded") return "skip";
+    const platform = await getPlatformParty();
+    const facts = invoiceRefundFacts(booking);
+    const cumulativeRefund = roundCreditMoney(facts.reduce((sum, fact) => sum + fact.amount, 0));
+    const key = createHash("sha256").update(facts.map(fact => fact.key).sort().join("|")).digest("hex");
+    const current = recordedInvoiceSettlementBasis(booking, platform);
+    let issued = booking.payment.invoiceSettlementBasis;
+    const ledger = booking.payment.refundCreditLedger || [];
+    if (!issued) {
+      // Legacy invoices can be reconstructed only from their recorded payments
+      // and issue date. Existing credits without coverage metadata need an
+      // explicit reconciliation; guessing would issue duplicate money.
+      if (hasCustomerCreditArtifacts(booking.payment) || hasSupplierCreditArtifacts(booking.payment)) {
+        throw new Error("Existing refund credits lack recorded coverage; reconcile their amounts before issuing another credit.");
+      }
+      const issuedAt = booking.payment.invoiceGeneratedAt?.getTime?.();
+      const included = issuedAt ? roundCreditMoney(facts.filter(fact => fact.refundedAt
+        && new Date(fact.refundedAt).getTime() <= issuedAt).reduce((sum, fact) => sum + fact.amount, 0)) : 0;
+      const originalBooking = { ...(booking.toObject?.() || booking), __settledPayments: (booking as any).__settledPayments,
+        payment: { ...(booking.toObject?.() || booking).payment, refundAmount: included, status: included > 0 ? "partially_refunded" : "completed" } };
+      // The durable refund rows remain unchanged. Restrict this historical view
+      // to the facts represented at invoice issuance.
+      originalBooking.__settledPayments = originalBooking.__settledPayments?.map((payment: any) => ({ ...payment,
+        refunds: (payment.refunds || []).filter((fact: any) => issuedAt && new Date(fact.refundedAt).getTime() <= issuedAt) }));
+      issued = recordedInvoiceSettlementBasis(originalBooking, platform);
+      await Booking.updateOne({ _id: booking._id }, { $set: { "payment.invoiceSettlementBasis": issued } });
+    }
+    for (const side of ["customer", "supplier"] as const) {
+      const original = issued[side];
+      const remaining = current[side];
+      const relatedInvoiceNumber = side === "customer" ? booking.payment.invoiceNumber : booking.payment.supplierInvoiceNumber;
+      if (!original || !remaining || !relatedInvoiceNumber) continue;
+      const prior = ledger.filter(fact => fact.side === side);
+      const covered = prior.reduce((sum, fact) => sum + fact.refundAmount, 0);
+      const delta = roundCreditMoney(cumulativeRefund - original.refundAmount - covered);
+      if (delta < 0.01 || prior.some(fact => fact.key === key)) continue;
+      // Supplier credits use the VAT and amount on the ISSUED document,
+      // never a newly resolved supplier tax setting.
+      const refundShare = issued.customer?.totalWithVat
+        ? Math.min(1, Math.max(0, (cumulativeRefund - original.refundAmount) / issued.customer.totalWithVat)) : 0;
+      const targetNet = side === "supplier" ? roundCreditMoney(original.netAmount * refundShare) : original.netAmount - remaining.netAmount;
+      const targetVat = side === "supplier" ? roundCreditMoney(original.vatAmount * refundShare) : original.vatAmount - remaining.vatAmount;
+      const net = roundCreditMoney(targetNet - prior.reduce((sum, fact) => sum + fact.netAmount, 0));
+      const vat = roundCreditMoney(targetVat - prior.reduce((sum, fact) => sum + fact.vatAmount, 0));
+      if (side === "customer" && Math.abs(net + vat - delta) >= 0.005) {
+        throw new Error("Refund credit does not reconcile with the outstanding settled refund.");
+      }
+      if (net + vat < 0.005) continue;
+      const currency = booking.payment.currency || "EUR";
+      const description = buildPartialRefundDescription({ amount: delta, currency,
+        date: booking.payment.refundedAt, reason: booking.payment.refundReason,
+        description: booking.cancellation?.adminResolutionNote });
+      await createManualInvoiceArtifact(bookingId, undefined, buildPartialRefundCreditInput({
+        side, net, vat, vatRate: effectiveVatRateForCredit(net, vat, booking.payment.vatRate),
+        reverseCharge: vat === 0 && Boolean(side === "customer" ? booking.payment.reverseCharge : getSupplierVatContext(booking, platform).reverseCharge),
+        currency, relatedInvoiceNumber, description,
+      }), { key, side, refundAmount: delta, netAmount: net, vatAmount: vat, generationClaim: claimed });
+    }
+    return "credited";
+  } finally {
+    await clearCreditNoteGenerationClaim(bookingId, claimed);
+  }
+}
+
 const applyManualParty = (booking: any, input: ManualInvoiceCorrectionInput): any => {
   const partyBooking = applyManualInvoicePartyOverrides(booking, input);
   return {
@@ -2172,8 +2523,9 @@ const notifyManualArtifactReady = async (
 
 export async function createManualInvoiceArtifact(
   bookingId: string,
-  paymentId: string,
+  paymentId: string | undefined,
   input: ManualInvoiceCorrectionInput,
+  refundFact?: Pick<RefundCreditFact, "key" | "side" | "refundAmount" | "netAmount" | "vatAmount"> & { generationClaim?: string },
 ): Promise<Record<string, unknown>> {
   const booking = await loadBookingForInvoice(bookingId);
   if (!booking?.payment?.status) throw new Error("Booking payment was not found.");
@@ -2188,13 +2540,27 @@ export async function createManualInvoiceArtifact(
   const manualBooking = applyManualParty(booking, input);
   const generatedAt = new Date();
   const platform = await getPlatformParty();
+  const assertCreditClaim = async () => {
+    if (!refundFact) return;
+    const active = await Booking.findById(bookingId).select('payment.creditNoteGenerationClaim +payment.refundCreditLedger');
+    const token = active?.payment?.creditNoteGenerationClaim;
+    if (!refundFact.generationClaim || token !== refundFact.generationClaim
+      || isStaleGenerationClaim(token, 'GENERATING-CN-')
+      || active?.payment?.refundCreditLedger?.some(fact => fact.key === refundFact.key && fact.side === refundFact.side)) {
+      throw new Error('Refund credit generation claim expired or was already recorded.');
+    }
+  };
+  // Check after asynchronous setup, before reserving a FIX-CN/SUP-CN number.
+  await assertCreditClaim();
   const generated = await generateBookingInvoice(manualBooking as any, {
     kind: input.side === "supplier" ? "self_bill" : "customer",
     creditNote: input.documentType === "credit_note",
     relatedInvoiceNumber,
     manualOverride: input,
+    exactManualAmounts: input.exactAmounts,
   });
   const keyBase = `invoices/${booking._id.toString()}/manual/${generated.invoiceNumber}`;
+  await assertCreditClaim();
   const artifactUrl = await uploadBufferToS3(
     generated.pdfBuffer,
     `${keyBase}.pdf`,
@@ -2207,6 +2573,7 @@ export async function createManualInvoiceArtifact(
     selfBilling: input.side === "supplier",
     platform,
   });
+  await assertCreditClaim();
   const ublUrl = await uploadBufferToS3(
     Buffer.from(ublXml, "utf8"),
     `${keyBase}.xml`,
@@ -2214,37 +2581,9 @@ export async function createManualInvoiceArtifact(
     `attachment; filename="${generated.invoiceNumber}.xml"`,
   );
 
-  let peppolDispatchStatus = "skipped";
+  let peppolDispatchStatus = "queued";
   let peppolDispatchReason: string | undefined;
   let peppolDispatchReference: string | undefined;
-  try {
-    const pricing = getPricingLinesForUbl(manualBooking, {
-      selfBilling: input.side === "supplier",
-      platform,
-    });
-    const result = await maybeDispatchPeppolInvoice({
-      booking: manualBooking,
-      side: input.side,
-      invoiceNumber: generated.invoiceNumber,
-      ublXml,
-      invoiceUblUrl: ublUrl,
-      invoicePdf: generated.pdfBuffer,
-      issueDate: generatedAt,
-      documentType: input.documentType,
-      netAmount: pricing.totals.netAmount,
-      totalWithVat: pricing.totals.totalWithVat,
-      vatRate: pricing.totals.vatRate,
-      reverseCharge: pricing.totals.reverseCharge,
-      lineItems: getPeppolLineItems(pricing),
-    });
-    peppolDispatchStatus = result.status;
-    peppolDispatchReason = result.reason;
-    peppolDispatchReference = result.reference;
-  } catch (error) {
-    console.error(`[INVOICE] Manual ${input.documentType} Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
-    peppolDispatchStatus = "failed";
-    peppolDispatchReason = dispatchFailureReason(error);
-  }
 
   const isCustomer = input.side === "customer";
   const isCredit = input.documentType === "credit_note";
@@ -2335,8 +2674,62 @@ export async function createManualInvoiceArtifact(
     $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
   };
   if (historyEntry) bookingUpdate.$push = { "payment.invoiceArtifactHistory": historyEntry };
-  await Booking.updateOne({ _id: booking._id }, bookingUpdate);
-  await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry);
+  const creditFact = refundFact ? {
+    key: refundFact.key, side: refundFact.side, refundAmount: refundFact.refundAmount,
+    netAmount: refundFact.netAmount, vatAmount: refundFact.vatAmount,
+    invoiceNumber: generated.invoiceNumber, invoiceUrl: artifactUrl,
+    invoiceUblUrl: ublUrl, generatedAt,
+  } : undefined;
+  if (creditFact) bookingUpdate.$push = { ...(bookingUpdate.$push as object), "payment.refundCreditLedger": creditFact };
+  const artifactFilter: Record<string, unknown> = { _id: booking._id };
+  if (refundFact) {
+    artifactFilter["payment.creditNoteGenerationClaim"] = refundFact.generationClaim;
+    artifactFilter["payment.refundCreditLedger"] = { $not: { $elemMatch: { key: refundFact.key, side: refundFact.side } } };
+  }
+  const saved = await Booking.updateOne(artifactFilter, bookingUpdate);
+  if (refundFact && saved.modifiedCount === 0) throw new Error("Refund credit generation claim expired or was already recorded.");
+  await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry, creditFact);
+  try {
+    const pricing = getPricingLinesForUbl(manualBooking, {
+      selfBilling: input.side === "supplier",
+      platform,
+    });
+    const result = await maybeDispatchPeppolInvoice({
+      booking: manualBooking,
+      side: input.side,
+      invoiceNumber: generated.invoiceNumber,
+      ublXml,
+      invoiceUblUrl: ublUrl,
+      invoicePdf: generated.pdfBuffer,
+      issueDate: generatedAt,
+      documentType: input.documentType,
+      netAmount: pricing.totals.netAmount,
+      totalWithVat: pricing.totals.totalWithVat,
+      vatRate: pricing.totals.vatRate,
+      reverseCharge: pricing.totals.reverseCharge,
+      lineItems: getPeppolLineItems(pricing),
+    });
+    peppolDispatchStatus = result.status;
+    peppolDispatchReason = result.reason;
+    peppolDispatchReference = result.reference;
+  } catch (error) {
+    console.error(`[INVOICE] Manual ${input.documentType} Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
+    peppolDispatchStatus = "failed";
+    peppolDispatchReason = dispatchFailureReason(error);
+  }
+
+  const dispatchPrefix = isCredit ? (isCustomer ? "creditNote" : "supplierCreditNote") : (isCustomer ? "peppol" : "supplierPeppol");
+  const dispatchFields = isCredit ? {
+    [`${dispatchPrefix}PeppolDispatchStatus`]: peppolDispatchStatus,
+    [`${dispatchPrefix}PeppolDispatchReason`]: peppolDispatchReason,
+    [`${dispatchPrefix}PeppolDispatchReference`]: peppolDispatchReference,
+  } : {
+    [`${dispatchPrefix}DispatchStatus`]: peppolDispatchStatus,
+    [`${dispatchPrefix}DispatchReason`]: peppolDispatchReason,
+    [`${dispatchPrefix}DispatchReference`]: peppolDispatchReference,
+  };
+  await Booking.updateOne({ _id: booking._id }, { $set: Object.fromEntries(Object.entries(dispatchFields).map(([key, value]) => [`payment.${key}`, value])) });
+  await persistPaymentArtifactUpdate(booking._id, paymentId, dispatchFields);
   try {
     await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl, generated.pdfBuffer);
   } catch (notifyError) {

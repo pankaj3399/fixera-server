@@ -62,6 +62,7 @@ const REQUIRED_EVENT_KEYS = [
   'professional.refund_escalated',
   'professional.refund_denied',
   'professional.warranty_claim_opened',
+  'professional.warranty_proposal_declined',
   'professional.booking_cancelled_refunded',
   'professional.dispute_started',
   'professional.dispute_resolved',

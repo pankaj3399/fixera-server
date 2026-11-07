@@ -27,6 +27,7 @@ const stripeMocks = vi.hoisted(() => ({
   intentRetrieve: vi.fn(),
   intentCancel: vi.fn(),
   constructEvent: vi.fn(),
+  milestoneDue: vi.fn(async () => ({ notified: true })),
 }));
 
 vi.mock('../../services/stripe', () => ({
@@ -52,6 +53,8 @@ vi.mock('../../services/stripe', () => ({
   },
 }));
 
+vi.mock('../../utils/notifications/milestonePaymentDue', () => ({ notifyMilestonePaymentDue: stripeMocks.milestoneDue }));
+
 vi.mock('../../utils/notifications/bookingPaymentNotify', () => ({
   notifyBookingPaymentConfirmed: vi.fn(async () => undefined),
 }));
@@ -60,6 +63,7 @@ vi.mock('../../utils/notifications/notify', () => ({
   notifyAsync: vi.fn(),
 }));
 
+import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 import Referral from '../../models/referral';
 import ReferralConfig from '../../models/referralConfig';
 import { withReferralDiscount, releaseReferralReservation } from '../../utils/referralDiscount';
@@ -185,7 +189,7 @@ const readLedger = async (bookingId: any): Promise<any[]> => {
 
 describeDb('per-payment savings ledger (disposable Mongo)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!, { dbName: 'fixera_savings_ledger_test' });
+    await mongoose.connect(testUri!, { dbName: `ft3_savings_${process.pid}_${Date.now().toString(36)}`, autoCreate: false, autoIndex: false });
     await mongoose.connection.dropDatabase();
     await PlatformSettings.deleteMany({});
     // Loyalty/points configs default-create themselves attributed to an admin.
@@ -365,11 +369,22 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(first.payment!.discount!.codeDiscountAmount).toBe(5);
     expect(second.payment!.discount!.codeDiscountAmount).toBe(5);
     const { buildUblInvoiceXml } = await import('../../services/invoiceArtifacts');
+    // The full quotation invoice requires both settled checkouts and their
+    // durable snapshots, rather than extrapolating either installment.
+    second.payment!.status = 'completed';
+    second.milestonePayments![1].status = 'paid';
+    await second.save();
+    await recordPaymentDiscountSnapshot(String(booking._id), second.payment!, second.payment!.stripePaymentIntentId);
+    const settledPayments = [first.payment!, second.payment!].map(payment => ({
+      ...(payment as any).toObject?.() || payment, status: 'completed',
+    }));
+    const ledger = (await Booking.findById(booking._id).select('+paymentDiscountLedger'))!.paymentDiscountLedger;
+    const fullBookingTotal = (first.payment!.totalWithVat! + second.payment!.totalWithVat!).toFixed(2);
     for (const installment of [first, second]) {
       await installment.populate('customer professional');
-      const xml = buildUblInvoiceXml(installment.toObject(), 'FIX-MILESTONE', new Date(), { selfBilling: false, platform: { country: 'BE' } });
+      const xml = buildUblInvoiceXml({ ...installment.toObject(), __settledPayments: settledPayments, paymentDiscountLedger: ledger }, 'FIX-MILESTONE', new Date(), { selfBilling: false, platform: { country: 'BE' } });
       expect(xml).toContain('Referral discount');
-      expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${installment.payment!.totalWithVat!.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+      expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${fullBookingTotal}</cbc:TaxInclusiveAmount>`);
     }
   });
 
@@ -847,4 +862,34 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(await readLedger(booking._id)).toHaveLength(1);
   });
+
+  for (const path of ['updated', 'lost-update', 'already-settled']) {
+    it.each([false, true])(`retries milestone-due from ${path} independently of confirmation failure %s`, async fail => {
+      const booking = await seedMilestoneBooking();
+      const intentId = 'pi_retry_due';
+      const paid = path === 'already-settled';
+      await Booking.updateOne({ _id: booking._id }, { $set: { status: 'booked', payment: {
+        status: paid ? 'authorized' : 'pending', stripePaymentIntentId: intentId,
+        milestoneIndex: 0, amount: 100, totalWithVat: 121, currency: 'EUR',
+      }, 'milestonePayments.0.status': paid ? 'paid' : 'pending',
+        ...(paid ? { 'milestonePayments.0.paidStripePaymentIntentId': intentId } : {}),
+      } });
+      let race: ReturnType<typeof vi.spyOn> | undefined;
+      if (path === 'lost-update') {
+        const original = Booking.findOneAndUpdate.bind(Booking);
+        race = vi.spyOn(Booking, 'findOneAndUpdate').mockImplementationOnce((async (...args: any[]) => {
+          await (original as any)(...args);
+          return null;
+        }) as any);
+      }
+      if (fail) vi.mocked(notifyBookingPaymentConfirmed).mockRejectedValueOnce(new Error('confirmation delivery failed'));
+      stripeMocks.milestoneDue.mockClear();
+      try {
+        const res = await deliverEvent(succeededEvent(String(booking._id), intentId));
+        expect(res.statusCode).toBe(fail ? 500 : 200);
+        expect(stripeMocks.milestoneDue).toHaveBeenCalledWith(String(booking._id));
+      } finally { race?.mockRestore(); }
+    });
+  }
+
 });

@@ -1302,16 +1302,17 @@ export const sendBookingNotificationEmail = async (
     const safeCustomerName = escapeHtml(customerName);
     const safeProjectTitle = escapeHtml(projectTitle);
     const safePreferredDate = escapeHtml(preferredDate);
+    const bookingLink = buildBookingLink(bookingId);
 
     const emailContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        ${getEmailHeader("New Booking Request! 🎉")}
+        ${getEmailHeader("New Quotation Request! 🎉")}
 
         <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
           <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${safeProfessionalName}!</h2>
 
           <p style="color: #666; line-height: 1.6; margin-bottom: 25px;">
-            You've received a new booking request for your project "<strong>${safeProjectTitle}</strong>"!
+            You've received a new quotation request for your project "<strong>${safeProjectTitle}</strong>"!
           </p>
 
           <div style="background: #e8f5e8; border: 2px solid #4CAF50; border-radius: 8px; padding: 20px; margin: 25px 0;">
@@ -1332,9 +1333,9 @@ export const sendBookingNotificationEmail = async (
           </div>
 
           <div style="text-align: center; margin: 30px 0;">
-            <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard"
+            <a href="${bookingLink}"
                style="background: #667eea; color: white; padding: 15px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 16px;">
-              View Booking Request
+              View Quotation Request
             </a>
           </div>
 
@@ -1360,7 +1361,7 @@ export const sendBookingNotificationEmail = async (
     const emailAPI = createEmailAPI();
     const sendSmtpEmail = new SendSmtpEmail();
     sendSmtpEmail.to = [{ email: professionalEmail }];
-    sendSmtpEmail.subject = "🎉 New Booking Request for Your Project!";
+    sendSmtpEmail.subject = "🎉 New Quotation Request for Your Project!";
     sendSmtpEmail.htmlContent = emailContent;
     sendSmtpEmail.sender = {
       name: "Fixtract Team",
@@ -2064,6 +2065,58 @@ export const sendPaymentFailedEmail = async (
   });
 };
 
+/** Pure content builder for the milestone-payment-due email (kept separate for tests). */
+export const buildMilestonePaymentDueHtml = (
+  custName: string,
+  bookingId: string,
+  milestoneTitle: string,
+  milestoneAmount: number | undefined,
+  currency: string = 'EUR',
+): string => {
+  const link = buildPaymentLink(bookingId);
+  const amountBlock =
+    typeof milestoneAmount === 'number' && Number.isFinite(milestoneAmount)
+      ? `
+        <div style="background: #fff; border: 2px solid #667eea; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+          <p style="color: #666; margin: 0 0 5px 0; font-size: 14px;">Amount Due</p>
+          <p style="font-size: 28px; font-weight: bold; color: #667eea; margin: 0;">${formatCurrency(milestoneAmount, currency)}</p>
+        </div>
+      `
+      : '';
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Milestone Payment Due')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          A new milestone payment is due for your booking: <strong>${escapeHtml(milestoneTitle || 'Upcoming milestone')}</strong>.
+          Please complete the payment so the work can continue without interruption.
+        </p>
+        ${amountBlock}
+        ${buildEmailButton(link, 'Pay Milestone', '#667eea')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return content;
+};
+
+// Milestone became payable (work progressed or due date reached)
+export const sendMilestonePaymentDueEmail = async (
+  custEmail: string,
+  custName: string,
+  bookingId: string,
+  milestoneTitle: string,
+  milestoneAmount?: number,
+  currency: string = 'EUR',
+): Promise<boolean> => {
+  const content = buildMilestonePaymentDueHtml(custName, bookingId, milestoneTitle, milestoneAmount, currency);
+  return sendEmail(custEmail, 'Milestone Payment Due - Fixtract', content, {
+    template: 'milestone_payment_due',
+    relatedBooking: bookingId,
+  });
+};
+
 /** Confirmed/paid booking → professional (mail for professional.booking_created). */
 export const sendProfessionalNewBookingEmail = async (
   profEmail: string,
@@ -2161,6 +2214,14 @@ export const sendBookingScheduledProfessionalEmail = async (
   });
 };
 
+/** Optional free-text description a party added to a reschedule request. */
+const rescheduleDescriptionRow = (description?: string): string => {
+  const text = typeof description === 'string' ? description.trim() : '';
+  return text
+    ? `<p style="color: #333; margin: 8px 0 0 0; white-space: pre-line;"><strong>Details:</strong> ${escapeHtml(text)}</p>`
+    : '';
+};
+
 // Reschedule requested → customer
 export const sendRescheduleRequestedEmail = async (
   custEmail: string,
@@ -2169,7 +2230,8 @@ export const sendRescheduleRequestedEmail = async (
   oldDate: Date | string | null | undefined,
   newDate: Date | string | null | undefined,
   reason: string,
-  bookingId: string
+  bookingId: string,
+  description?: string
 ): Promise<boolean> => {
   const content = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
@@ -2182,7 +2244,7 @@ export const sendRescheduleRequestedEmail = async (
         <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Original Start:</strong> ${escapeHtml(formatDateTime(oldDate))}</p>
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Proposed Start:</strong> ${escapeHtml(formatDateTime(newDate))}</p>
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>${rescheduleDescriptionRow(description)}
         </div>
         <p style="color: #666; line-height: 1.6;">
           Please review and accept or decline this request from your booking page.
@@ -2457,6 +2519,94 @@ export const sendWarrantyProposalSentEmail = async (
   });
 };
 
+// Customer declined a warranty proposal → professional (with clarification)
+export const sendWarrantyProposalDeclinedEmail = async (params: {
+  professionalEmail: string;
+  professionalName: string;
+  customerName: string;
+  claimNumber: string;
+  bookingId: string;
+  clarification: string;
+}): Promise<boolean> => {
+  const { professionalEmail, professionalName, customerName, claimNumber, bookingId, clarification } = params;
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Warranty Proposal Declined')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(professionalName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(customerName)}</strong> has declined your warranty proposal for claim <strong>${escapeHtml(claimNumber)}</strong>. The claim was escalated to Fixtract for review.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Customer clarification:</strong> ${escapeHtml(clarification)}</p>
+        </div>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Booking')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(professionalEmail, 'Warranty Proposal Declined - Fixtract', content, {
+    template: 'warranty_proposal_declined',
+    relatedBooking: bookingId,
+  });
+};
+
+// Customer loyalty tier-up → inbox + email (suitable for a popup on next load)
+// TODO(localization): transactional emails are English-only by design today
+// (no email i18n infra — locale resolution exists only in the marketing
+// catalog). Localize this template when a transactional email framework
+// lands; until then the frontend must not expect localized payloads.
+export const sendLoyaltyTierUpEmail = async (
+  customerEmail: string,
+  customerName: string,
+  levelName: string
+): Promise<boolean> => {
+  const benefitsUrl = `${FRONTEND_URL}/dashboard/benefits`;
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Loyalty Level Up!')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${escapeHtml(customerName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          You reached <strong>${escapeHtml(levelName)}</strong>. Your new benefits are waiting on your benefits page.
+        </p>
+        ${buildEmailButton(benefitsUrl, 'View Benefits')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(customerEmail, 'Loyalty Level Up - Fixtract', content, {
+    template: 'loyalty_tier_up',
+  });
+};
+
+// Professional level-up → inbox + email (suitable for a popup on next load)
+// TODO(localization): see sendLoyaltyTierUpEmail — English-only until a
+// transactional email framework exists.
+export const sendProfessionalLevelUpEmail = async (
+  professionalEmail: string,
+  professionalName: string,
+  levelName: string
+): Promise<boolean> => {
+  const benefitsUrl = `${FRONTEND_URL}/dashboard/benefits`;
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Level Up!')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Congratulations ${escapeHtml(professionalName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          You reached <strong>${escapeHtml(levelName)}</strong>. Your new perks — including a better search ranking — are now active.
+        </p>
+        ${buildEmailButton(benefitsUrl, 'View Benefits')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(professionalEmail, 'Level Up - Fixtract', content, {
+    template: 'professional_level_up',
+  });
+};
+
 const ADMIN_EMAIL_FALLBACK = (): string =>
   process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -2631,15 +2781,14 @@ export const sendBookingCancelledPartyEmail = async (
   });
 };
 
-/** Single-recipient dispute resolved email (used by notification registry). */
-export const sendDisputeResolvedPartyEmail = async (
-  email: string,
+/** Pure content builder for the dispute-resolved email (kept separate for tests). */
+export const buildDisputeResolvedHtml = (
   partyName: string,
   resolution: string,
-  adjustedAmount: number | undefined,
+  finalAmount: number | undefined,
   bookingId: string,
   currency: string = 'EUR',
-): Promise<boolean> => {
+): string => {
   const link = buildBookingLink(bookingId);
   const safeResolution = escapeHtml(resolution || 'Closed by admin');
   const content = `
@@ -2652,13 +2801,26 @@ export const sendDisputeResolvedPartyEmail = async (
         </p>
         <div style="background: #e8f5e8; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0;">
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Resolution:</strong> ${safeResolution}</p>
-          ${typeof adjustedAmount === 'number' && Number.isFinite(adjustedAmount) ? `<p style="color: #333; margin: 0;"><strong>Adjusted amount:</strong> ${formatCurrency(adjustedAmount, currency)}</p>` : ''}
+          ${typeof finalAmount === 'number' && Number.isFinite(finalAmount) ? `<p style="color: #333; margin: 0;"><strong>Final amount to be paid:</strong> ${formatCurrency(finalAmount, currency)}</p>` : ''}
         </div>
         ${buildEmailButton(link, 'View Booking', '#16a34a')}
         ${getEmailFooter()}
       </div>
     </div>
   `;
+  return content;
+};
+
+/** Single-recipient dispute resolved email (used by notification registry). */
+export const sendDisputeResolvedPartyEmail = async (
+  email: string,
+  partyName: string,
+  resolution: string,
+  adjustedAmount: number | undefined,
+  bookingId: string,
+  currency: string = 'EUR',
+): Promise<boolean> => {
+  const content = buildDisputeResolvedHtml(partyName, resolution, adjustedAmount, bookingId, currency);
   return sendEmail(email, 'Dispute Resolved - Fixtract', content, {
     template: 'dispute_resolved',
     relatedBooking: bookingId,
@@ -2745,6 +2907,7 @@ export const sendRescheduleRequestedByCustomerEmail = async (
   newDate: Date | string | null | undefined,
   reason: string,
   bookingId: string,
+  description?: string,
 ): Promise<boolean> => {
   const content = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
@@ -2757,7 +2920,7 @@ export const sendRescheduleRequestedByCustomerEmail = async (
         <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Original Start:</strong> ${escapeHtml(formatDateTime(oldDate))}</p>
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Proposed Start:</strong> ${escapeHtml(formatDateTime(newDate))}</p>
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>${rescheduleDescriptionRow(description)}
         </div>
         ${buildEmailButton(buildBookingLink(bookingId), 'Review Request', '#ffc107')}
         ${getEmailFooter()}

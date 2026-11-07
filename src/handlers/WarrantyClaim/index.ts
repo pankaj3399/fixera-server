@@ -1253,12 +1253,28 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
       return res.status(403).json({ success: false, msg: "Only customers can respond to proposals" });
     }
     const { claimId } = params(req.params);
-    const { action, note } = req.body as { action?: "accept" | "decline"; note?: string };
+    const { action, note, clarification, reason } = req.body as { action?: "accept" | "decline"; note?: string; clarification?: string; reason?: string };
     if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
       return res.status(400).json({ success: false, msg: "Invalid claimId" });
     }
     if (!action || !["accept", "decline"].includes(action)) {
       return res.status(400).json({ success: false, msg: "Action must be accept or decline" });
+    }
+    // Client bug list #16: declining requires a clarification (popup). The
+    // field is accepted under `clarification` (preferred), `reason` or the
+    // legacy `note`; it is optional when accepting.
+    const clarificationText = typeof clarification === "string" && clarification.trim()
+      ? clarification.trim()
+      : typeof reason === "string" && reason.trim()
+        ? reason.trim()
+        : typeof note === "string" && note.trim()
+          ? note.trim()
+          : "";
+    if (action === "decline" && clarificationText.length < 3) {
+      return res.status(400).json({
+        success: false,
+        error: { code: "CLARIFICATION_REQUIRED", message: "Please explain why you are declining the proposal" },
+      });
     }
 
     const claim = await WarrantyClaim.findById(claimId);
@@ -1280,7 +1296,7 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
 
     claim.proposal.customerDecision = action === "accept" ? "accepted" : "declined";
     claim.proposal.decidedAt = new Date();
-    claim.proposal.decisionNote = note?.trim();
+    claim.proposal.decisionNote = clarificationText || undefined;
 
     if (action === "accept") {
       claim.status = "proposal_accepted";
@@ -1297,7 +1313,7 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
         escalatedBy: toObjectId(userId),
         autoEscalated: false,
         reason: "Customer declined warranty proposal",
-        note: note?.trim(),
+        note: clarificationText,
       };
       claim.statusHistory.push({
         status: "escalated",
@@ -1324,6 +1340,32 @@ export const respondToWarrantyProposal = async (req: Request, res: Response) => 
           ? `Warranty claim ${claim.claimNumber}: customer accepted proposal.`
           : `Warranty claim ${claim.claimNumber}: customer declined proposal and escalated.`,
     });
+
+    if (action === "decline") {
+      try {
+        const [customerUser, professionalUser] = await Promise.all([
+          User.findById(claim.customer).select("_id name").lean(),
+          User.findById(claim.professional).select("_id name").lean(),
+        ]);
+        if (professionalUser?._id) {
+          await notify({
+            userId: String(professionalUser._id),
+            actorId: userId,
+            eventKey: "professional.warranty_proposal_declined",
+            entityType: "booking",
+            entityId: String(claim.booking),
+            context: {
+              bookingId: String(claim.booking),
+              customerName: customerUser?.name || "The customer",
+              claimNumber: claim.claimNumber || String(claim._id),
+              clarification: clarificationText,
+            },
+          });
+        }
+      } catch (notifyError: any) {
+        console.error("Failed to notify warranty-proposal-declined:", notifyError?.message || notifyError);
+      }
+    }
 
     return res.status(200).json({
       success: true,

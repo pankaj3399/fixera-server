@@ -7,6 +7,15 @@ import CancellationRequest, { CANCELLATION_REASON_LABELS } from '../../models/ca
 import Conversation from '../../models/conversation';
 import { captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
+import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { resolveDisputeEmailAmount, resolveDisputeBookingFinalCharge } from '../../utils/disputeFinalCharge';
+import {
+  ensureRefundInvoices,
+  isBookingStarted,
+  leavesBillableRemainder,
+  pruneFutureResourcePlanDays,
+  retainPastBookingCalendar,
+} from '../../utils/refundFinalization';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
@@ -75,6 +84,8 @@ import {
   validateImageFileBuffer,
   validateVideoFile,
 } from '../../utils/s3Upload';
+import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/recordedDispute';
+import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -86,14 +97,18 @@ const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 're
 
 export const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
-    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': { $ne: null } };
+    return { ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': { $ne: null } };
   }
 
   if (status === 'open') {
-    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
+    return { status: ACTIVE_DISPUTE_STATUS, ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': null };
   }
 
-  return { 'dispute.raisedAt': { $exists: true } };
+  // Client bug list #7: the overview must only contain bookings whose status
+  // is 'dispute' — never plain extra-cost requests or resolved history.
+  // RECORDED_DISPUTE_FILTER additionally excludes legacy phantom dispute
+  // sub-documents (schema-default raisedAt without an actor).
+  return { status: ACTIVE_DISPUTE_STATUS, ...RECORDED_DISPUTE_FILTER };
 };
 
 const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {
@@ -188,18 +203,42 @@ const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtr
   }
 };
 
+// Warranty claims and escalated customer refund requests are their own
+// records with their own admin queues (/admin/warranty-claims,
+// /admin/cancellation-requests). The dispute page previews the active ones so
+// they can be actioned there, but they are never booking disputes: the booking
+// dispute list, its pagination and the analytics totals exclude them, and
+// their own counts are reported separately (`separateQueues`).
+const ACTIVE_WARRANTY_CLAIM_FILTER = { status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } };
+const ESCALATED_REFUND_REQUEST_FILTER = { requestedRole: 'customer', status: 'escalated' };
+const WARRANTY_QUEUE_HREF = '/admin/warranty-claims';
+const REFUND_QUEUE_HREF = '/admin/cancellation-requests?status=escalated';
+
+export const countSeparateDisputeQueues = async () => {
+  const [activeWarrantyClaims, escalatedRefundRequests] = await Promise.all([
+    WarrantyClaim.countDocuments(ACTIVE_WARRANTY_CLAIM_FILTER),
+    CancellationRequest.countDocuments(ESCALATED_REFUND_REQUEST_FILTER),
+  ]);
+  return {
+    activeWarrantyClaims,
+    escalatedRefundRequests,
+    warrantyClaimsHref: WARRANTY_QUEUE_HREF,
+    refundRequestsHref: REFUND_QUEUE_HREF,
+  };
+};
+
 const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> => {
   if (statusFilter === 'resolved') return [];
 
   const [warrantyClaims, refundRequests] = await Promise.all([
-    WarrantyClaim.find({ status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } })
+    WarrantyClaim.find(ACTIVE_WARRANTY_CLAIM_FILTER)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
       .populate('customer', 'name email isAnonymized deletedAt')
       .populate('professional', 'name email username isAnonymized deletedAt')
       .sort({ openedAt: -1 })
       .limit(50)
       .lean(),
-    CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
+    CancellationRequest.find(ESCALATED_REFUND_REQUEST_FILTER)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
       .populate('requestedBy', 'name email isAnonymized deletedAt')
       .sort({ escalatedAt: -1 })
@@ -215,7 +254,7 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       _id: `warranty:${claim._id}`,
       source: 'warranty',
       readOnly: true,
-      resolveHref: '/admin/warranty-claims',
+      resolveHref: WARRANTY_QUEUE_HREF,
       bookingId: booking._id ? String(booking._id) : undefined,
       claimStatus: claim.status,
       claimNumber: claim.claimNumber,
@@ -251,7 +290,7 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       _id: `refund:${request._id}`,
       source: 'refund',
       readOnly: true,
-      resolveHref: '/admin/cancellation-requests',
+      resolveHref: REFUND_QUEUE_HREF,
       bookingId: booking._id ? String(booking._id) : undefined,
       bookingNumber: booking.bookingNumber || '(refund request)',
       status: booking.status || '',
@@ -308,6 +347,8 @@ export const getDisputes = async (req: Request, res: Response) => {
       Booking.countDocuments(filter),
     ]);
 
+    // Preview of the separate warranty/refund queues, page 1 only. They are not
+    // part of `disputes` or `pagination` (booking disputes only).
     const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
 
     await Promise.all(disputes.map((d: any) => presignBookingAttachments(d)));
@@ -361,7 +402,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
-    if (!booking.dispute?.raisedAt) {
+    if (!booking.dispute?.raisedAt || !hasRecordedDispute(booking)) {
       return res.status(400).json({
         success: false,
         error: {
@@ -394,6 +435,9 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
   let resolvedBooking: any = null;
   let finalExtraCostAmount = 0;
+  // Original extra-cost total captured before the resolution write, so the
+  // post-resolution email can scale the persisted charge to the final amount.
+  let originalExtraCostTotalForEmail: number | undefined;
   let targetStatus: BookingStatus = COMPLETED_BOOKING_STATUS;
   let disputeType: string = 'extra_costs';
   let isExtraCostsDispute = true;
@@ -449,7 +493,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    const hasOpenDispute = Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
+    const hasOpenDispute = hasRecordedDispute(booking) && Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
     if (booking.status !== ACTIVE_DISPUTE_STATUS && !hasOpenDispute) {
       return res.status(400).json({
         success: false,
@@ -498,6 +542,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         scheduledStartTime: window.scheduledStartTime,
         scheduledEndTime: window.scheduledEndTime,
         ...(window.assignedTeamMembers?.length ? { assignedTeamMembers: window.assignedTeamMembers } : {}),
+        ...(window.resourcePlan ? { resourcePlan: window.resourcePlan } : {}),
       };
       if (forceStatus === undefined) {
         targetStatus = 'booked' as BookingStatus;
@@ -514,8 +559,18 @@ export const resolveDispute = async (req: Request, res: Response) => {
           scheduledStartTime: booking.scheduledStartTime,
           scheduledEndTime: booking.scheduledEndTime,
           assignedTeamMembers: booking.assignedTeamMembers,
+          resourcePlan: booking.resourcePlan,
         }
       : null;
+
+    if (rescheduleScheduleFields) {
+      const replanned = { ...booking.toObject(), ...rescheduleScheduleFields };
+      await applyReschedulePlanReset(replanned, adminUser._id, rescheduleScheduleFields.resourcePlan, booking.resourcePlan);
+      for (const field of ['resourcePlan', 'scheduledExecutionEndDate', 'scheduledBufferStartDate',
+        'scheduledBufferEndDate', 'scheduledBufferUnit']) {
+        rescheduleScheduleFields[field] = (replanned as any)[field];
+      }
+    }
 
     // The same per-person reservation boundary normal booking/support writers
     // use. If a forced reschedule is requested, the keys must move with the
@@ -526,7 +581,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
           professional: (booking.professional as any)?._id || booking.professional,
           assignedTeamMembers:
             rescheduleScheduleFields.assignedTeamMembers || booking.assignedTeamMembers || [],
-          resourcePlan: booking.resourcePlan || [],
+          resourcePlan: rescheduleScheduleFields.resourcePlan || [],
           scheduledStartDate: rescheduleScheduleFields.scheduledStartDate,
           scheduledExecutionEndDate: rescheduleScheduleFields.scheduledExecutionEndDate,
           scheduledBufferEndDate: rescheduleScheduleFields.scheduledBufferEndDate,
@@ -588,6 +643,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     if (isExtraCostsDispute) {
       originalExtraCostStatus = (booking as any).extraCostStatus;
       originalExtraCostTotal = booking.extraCostTotal;
+      originalExtraCostTotalForEmail = Number(booking.extraCostTotal);
       originalAdminAdjustedAmount = (booking.dispute as any)?.adminAdjustedAmount;
       const originalExtraCostAmount = Number(booking.extraCostTotal || 0);
       setFields.extraCostStatus = 'confirmed';
@@ -612,9 +668,13 @@ export const resolveDispute = async (req: Request, res: Response) => {
         await replaceBookingCalendar(calendarCandidate as any, session);
       }
       const updated = await Booking.findOneAndUpdate(
-        { _id: booking._id, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null },
+        { _id: booking._id, ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': null },
         {
-          $set: setFields,
+          $set: Object.fromEntries(Object.entries(setFields).filter(([, value]) => value !== undefined)),
+          ...(rescheduleScheduleFields ? { $unset: Object.fromEntries(
+            Object.entries(rescheduleScheduleFields).filter(([, value]) => value === undefined)
+              .map(([field]) => [field, '']),
+          ) } : {}),
           $push: {
             statusHistory: {
               status: targetStatus,
@@ -674,6 +734,16 @@ export const resolveDispute = async (req: Request, res: Response) => {
           reason: refundReason,
           actorId: adminUser._id,
         });
+        // A partial cancellation is persisted as cancelled by the refund core.
+        // Use that fresh status, payment and retained plan in the response and
+        // subsequent invoice/calendar work, rather than the pre-refund copy.
+        // This flow owns its resolved 'refunded' state. Only its partial
+        // cancellation becomes cancelled; the generic refund core preserves
+        // dispute-managed and completed lifecycle states.
+        resolvedBooking = await Booking.findOneAndUpdate({
+          _id: resolvedBooking._id, status: 'refunded', 'payment.status': 'partially_refunded',
+        }, { $set: { status: 'cancelled' } }, { new: true })
+          || await Booking.findById(resolvedBooking._id) || resolvedBooking;
         await Booking.updateOne(
           { _id: resolvedBooking._id },
           {
@@ -686,7 +756,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
           }
         ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
         try {
-          await releaseBookingCalendar(booking._id);
+          // Partial dispute refunds keep the remainder billable: invoices are
+          // generated from the remaining amount, and on a started booking only
+          // future days are unplanned while past days stay blocked.
+          if (resolvedBooking.payment?.status === 'partially_refunded'
+            && leavesBillableRemainder(resolvedBooking.payment.totalWithVat, resolvedBooking.payment.refundAmount)) {
+            if (isBookingStarted(resolvedBooking)) {
+              pruneFutureResourcePlanDays(resolvedBooking);
+              await Booking.updateOne(
+                { _id: resolvedBooking._id },
+                { $set: { resourcePlan: resolvedBooking.resourcePlan } },
+              ).catch((pruneWriteError) => console.error('Failed to prune future planned days after dispute refund:', pruneWriteError));
+              await retainPastBookingCalendar(resolvedBooking);
+            }
+            void ensureRefundInvoices(String(resolvedBooking._id));
+          } else {
+            await releaseBookingCalendar(booking._id);
+          }
         } catch (releaseError) {
           console.error('Dispute refunded but calendar reservation release failed:', releaseError);
         }
@@ -805,6 +891,16 @@ export const resolveDispute = async (req: Request, res: Response) => {
         } else if (isExtraCostsDispute) {
           await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
         }
+        // An admin-forced completion must leave the same FIX/SUP artifacts as
+        // a customer-confirmed one. Idempotent: existing invoices are kept.
+        try {
+          await ensureBookingInvoiceArtifacts(resolvedBooking._id.toString());
+        } catch (invoiceError) {
+          console.error(
+            'Failed to generate booking invoice artifacts after dispute resolution:',
+            invoiceError instanceof Error ? invoiceError.message : invoiceError,
+          );
+        }
       }
     } catch (e) {
       console.error('Post-resolve Stripe step failed:', e);
@@ -868,13 +964,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
         User.findById(resolvedBooking.customer).select('_id email name').lean(),
         proId ? User.findById(proId).select('_id email name username businessInfo').lean() : null,
       ]);
+      // The email shows the final amount to be paid (VAT, commission and
+      // discount included), never the bare net delta or a platform percentage.
+      // An uncomputable amount is omitted, never replaced by the bare net.
+      let disputeFinalAmount: number | undefined;
+      if (isExtraCostsDispute && typeof finalExtraCostAmount === 'number') {
+        disputeFinalAmount = await resolveDisputeEmailAmount(
+          resolvedBooking,
+          Number(originalExtraCostTotalForEmail) || 0,
+          finalExtraCostAmount,
+        );
+      } else {
+        disputeFinalAmount = await resolveDisputeBookingFinalCharge(resolvedBooking);
+      }
       const disputeContext = {
         bookingId: String(resolvedBooking._id),
         resolution,
-        adjustedAmount:
-          isExtraCostsDispute && typeof finalExtraCostAmount === 'number'
-            ? finalExtraCostAmount
-            : undefined,
+        adjustedAmount: disputeFinalAmount,
         currency: (resolvedBooking as any).payment?.currency || 'EUR',
       };
       if (customerUser?._id) {
@@ -927,14 +1033,20 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
 export const getDisputeAnalytics = async (_req: Request, res: Response) => {
   try {
+    // totalOpen / totalResolved / totalDisputes count booking disputes only,
+    // with exactly the filters of the Open / Resolved / All list views.
+    // Warranty claims and refund requests are reported separately and are
+    // never added into these totals.
     const [
       totalOpen,
       totalResolved,
       totalDisputes,
+      separateQueues,
     ] = await Promise.all([
       Booking.countDocuments(buildDisputeFilter('open')),
       Booking.countDocuments(buildDisputeFilter('resolved')),
       Booking.countDocuments(buildDisputeFilter()),
+      countSeparateDisputeQueues(),
     ]);
 
     return res.json({
@@ -943,6 +1055,7 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
         totalOpen,
         totalResolved,
         totalDisputes,
+        separateQueues,
       }
     });
   } catch (error: any) {

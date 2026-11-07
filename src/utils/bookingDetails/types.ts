@@ -215,6 +215,7 @@ export type BookingSnapshotDto = {
     preferredStartTime: string | null;
     scheduledStartDate: string | null;
     scheduledStartTime: string | null;
+    scheduledEndTime: string | null;
     scheduledExecutionEndDate: string | null;
     scheduledBufferStartDate: string | null;
     scheduledBufferEndDate: string | null;
@@ -337,6 +338,7 @@ export type BookingWizardDto = {
   scheduleSelection: {
     startDate: string | null;
     startTime: string | null;
+    endTime: string | null;
     executionEndDate: string | null;
     bufferEndDate: string | null;
     timeZone: string | null;
@@ -395,6 +397,7 @@ export type QuotationVersionDto = {
     vatRate: number | null;
     totalWithVat: number | null;
     totalAmount: number | null;
+    vatBreakdown?: Array<{ description: string; netAmount: number; vatRate: number; vatAmount: number; totalAmount: number }>;
     currency: string;
     recordedAt: string;
     discount?: Record<string, unknown>;
@@ -544,6 +547,17 @@ export type MilestonePaymentDto = {
   paidAt: string | null;
   customerChargeTotalWithVat: number | null;
   paymentRowPresent: boolean;
+  /**
+   * Client bug list #19b: expected customer charge for this milestone from the
+   * shared charge plan (recorded commission, selected options in full on the
+   * first milestone). Null when no commission was recorded for the booking.
+   * The frontend's milestone/option UI must render this instead of splitting
+   * options proportionally across milestones.
+   */
+  expectedCustomerCharge: number | null;
+  /** Commission-inclusive plan net, before customer discounts and VAT. */
+  expectedCustomerNetBeforeDiscount: number | null;
+  includesSelectedOptions: boolean;
 };
 
 export type RefundDto = {
@@ -671,7 +685,9 @@ export type RescheduleHistoryDto = {
   reason: string;
   description: string | null;
   note: string | null;
-  status: 'accepted' | 'declined' | 'auto_cancelled';
+  status: 'pending' | 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
+  /** False once the request is disputed/terminal — the UI must disable accept/decline. */
+  canRespond: boolean;
   respondedAt: string | null;
   respondedBy: ActorDto | null;
   responseNote: string | null;

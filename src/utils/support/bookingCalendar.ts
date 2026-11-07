@@ -43,15 +43,24 @@ function toDate(value: Date | string | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/** Only members the booking actually assigns: professional + assigned team + planned resources. */
+/** Only members the booking actually assigns: assigned team + planned resources.
+ * Client bug list #24b (hour mode): a booking must block only the resources
+ * that need to attend (the minimum required, chosen from available
+ * resources). The professional field alone must not block, otherwise an
+ * uninvolved resource collects a double booking on its personal calendar.
+ * Legacy rows without explicit attendees predate attendance tracking, so the
+ * professional stays blocked as the fallback.
+ */
 export function bookingCalendarMemberIds(booking: BookingCalendarSchedule): string[] {
   const ids = new Set<string>();
-  if (booking.professional) ids.add(String(booking.professional));
   for (const member of booking.assignedTeamMembers || []) {
     if (member) ids.add(String(member));
   }
   for (const entry of booking.resourcePlan || []) {
     if (entry?.resourceId) ids.add(String(entry.resourceId));
+  }
+  if (ids.size === 0 && booking.professional) {
+    ids.add(String(booking.professional));
   }
   return Array.from(ids).filter((id) => Types.ObjectId.isValid(id));
 }

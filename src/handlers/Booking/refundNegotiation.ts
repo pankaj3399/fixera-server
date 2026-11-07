@@ -4,12 +4,19 @@ import Booking from '../../models/booking';
 import User from '../../models/user';
 import CancellationRequest from '../../models/cancellationRequest';
 import { executeRefund, RefundError } from '../Stripe/payment';
+import { isPreCompletionStatus } from '../../utils/refundFinalization';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { notifyBookingCancelledAndRefunded } from '../../utils/notifications/notifyBookingCancelledAndRefunded';
 import { notify } from '../../utils/notifications/notify';
 import { bookingForViewer } from '../../utils/invoiceVisibility';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import {
+  ensureRefundInvoices,
+  isBookingStarted,
+  leavesBillableRemainder,
+  retainPastBookingCalendar,
+} from '../../utils/refundFinalization';
 
 const REFUND_FINALIZED_BOOKING_STATUS = 'cancelled';
 
@@ -59,6 +66,10 @@ const finalizeRefund = async (
   const resolvedBy = actorId && mongoose.Types.ObjectId.isValid(String(actorId))
     ? new mongoose.Types.ObjectId(String(actorId))
     : undefined;
+  // executeRefund may have pruned the plan and closed the booking. Do not
+  // save the pre-refund instance over those recorded lifecycle facts.
+  const refundedBooking = await Booking.findById(booking._id);
+  if (refundedBooking) booking = refundedBooking;
   request.status = 'approved';
   request.resolvedAt = new Date();
   if (resolvedBy) request.resolvedBy = resolvedBy;
@@ -69,7 +80,9 @@ const finalizeRefund = async (
   // refund unrecorded and unretryable (the claim filter rejects a re-run).
   await request.save();
 
-  booking.status = REFUND_FINALIZED_BOOKING_STATUS;
+  booking.status = isPreCompletionStatus(booking.status)
+    ? REFUND_FINALIZED_BOOKING_STATUS
+    : booking.status;
   booking.cancellation = {
     cancelledBy: request.requestedBy,
     reason,
@@ -78,13 +91,31 @@ const finalizeRefund = async (
   } as any;
   booking.statusHistory = booking.statusHistory || [];
   booking.statusHistory.push({
-    status: REFUND_FINALIZED_BOOKING_STATUS,
+    status: booking.status,
     timestamp: new Date(),
     updatedBy: resolvedBy || request.requestedBy,
     note: `Refund issued (${result.amount}) — ${reason}`,
   });
   // Same reason as the request save above: the money has moved already.
   await booking.save();
+
+  // A partial refund keeps the remainder billable. When no invoice exists
+  // yet it is generated net of the refund; when the booking was already
+  // invoiced a partial credit note is issued instead (never a second one).
+  // On a started booking only future days are unplanned while past days stay
+  // blocked. Best-effort: the refund above already succeeded, so these steps
+  // must not fail the response.
+  if (booking.payment?.status === 'partially_refunded'
+    && leavesBillableRemainder(booking.payment.totalWithVat, booking.payment.refundAmount)) {
+    // Money has settled: invoice routing must survive calendar failures and
+    // account removal fences. executeRefund already pruned and saved the plan.
+    void ensureRefundInvoices(String(booking._id));
+    try {
+      if (isBookingStarted(booking)) await retainPastBookingCalendar(booking);
+    } catch (sideEffectError) {
+      console.error('Partial-refund calendar retention failed:', sideEffectError);
+    }
+  }
 
   return { ok: true, refundAmount: result.amount };
 };

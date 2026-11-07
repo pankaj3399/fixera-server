@@ -29,6 +29,8 @@ import type {
   WarrantyClaimSummaryDto,
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
+import { getCheckoutCommissionPercent } from '../checkoutCommission';
+import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
 import {
   presignOwnedUrl,
   presignQuestionAnswerUrl,
@@ -698,9 +700,22 @@ const buildPayments = async (params: {
     || records[0]
     || null;
 
+  // Unpaid estimates share checkout's current commission source. Recorded
+  // payment totals still take precedence in milestoneCustomerCharge below.
+  let milestoneChargePlan: ReturnType<typeof buildMilestoneChargePlan> = [];
+  if (booking.milestonePayments?.length) {
+    try {
+      milestoneChargePlan = buildMilestoneChargePlan(booking, await getCheckoutCommissionPercent());
+    } catch (error) {
+      console.error('Failed to resolve milestone details charge:', error);
+    }
+  }
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
-      const matching = paymentRows.find((payment) => num(payment.milestoneIndex) === index);
+      const matchingRows = paymentRows.filter(payment => num(payment.milestoneIndex) === index);
+      const settled = matchingRows.find(payment => ['completed', 'partially_refunded', 'refunded'].includes(payment.status));
+      const matching = settled || matchingRows.find(payment => ['pending', 'authorized'].includes(payment.status));
+      const planEntry = milestoneChargePlan.find((entry) => entry.index === index);
       return {
         index,
         title: String(milestone.title || ''),
@@ -713,8 +728,11 @@ const buildPayments = async (params: {
         startedAt: iso(milestone.startedAt),
         completedAt: iso(milestone.completedAt),
         paidAt: iso(milestone.paidAt),
-        customerChargeTotalWithVat: num(matching?.totalWithVat),
+        customerChargeTotalWithVat: num((settled || matchingRows.find(payment => payment.status === 'authorized'))?.totalWithVat),
         paymentRowPresent: Boolean(matching),
+        expectedCustomerCharge: planEntry ? milestoneCustomerCharge(booking, planEntry, paymentRows) : null,
+        expectedCustomerNetBeforeDiscount: planEntry?.expectedCustomerGross ?? null,
+        includesSelectedOptions: Boolean(planEntry?.includesSelectedOptions),
       };
     },
   );
@@ -1164,6 +1182,7 @@ export const buildBookingDetails = async (params: {
     scheduleSelection: {
       startDate: dateOnly(booking.scheduledStartDate),
       startTime: str(booking.scheduledStartTime),
+      endTime: str(booking.scheduledEndTime),
       executionEndDate: dateOnly(booking.scheduledExecutionEndDate),
       bufferEndDate: dateOnly(booking.scheduledBufferEndDate),
       timeZone: isValidIanaTimeZone(booking.scheduleTimeZone) ? booking.scheduleTimeZone : null,
@@ -1254,7 +1273,7 @@ export const buildBookingDetails = async (params: {
     const rejectedAt = rejection?.at || null;
     const totals = version.customerTotals
       ? {
-          commissionPercent: num(version.customerTotals.commissionPercent),
+          commissionPercent: viewerRole === 'customer' ? null : num(version.customerTotals.commissionPercent),
           professionalNetAmount: num(version.customerTotals.professionalNetAmount),
           customerNetAmount: num(version.customerTotals.customerNetAmount),
           amountBeforeDiscounts: num(version.customerTotals.amountBeforeDiscounts) ?? num(version.customerTotals.customerNetAmount),
@@ -1262,6 +1281,7 @@ export const buildBookingDetails = async (params: {
           vatRate: num(version.customerTotals.vatRate),
           totalWithVat: num(version.customerTotals.totalWithVat),
           totalAmount: num(version.customerTotals.totalAmount) ?? num(version.customerTotals.totalWithVat),
+          ...(Array.isArray(version.customerTotals.vatBreakdown) ? { vatBreakdown: version.customerTotals.vatBreakdown } : {}),
           currency: version.customerTotals.currency || version.currency || 'EUR',
           recordedAt: iso(version.customerTotals.recordedAt) || createdAt || new Date().toISOString(),
           ...(version.customerTotals.discount ? { discount: version.customerTotals.discount } : {}),
@@ -1560,11 +1580,19 @@ export const buildBookingDetails = async (params: {
     );
     if (!already) historyEntries.push({ ...booking.rescheduleRequest, status: 'pending' });
   }
+  // Client bug list #9c: only the live pending request can be responded to.
+  // History entries (including disputed/terminal ones) always report false.
+  const pendingLiveRequest = booking.status === 'rescheduling_requested'
+    && (booking.rescheduleRequest as any)?.status === 'pending';
   for (const [index, entry] of historyEntries.entries()) {
     const requestedBy = actorForId(entry.requestedBy, actors, viewerRole, {
       roleHint: entry.requestedBy === customerId ? 'customer' : 'professional',
     });
     const respondedBy = actorForId(entry.respondedBy, actors, viewerRole, { roleHint: 'customer' });
+    const liveRequestedAt = iso((booking.rescheduleRequest as any)?.requestedAt);
+    const isLivePending = pendingLiveRequest
+      && liveRequestedAt != null
+      && iso(entry.requestedAt) === liveRequestedAt;
     reschedules.push({
       id: `reschedule:${index}:${iso(entry.requestedAt) || ''}`,
       requestedAt: iso(entry.requestedAt) || '',
@@ -1574,6 +1602,7 @@ export const buildBookingDetails = async (params: {
       description: str(entry.description),
       note: str(entry.note),
       status: entry.status || 'pending',
+      canRespond: entry.status === 'pending' && isLivePending,
       respondedAt: iso(entry.respondedAt),
       respondedBy,
       responseNote: str(entry.responseNote),
@@ -1585,7 +1614,13 @@ export const buildBookingDetails = async (params: {
   }
 
   const cancellationDtos: CancellationRequestDto[] = [];
-  const visibleCancellations = maySeeAdminArea('cancellations') ? maskedCancellations : [];
+  // Client bug list #3: participants must see the cancellation request on the
+  // booking page (status, reason, requested dates/actor). Admins keep the
+  // area-gated full view; participants get a safe subset without the
+  // admin-authored resolution note.
+  const visibleCancellations = isAdminViewer
+    ? (maySeeAdminArea('cancellations') ? maskedCancellations : [])
+    : maskedCancellations;
   for (const [index, request] of visibleCancellations.entries()) {
     const evidence = await attachmentUrlList(
       request.evidence,
@@ -1932,6 +1967,7 @@ export const buildBookingDetails = async (params: {
       preferredStartTime: str(captured?.schedule?.preferredStartTime),
       scheduledStartDate: dateOnly(captured?.schedule?.scheduledStartDate),
       scheduledStartTime: str(captured?.schedule?.scheduledStartTime),
+      scheduledEndTime: str(captured?.schedule?.scheduledEndTime),
       scheduledExecutionEndDate: dateOnly(captured?.schedule?.scheduledExecutionEndDate),
       scheduledBufferStartDate: dateOnly(captured?.schedule?.scheduledBufferStartDate),
       scheduledBufferEndDate: dateOnly(captured?.schedule?.scheduledBufferEndDate),

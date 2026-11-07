@@ -380,3 +380,10 @@ it('strips the referral reservation token for both participants without changing
   expect(bookingForViewer({ payment: source }, 'admin').payment.discount.referralReservationToken).toBe('pi_internal');
   expect(source.discount.referralReservationToken).toBe('pi_internal');
 });
+
+
+it.each(['customer', 'professional'] as const)('hides refund retry scheduling from %s payloads', role => {
+  const visible = sanitizePaymentForViewer({ status: 'partially_refunded', refundInvoiceRetryAt: new Date() }, role);
+  expect(visible.refundInvoiceRetryAt).toBeUndefined();
+  expect(JSON.stringify(visible)).not.toContain('refundInvoiceRetryAt');
+});

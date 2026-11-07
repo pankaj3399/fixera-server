@@ -1,5 +1,6 @@
 import { Types } from "mongoose";
 import Booking from "../models/booking";
+import { bookingCalendarOccupancies, type BookingCalendarSchedule } from "./support/bookingCalendar";
 import { findSharedCalendarConflicts } from "./support/calendarBusy";
 
 export interface TeamConflict {
@@ -28,7 +29,8 @@ export const findTeamConflicts = async (
   excludeBookingId: string,
   teamMemberIds: Types.ObjectId[] | string[],
   proposedStart: Date,
-  proposedEnd: Date
+  proposedEnd: Date,
+  resourcePlan?: BookingCalendarSchedule["resourcePlan"],
 ): Promise<TeamConflict[]> => {
   if (!Array.isArray(teamMemberIds) || teamMemberIds.length === 0) {
     return [];
@@ -40,69 +42,81 @@ export const findTeamConflicts = async (
   const memberIdStrings: string[] = teamMemberIds.map((id) => toIdString(id)).filter(Boolean);
   if (memberIdStrings.length === 0) return [];
 
-  const memberObjectIds = memberIdStrings.map((id) => new Types.ObjectId(id));
+  const occupancies = bookingCalendarOccupancies({
+    _id: excludeBookingId, assignedTeamMembers: memberIdStrings, resourcePlan,
+    scheduledStartDate: proposedStart, scheduledExecutionEndDate: proposedEnd,
+  });
+  if (occupancies.length === 0) return [];
+  const windowStart = new Date(Math.min(...occupancies.map(o => o.startAt.getTime())));
+  const windowEnd = new Date(Math.max(...occupancies.map(o => o.endAt.getTime())));
+  const memberObjectIds = Array.from(new Set(occupancies.map(o => o.userId)))
+    .map((id) => new Types.ObjectId(id));
   const conflicts = await Booking.find({
     _id: { $ne: new Types.ObjectId(excludeBookingId) },
     status: { $in: ACTIVE_STATUSES },
-    scheduledStartDate: { $lt: proposedEnd },
+    scheduledStartDate: { $lt: windowEnd },
     $and: [
       {
         $or: [
           { assignedTeamMembers: { $in: memberObjectIds } },
           { professional: { $in: memberObjectIds } },
+          { 'resourcePlan.resourceId': { $in: memberObjectIds } },
         ],
       },
       {
         $or: [
-          { scheduledBufferEndDate: { $gt: proposedStart } },
-          { scheduledExecutionEndDate: { $gt: proposedStart } },
+          { scheduledBufferEndDate: { $gt: windowStart } },
+          { scheduledExecutionEndDate: { $gt: windowStart } },
         ],
       },
     ],
   })
-    .select("bookingNumber assignedTeamMembers professional scheduledStartDate scheduledExecutionEndDate scheduledBufferEndDate")
+    .select("bookingNumber assignedTeamMembers professional scheduledStartDate scheduledExecutionEndDate scheduledBufferEndDate resourcePlan")
     .lean();
 
-  const result: TeamConflict[] = conflicts.map((b: any) => {
-    const otherStart: Date | undefined = b.scheduledStartDate;
-    const otherEnd: Date | undefined = b.scheduledBufferEndDate || b.scheduledExecutionEndDate;
-    const overlapStart = otherStart && otherStart > proposedStart ? otherStart : proposedStart;
-    const overlapEnd = otherEnd && otherEnd < proposedEnd ? otherEnd : proposedEnd;
-    const otherMembers: string[] = (b.assignedTeamMembers || [])
-      .map((member: any) => toIdString(member));
-    const professionalId = toIdString(b.professional);
-    if (professionalId && memberIdStrings.includes(professionalId)) {
-      otherMembers.push(professionalId);
+  const result: TeamConflict[] = [];
+  for (const booking of conflicts as any[]) {
+    // Preserve the historical owner-inclusive probe for two whole-window
+    // schedules. Planned schedules use only their actual attending resources.
+    const legacyWindow = !resourcePlan?.some(entry => entry.days?.length)
+      && !booking.resourcePlan?.some((entry: any) => entry.days?.length);
+    const otherSchedule = legacyWindow
+      ? { ...booking, assignedTeamMembers: [...(booking.assignedTeamMembers || []), booking.professional].filter(Boolean) }
+      : booking;
+    for (const other of bookingCalendarOccupancies(otherSchedule)) {
+      for (const proposed of occupancies) {
+        if (other.userId !== proposed.userId) continue;
+        const overlapStart = new Date(Math.max(other.startAt.getTime(), proposed.startAt.getTime()));
+        const overlapEnd = new Date(Math.min(other.endAt.getTime(), proposed.endAt.getTime()));
+        if (overlapEnd <= overlapStart) continue;
+        result.push({
+          bookingId: String(booking._id), bookingNumber: booking.bookingNumber,
+          teamMemberIds: [other.userId], overlapStart, overlapEnd,
+          otherStart: other.startAt, otherEnd: other.endAt, source: 'booking',
+        });
+      }
     }
-    const intersecting = Array.from(new Set<string>(otherMembers))
-      .filter((id) => memberIdStrings.includes(id));
-    return {
-      bookingId: b._id.toString(),
-      bookingNumber: b.bookingNumber,
-      teamMemberIds: intersecting,
-      overlapStart,
-      overlapEnd,
-      otherStart,
-      otherEnd,
-      source: "booking" as const,
-    };
-  });
-
-  // Support meetings, project Meetings and legacy requests are not Booking
-  // rows but occupy the same people. Include them without pretending they are
-  // bookings, so a reschedule request/accept cannot double-book a support slot.
-  const shared = await findSharedCalendarConflicts(memberIdStrings, proposedStart, proposedEnd);
-  for (const source of shared) {
-    result.push({
-      bookingId: source.id,
-      teamMemberIds: [source.userId],
-      overlapStart: new Date(Math.max(source.start, proposedStart.getTime())),
-      overlapEnd: new Date(Math.min(source.end, proposedEnd.getTime())),
-      otherStart: new Date(source.start),
-      otherEnd: new Date(source.end),
-      source: source.source,
-    });
   }
 
-  return result;
+  // Shared sources must be probed against the same exact person/day windows.
+  for (const proposed of occupancies) {
+    const shared = await findSharedCalendarConflicts([proposed.userId], proposed.startAt, proposed.endAt);
+    for (const source of shared) {
+      result.push({
+        bookingId: source.id, teamMemberIds: [source.userId],
+        overlapStart: new Date(Math.max(source.start, proposed.startAt.getTime())),
+        overlapEnd: new Date(Math.min(source.end, proposed.endAt.getTime())),
+        otherStart: new Date(source.start), otherEnd: new Date(source.end), source: source.source,
+      });
+    }
+  }
+
+  const grouped = new Map<string, TeamConflict>();
+  for (const conflict of result) {
+    const key = [conflict.source, conflict.bookingId, conflict.overlapStart.toISOString(), conflict.overlapEnd.toISOString(), conflict.source === 'booking' ? '' : conflict.teamMemberIds.join(',')].join(':');
+    const existing = grouped.get(key);
+    if (existing) existing.teamMemberIds = Array.from(new Set([...existing.teamMemberIds, ...conflict.teamMemberIds]));
+    else grouped.set(key, conflict);
+  }
+  return Array.from(grouped.values());
 };

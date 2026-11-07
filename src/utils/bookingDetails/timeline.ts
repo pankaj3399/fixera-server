@@ -39,6 +39,39 @@ const toDate = (value: unknown): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+/**
+ * Client bug list #23a (hour mode): schedule-family timeline events must
+ * carry the start/end time, not just the date. The status-history note that
+ * produces the event records no schedule, so the current booking schedule is
+ * attached (the 'Schedule selected' note is written once when the schedule
+ * is set; reschedules create their own events with full snapshots).
+ */
+const currentScheduleFacts = (booking: any): Record<string, string | null> | null => {
+  const startDate = toIso(booking?.scheduledStartDate);
+  const executionEndDate = toIso(booking?.scheduledExecutionEndDate);
+  const startTime =
+    typeof booking?.scheduledStartTime === 'string' ? booking.scheduledStartTime : null;
+  const endTime =
+    typeof booking?.scheduledEndTime === 'string' ? booking.scheduledEndTime : null;
+  if (!startDate && !executionEndDate && startTime == null && endTime == null) {
+    return null;
+  }
+  return {
+    startDate,
+    startTime,
+    endTime,
+    executionEndDate,
+    timeZone:
+      typeof booking?.scheduleTimeZone === 'string' ? booking.scheduleTimeZone : null,
+  };
+};
+
+const SCHEDULE_FACT_TYPES = new Set([
+  'schedule_selected',
+  'execution_extended',
+  'planning_updated',
+]);
+
 const reference = (value: any): string => {
   const id = referenceId(value);
   return id || String(value ?? '');
@@ -875,7 +908,12 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     const respondedAt = toIso(reschedule.respondedAt);
     if (respondedAt && reschedule.status !== 'pending') {
       const respondedBy = actorForId(reschedule.respondedBy, actors, viewerRole, { roleHint: 'customer' });
-      const type = reschedule.status === 'accepted' ? 'reschedule_accepted' : 'reschedule_declined';
+      // Client bug list #9c: a disputed request is terminal and distinct from
+      // a plain decline — it moves the booking to dispute, not cancellation.
+      const disputed = reschedule.status === 'disputed';
+      const type = reschedule.status === 'accepted'
+        ? 'reschedule_accepted'
+        : disputed ? 'reschedule_disputed' : 'reschedule_declined';
       pushEvent({
         id: `reschedule:${index}:${reschedule.status}`,
         type,
@@ -885,13 +923,13 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
         actorRecorded: isActorRecorded(respondedBy),
         description: reschedule.responseNote || null,
         statusFrom: 'rescheduling_requested',
-        statusTo: reschedule.status === 'accepted' ? 'booked' : 'cancelled',
+        statusTo: reschedule.status === 'accepted' ? 'booked' : disputed ? 'dispute' : 'cancelled',
         attachments: [],
         metadata: scheduleMetadata,
         source: 'reschedule',
         visibility: 'participants',
       });
-      markStatusCovered(coveredStatus, reschedule.status === 'accepted' ? 'booked' : 'cancelled', reschedule.respondedAt);
+      markStatusCovered(coveredStatus, reschedule.status === 'accepted' ? 'booked' : disputed ? 'dispute' : 'cancelled', reschedule.respondedAt);
     }
   }
 
@@ -1341,6 +1379,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       continue;
     }
     const suppressAdminNote = viewerRole !== 'admin' && actor?.role === 'admin';
+    const scheduleFacts = SCHEDULE_FACT_TYPES.has(type) ? currentScheduleFacts(booking) : null;
     pushEvent({
       id: `status:${index}`,
       type,
@@ -1353,7 +1392,9 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       statusFrom: previous,
       statusTo: entry.status,
       attachments: [],
-      metadata: { statusHistoryIndex: index },
+      metadata: scheduleFacts
+        ? { statusHistoryIndex: index, schedule: scheduleFacts }
+        : { statusHistoryIndex: index },
       source: sourceForType(type),
       visibility: 'participants',
       legacyDerived: !hasActor,

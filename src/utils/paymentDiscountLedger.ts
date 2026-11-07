@@ -42,6 +42,10 @@ export const buildPaymentDiscountLedgerEntry = (
     : undefined;
   return {
     paymentIntentId,
+    ...Object.fromEntries(['netAmount', 'vatAmount', 'totalWithVat', 'platformCommission', 'professionalPayout', 'vatRate']
+      .filter(key => payment[key] != null && Number.isFinite(Number(payment[key])))
+      .map(key => [key, Number(payment[key])])),
+    ...(typeof payment.reverseCharge === 'boolean' ? { reverseCharge: payment.reverseCharge } : {}),
     ...(milestoneIndex !== undefined ? { milestoneIndex } : {}),
     ...(currency ? { currency } : {}),
     // Legacy payments may have no snapshot; new checkouts persist one even

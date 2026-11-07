@@ -85,3 +85,16 @@ describe("payouts under per-unit pricing", () => {
     })).toMatchObject({ customerChargeAmount: 82.15, platformCommissionAmount: 7.15, professionalPayout: 75 });
   });
 });
+
+
+describe('commissioned line drift', () => {
+  it('spreads negative drift without making a small final line negative', async () => {
+    const { commissionedPricingLines } = await import('../../utils/customerPricing');
+    const lines = commissionedPricingLines([{ description: 'A', price: 80, vatRate: 21 },
+      { description: 'B', price: 20, vatRate: 6 }, { description: 'C', price: 1, vatRate: 21 }], 10, 0);
+    expect(lines.every(line => line.price >= 0)).toBe(true);
+    expect(lines.reduce((sum, line) => sum + line.price, 0)).toBeCloseTo(10, 8);
+    expect(commissionedPricingLines([{ description: 'A', price: 1, vatRate: 0 },
+      { description: 'B', price: 1, vatRate: 0 }], 3, 0).map(line => line.price)).toEqual([1.5, 1.5]);
+  });
+});

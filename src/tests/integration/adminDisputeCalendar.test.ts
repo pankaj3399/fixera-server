@@ -294,6 +294,24 @@ describeDb('admin dispute resolution keeps the booking calendar boundary', () =>
     })).resolves.toBeUndefined();
   });
 
+  it('force-reschedules day planning with the same reset and minimum-duration logic as participant rescheduling', async () => {
+    await Project.collection.updateOne({ _id: projectId }, { $set: { executionDuration: { value: 2, unit: 'days' } } });
+    const oldDay = new Date('2030-11-04T00:00:00Z');
+    const keptDay = new Date('2030-11-14T00:00:00Z');
+    const bookingId = await seedDisputeBooking({ resourcePlan: [{ resourceId: professionalId, days: [oldDay, keptDay] }] });
+    const res = mockRes();
+    await resolveDispute(resolveRequest(bookingId, { forcedStartDate: '2030-11-11' }), res as any);
+    expect(res.statusCode).toBe(200);
+    const stored = await Booking.findById(bookingId).lean();
+    const days = stored!.resourcePlan!.flatMap((entry) => entry.days.map((day) => day.toISOString().slice(0, 10)));
+    expect(days).not.toContain('2030-11-04');
+    expect(days).toContain('2030-11-14');
+    expect(days).toEqual(expect.arrayContaining(['2030-11-11', '2030-11-12', '2030-11-14']));
+    expect(days.every((day) => day >= '2030-11-11')).toBe(true);
+    const reservations = await CalendarReservation.find({ sourceId: bookingId }).lean();
+    expect(new Set(reservations.map((row) => row.startAt.toISOString().slice(0, 10)))).toEqual(new Set(days));
+  }, 30000);
+
   it('returns an actionable 409 without a partial update when the new window is already reserved', async () => {
     const bookingId = await seedDisputeBooking();
     await reserveCalendarKeys({

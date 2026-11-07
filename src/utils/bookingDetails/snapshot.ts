@@ -364,6 +364,9 @@ export const buildBookingSnapshot = (params: {
     ...(stringOrUndefined(booking.scheduledStartTime)
       ? { scheduledStartTime: String(booking.scheduledStartTime) }
       : {}),
+    ...(stringOrUndefined(booking.scheduledEndTime)
+      ? { scheduledEndTime: String(booking.scheduledEndTime) }
+      : {}),
     ...(booking.scheduledExecutionEndDate
       ? { scheduledExecutionEndDate: isoDay(booking.scheduledExecutionEndDate) }
       : {}),

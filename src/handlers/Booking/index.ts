@@ -738,6 +738,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     // Validate professional or project exists
+    // Should-fix 4: the engine-resolved conversion zone for scheduleTimeZone
+    // (assigned in the project branch when a window is computed).
+    let engineScheduleZone: string | null = null;
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
       if (!professional || professional.role !== 'professional') {
@@ -968,7 +971,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         subprojectIndex < project.subprojects.length &&
         (project.subprojects[subprojectIndex] as any)?.pricing?.type === "rfq";
 
+      // Should-fix 4: remember the engine-resolved zone for scheduleTimeZone
+      // (declared on the outer project branch so it survives below).
       if (!isRfqSubproject) {
+        // Client bug list #23b: the wall-clock time is converted to a UTC
+        // instant in the professional's effective zone. Pass the request zone
+        // so the engine does not silently fall back to UTC when the
+        // professional's business info has no usable zone.
+        const requestTimeZone = resolveScheduleTimeZone(
+          req.body?.timeZone || req.body?.scheduleTimeZone,
+        ) || undefined;
         const validation = await validateProjectScheduleSelection({
           projectId,
           subprojectIndex,
@@ -976,6 +988,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
           quantity: scheduleQuantity.quantity,
+          requestTimeZone,
         });
 
         if (!validation.valid) {
@@ -994,6 +1007,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
           quantity: scheduleQuantity.quantity,
+          requestTimeZone: resolveScheduleTimeZone(
+            req.body?.timeZone || req.body?.scheduleTimeZone,
+          ) || undefined,
         });
 
         if (!window) {
@@ -1003,6 +1019,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        if (window.resourcePlan) bookingData.resourcePlan = window.resourcePlan;
+        engineScheduleZone = typeof window.timeZone === 'string' ? window.timeZone : null;
         bookingData.scheduledStartDate = window.scheduledStartDate;
         if (window.scheduledExecutionEndDate) {
           bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
@@ -1167,7 +1185,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     // Freeze the booked package/terms/questions before the first save. This is
     // an absolute whitelist copy; later project edits never touch it.
     const vatQuestionsForSnapshot = await loadVatQuestionDefinitions(configIdForVat);
-    const scheduleTimeZone = resolveScheduleTimeZone(
+    // Should-fix 4: persist the engine-resolved conversion zone (the window
+    // already falls back to the request zone) so details/timeline carry the
+    // resolved zone even when the client sends no timeZone.
+    const scheduleTimeZone = engineScheduleZone || resolveScheduleTimeZone(
       req.body?.timeZone || req.body?.scheduleTimeZone,
     );
     if (scheduleTimeZone) {
@@ -1266,7 +1287,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       msg:
         populated.status === "quote_accepted"
           ? "Booking created. Proceed to payment."
-          : "Booking request created successfully",
+          : populated.status === "rfq"
+            ? "Quotation request created successfully"
+            : "Booking request created successfully",
       booking: bookingForRequest(populated, req.user)
     });
 

@@ -23,11 +23,13 @@ export interface ILoyaltyConfig extends Document {
   tiers: ILoyaltyTier[];
   lastModifiedBy: mongoose.Types.ObjectId;
   lastModified: Date;
+  legacyTierBackfilledAt?: Date;
   version: number; // for tracking config changes
 }
 
 export interface ILoyaltyConfigModel extends Model<ILoyaltyConfig> {
   getCurrentConfig(): Promise<ILoyaltyConfig>;
+  backfillConfirmedLegacyConfig(id: string, expectedVersion: number): Promise<boolean>;
 }
 
 const loyaltyTierSchema = new Schema<ILoyaltyTier>({
@@ -112,6 +114,7 @@ const loyaltyConfigSchema = new Schema<ILoyaltyConfig>({
     type: Date,
     default: Date.now
   },
+  legacyTierBackfilledAt: { type: Date },
   version: {
     type: Number,
     default: 1
@@ -155,14 +158,85 @@ loyaltyConfigSchema.pre('save', function(next) {
   next();
 });
 
+// Standard tier ladder for new configurations and explicit legacy repair.
+export const defaultLoyaltyTiers = () => [
+  {
+    name: 'Bronze',
+    minSpendingAmount: 0,
+    maxSpendingAmount: 999.99,
+    discountPercentage: 0,
+    maxDiscountAmount: null,
+    benefits: [
+      'Standard customer support',
+      'Basic booking features',
+      'Email notifications'
+    ],
+    color: '#CD7F32',
+    icon: 'bronze-medal',
+    isActive: true,
+    order: 1,
+  },
+  {
+    name: 'Silver',
+    minSpendingAmount: 1000,
+    maxSpendingAmount: 4999.99,
+    discountPercentage: 2,
+    maxDiscountAmount: 25,
+    benefits: [
+      '2% booking discount',
+      'Priority customer support',
+      'Early access to new professionals',
+      'Extended booking window'
+    ],
+    color: '#C0C0C0',
+    icon: 'silver-medal',
+    isActive: true,
+    order: 2,
+  },
+  {
+    name: 'Gold',
+    minSpendingAmount: 5000,
+    maxSpendingAmount: 9999.99,
+    discountPercentage: 5,
+    maxDiscountAmount: 75,
+    benefits: [
+      '5% booking discount',
+      'Free service call fees',
+      'Dedicated account manager',
+      'Booking priority scheduling'
+    ],
+    color: '#FFD700',
+    icon: 'gold-medal',
+    isActive: true,
+    order: 3,
+  },
+  {
+    name: 'Platinum',
+    minSpendingAmount: 10000,
+    discountPercentage: 10,
+    maxDiscountAmount: 150,
+    benefits: [
+      '10% booking discount',
+      'Free cancellations up to 2 hours before',
+      'Premium support line',
+      'Exclusive seasonal offers',
+      'VIP badge and profile highlight'
+    ],
+    color: '#E5E4E2',
+    icon: 'crown',
+    isActive: true,
+    order: 4,
+  }
+];
+
 // Static method to get current config or create default
 loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyaltyConfig> {
   let config = await this.findOne();
-  
+
   if (!config) {
     // Create default configuration
     const defaultAdmin = await mongoose.model('User').findOne({ role: 'admin' });
-    
+
     config = await this.create({
       globalSettings: {
         isEnabled: true,
@@ -170,82 +244,48 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
         pointsExpiryMonths: null,
         roundingRule: 'floor'
       },
-      tiers: [
-        {
-          name: 'Bronze',
-          minSpendingAmount: 0,
-          maxSpendingAmount: 999.99,
-          discountPercentage: 0,
-          maxDiscountAmount: null,
-          benefits: [
-            'Standard customer support',
-            'Basic booking features',
-            'Email notifications'
-          ],
-          color: '#CD7F32',
-          icon: 'bronze-medal',
-          isActive: true,
-          order: 1,
-        },
-        {
-          name: 'Silver',
-          minSpendingAmount: 1000,
-          maxSpendingAmount: 4999.99,
-          discountPercentage: 2,
-          maxDiscountAmount: 25,
-          benefits: [
-            '2% booking discount',
-            'Priority customer support',
-            'Early access to new professionals',
-            'Extended booking window'
-          ],
-          color: '#C0C0C0',
-          icon: 'silver-medal',
-          isActive: true,
-          order: 2,
-        },
-        {
-          name: 'Gold',
-          minSpendingAmount: 5000,
-          maxSpendingAmount: 9999.99,
-          discountPercentage: 5,
-          maxDiscountAmount: 75,
-          benefits: [
-            '5% booking discount',
-            'Free service call fees',
-            'Dedicated account manager',
-            'Booking priority scheduling'
-          ],
-          color: '#FFD700',
-          icon: 'gold-medal',
-          isActive: true,
-          order: 3,
-        },
-        {
-          name: 'Platinum',
-          minSpendingAmount: 10000,
-          discountPercentage: 10,
-          maxDiscountAmount: 150,
-          benefits: [
-            '10% booking discount',
-            'Free cancellations up to 2 hours before',
-            'Premium support line',
-            'Exclusive seasonal offers',
-            'VIP badge and profile highlight'
-          ],
-          color: '#E5E4E2',
-          icon: 'crown',
-          isActive: true,
-          order: 4,
-        }
-      ],
+      tiers: defaultLoyaltyTiers(),
       lastModifiedBy: defaultAdmin?._id,
       lastModified: new Date(),
       version: 1
     });
   }
-  
+
   return config;
+};
+
+/** One-off repair only after an operator confirms this exact legacy id/version.
+ * Reads never restore tiers. Customized thresholds require explicit admin
+ * reconciliation; the durable marker preserves later intentional removals.
+ */
+loyaltyConfigSchema.statics.backfillConfirmedLegacyConfig = async function(
+  id: string, expectedVersion: number,
+): Promise<boolean> {
+  const config = await this.findOne({ _id: id, version: expectedVersion,
+    legacyTierBackfilledAt: { $exists: false } });
+  if (!config) return false;
+  const defaults = defaultLoyaltyTiers();
+  const tiers = [...config.tiers].sort((a, b) => a.minSpendingAmount - b.minSpendingAmount);
+  if (tiers.length !== 3 || tiers.some((tier, index) => {
+    const expected = defaults[index];
+    return tier.name !== expected.name || tier.minSpendingAmount !== expected.minSpendingAmount
+      || (index < 2 ? tier.maxSpendingAmount !== expected.maxSpendingAmount
+        : tier.maxSpendingAmount != null && tier.maxSpendingAmount !== expected.maxSpendingAmount);
+  })) throw new Error('Legacy tier thresholds must be reconciled before backfill.');
+  const planned = tiers.map((tier: any, index) => ({ ...(tier.toObject?.() || tier),
+    maxSpendingAmount: defaults[index].maxSpendingAmount }));
+  planned.push(defaults[3]);
+  for (let index = 0; index < planned.length - 1; index++) {
+    if (planned[index].maxSpendingAmount >= planned[index + 1].minSpendingAmount) {
+      throw new Error('Legacy tier ranges overlap.');
+    }
+  }
+  const result = await this.updateOne({ _id: config._id, version: expectedVersion,
+    tiers: config.tiers, legacyTierBackfilledAt: { $exists: false } }, {
+    $set: { tiers: planned, legacyTierBackfilledAt: new Date(), lastModified: new Date() },
+    $inc: { version: 1 },
+  }, { runValidators: true });
+  return result.modifiedCount === 1;
 };
 
 const LoyaltyConfig = mongoose.model('LoyaltyConfig', loyaltyConfigSchema) as unknown as ILoyaltyConfigModel;

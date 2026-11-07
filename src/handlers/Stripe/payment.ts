@@ -26,6 +26,8 @@ import {
   computeGrossBookingAmount,
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
+import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
+import { buildMilestoneChargePlan } from '../../utils/milestoneCharges';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
 import { bindReferralReservation, releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateVAT } from '../../utils/vat';
@@ -37,11 +39,12 @@ import {
   recordBasePaymentRefund,
 } from '../../utils/paymentRefundLedger';
 import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
+import { isBookingStarted, preparePartialRefundCancellation } from '../../utils/refundFinalization';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
-import { commissionedQuoteAmount } from '../../utils/customerPricing';
+import { commissionedPricingLines, commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
@@ -50,6 +53,18 @@ const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const professionalSource = professionalOverride || booking.professional;
   const professionalId = (professionalSource as any)?._id || professionalSource || undefined;
   return { customerId, professionalId };
+};
+
+/**
+ * VAT-inclusive amount actually paid by the customer, matching what booking
+ * details and the invoice show. `payment.amount` is the pre-VAT net and must
+ * never be presented as the paid amount.
+ */
+const grossPaidAmount = (payment: any): number | undefined => {
+  const gross = Number(payment?.totalWithVat);
+  if (Number.isFinite(gross)) return gross;
+  const net = Number(payment?.amount);
+  return Number.isFinite(net) ? net : undefined;
 };
 
 const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
@@ -207,7 +222,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
   };
 };
 
-const getQuotePricingVatCalculation = (booking: any, amount: number) => {
+const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
   const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
     || quoteVersions[quoteVersions.length - 1];
@@ -227,9 +242,25 @@ const getQuotePricingVatCalculation = (booking: any, amount: number) => {
   if (!hasCompleteVatMetadata) {
     return null;
   }
-  const originalLineNet = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
-  const discountedNet = originalLineNet > 0 && amount > 0 && amount <= originalLineNet ? amount : undefined;
-  return calculateVatFromPricingLines(pricingLines, discountedNet);
+  // VAT is calculated on the price AFTER commission is included, mirroring
+  // the recorded quote customer totals: commission each line first, then
+  // allocate VAT across the customer-facing lines.
+  const proTotal = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
+  const customerNet = commissionedQuoteAmount(proTotal, (booking as any).checkoutSnapshot, commissionPercent);
+  const commissionedLines = commissionedPricingLines(
+    pricingLines.map((line: any) => ({
+      description: String(line.description || ''),
+      price: Number(line.price),
+      vatRate: Number(line.vatRate),
+      vatCountry: line.vatCountry,
+      vatLabel: line.vatLabel,
+    })),
+    customerNet,
+    commissionPercent,
+  );
+  const commissionedNet = commissionedLines.reduce((sum, line) => sum + Number(line.price), 0);
+  const discountedNet = commissionedNet > 0 && amount > 0 && amount <= commissionedNet ? amount : undefined;
+  return calculateVatFromPricingLines(commissionedLines, discountedNet);
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(Math.max(value, min), max);
@@ -377,8 +408,7 @@ export const createPaymentIntent = async (
     // Fetch commission rate from DB early so milestone amounts include it
     let commissionPercent: number;
     try {
-      const platformConfig = await PlatformSettings.getCurrentConfig();
-      commissionPercent = platformConfig.commissionPercent;
+      commissionPercent = await getCheckoutCommissionPercent();
     } catch (configError) {
       console.warn('Failed to fetch platform config from DB, falling back to env var:', configError);
       const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
@@ -394,7 +424,6 @@ export const createPaymentIntent = async (
 
     let chargeAmount = commissionedQuoteAmount(booking.quote.amount, (booking as any).checkoutSnapshot, commissionPercent);
     let milestoneIndex: number | null = null;
-    let milestoneOrder: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
       const sorted = normalizeBookingMilestones(booking.milestonePayments as any[]);
       const nextPayable = sorted.find((milestone) => isMilestoneCurrentlyPayable(milestone, sorted));
@@ -413,7 +442,6 @@ export const createPaymentIntent = async (
         }
         chargeAmount = +(nextPayable.amount * (1 + commissionPercent / 100)).toFixed(2);
         milestoneIndex = nextPayable._originalIndex;
-        milestoneOrder = nextPayable.order ?? 0;
       } else {
         return {
           success: false,
@@ -424,19 +452,14 @@ export const createPaymentIntent = async (
         };
       }
     }
-    const extrasAlreadyInQuote = quoteAmountIncludesSelectedExtras(booking);
-    const commissionedExtraOptionsTotal = +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
-    let milestoneExtraOptionsCharge = 0;
-    if (selectedExtraOptionsTotal > 0 && !extrasAlreadyInQuote) {
-      if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
-        const minOrder = Math.min(...booking.milestonePayments.map((m: any) => m.order ?? 0));
-        if (milestoneOrder === minOrder) {
-          milestoneExtraOptionsCharge = commissionedExtraOptionsTotal;
-          chargeAmount += milestoneExtraOptionsCharge;
-        }
-      } else {
-        chargeAmount += commissionedExtraOptionsTotal;
-      }
+    // Client bug list #19b: options are charged in full with the first
+    // milestone via the shared charge plan — never split across milestones.
+    if (milestoneIndex !== null) {
+      const planEntry = buildMilestoneChargePlan(booking, commissionPercent)
+        .find((entry) => entry.index === milestoneIndex) || null;
+      if (planEntry) chargeAmount = planEntry.expectedCustomerGross;
+    } else if (selectedExtraOptionsTotal > 0 && !quoteAmountIncludesSelectedExtras(booking)) {
+      chargeAmount += +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
     }
 
     if (booking.payment?.stripePaymentIntentId && booking.payment?.stripeClientSecret) {
@@ -553,7 +576,7 @@ export const createPaymentIntent = async (
     // quotation line metadata.
     const quotePricingVatCalculation = configuredVatDecision?.reverseCharge
       ? null
-      : getQuotePricingVatCalculation(booking, discountedQuoteAmount);
+      : getQuotePricingVatCalculation(booking, discountedQuoteAmount, commissionPercent);
     const vatCountry = parseVatCountryCode(
       configuredVatDecision?.country || booking.location?.country || customer.location?.country,
     );
@@ -847,7 +870,8 @@ export const confirmPayment = async (req: Request, res: Response) => {
         await notifyBookingPaymentConfirmed({
           bookingId: String(booking._id),
           paymentIntentId: typeof paymentIntentId === 'string' ? paymentIntentId : undefined,
-          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          // VAT-inclusive amount actually paid, matching booking details.
+          amount: grossPaidAmount(booking.payment),
           currency: (booking.payment as any)?.currency || 'EUR',
         });
       } catch (notifyError: any) {
@@ -956,9 +980,20 @@ export const confirmPayment = async (req: Request, res: Response) => {
         await notifyBookingPaymentConfirmed({
           bookingId: String(booking._id),
           paymentIntentId: paymentIntent.id,
-          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          // VAT-inclusive amount actually paid, matching booking details.
+          amount: grossPaidAmount(booking.payment),
           currency: (paymentIntent.currency || (booking.payment as any)?.currency || 'EUR').toUpperCase(),
         });
+        // A settled milestone can make the next one payable; the per-milestone
+        // delivery key dedupes this with the webhook and the reminder sweep.
+        if (typeof msIdx === 'number') {
+          try {
+            const { notifyMilestonePaymentDue } = await import('../../utils/notifications/milestonePaymentDue');
+            await notifyMilestonePaymentDue(String(booking._id));
+          } catch (milestoneDueError: any) {
+            console.error(`[PAYMENT CONFIRM] Milestone-due notify failed for booking ${booking._id}:`, milestoneDueError?.message || milestoneDueError);
+          }
+        }
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
@@ -1330,6 +1365,8 @@ export const executeRefund = async (
     throw new RefundError('NO_PAYMENT', 'No payment to refund');
   }
 
+  const wasStarted = isBookingStarted(booking);
+
   // Legacy bookings predate totalWithVat; fall back to the captured amount so
   // they keep a refundable capacity instead of throwing REFUND_EXCEEDS_TOTAL.
   const totalWithVat = booking.payment?.totalWithVat ?? booking.payment?.amount ?? 0;
@@ -1450,6 +1487,8 @@ export const executeRefund = async (
     booking.payment.refundSource = 'platform';
     if (!isPartial) {
       booking.status = 'cancelled';
+    } else {
+      preparePartialRefundCancellation(booking, wasStarted);
     }
     await booking.save();
 
@@ -1540,6 +1579,8 @@ export const executeRefund = async (
     booking.payment.refundReason = reason;
     if (booking.payment.status === 'refunded') {
       booking.status = 'refunded';
+    } else {
+      preparePartialRefundCancellation(booking, wasStarted);
     }
     await booking.save();
 
@@ -1765,6 +1806,18 @@ export const refundPayment = async (req: Request, res: Response) => {
     }
 
     const result = await executeRefund(bookingId, { amount, reason, actorId: userId });
+
+    // A partial refund on a live booking closes it with a billable remainder:
+    // generate the FIX/SUP invoices from the remaining amount when missing.
+    try {
+      const refreshed = await Booking.findById(bookingId).select('payment.status payment.totalWithVat');
+      if (refreshed?.payment?.status === 'partially_refunded') {
+        const { ensureRefundInvoices } = await import('../../utils/refundFinalization');
+        void ensureRefundInvoices(bookingId);
+      }
+    } catch (invoiceTriggerError: any) {
+      console.error(`Refund invoice trigger failed for booking ${bookingId}:`, invoiceTriggerError?.message || invoiceTriggerError);
+    }
 
     if (user?.role === 'admin') {
       await auditLog({

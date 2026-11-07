@@ -4,8 +4,10 @@ import { isUserFacingError } from '../../utils/appErrors';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
 import User from '../../models/user';
-import { buildPerResourceBlockedDays, toZonedTime, fromZonedTime, startOfDayZoned } from '../../utils/scheduleEngine';
+import { resolveAvailability } from '../../utils/availabilityHelpers';
+import { buildPerResourceBlockedDays, buildPerMemberBlockedData, fromZonedTime, getResourcePolicy, isMemberAvailableForWindow, resolveEffectiveScheduleTimeZone, startOfDayZoned, toZonedTime } from '../../utils/scheduleEngine';
 import { findBookingCalendarConflictsForSchedule, replaceBookingCalendar } from '../../utils/support/bookingCalendar';
+import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { isAnonymizedAccount, maskAnonymizedUser } from '../../utils/accountAnonymity';
 
@@ -126,8 +128,65 @@ const resolveExecutionDays = (project: any, booking: any): number => {
   return Math.max(1, Math.ceil(value));
 };
 
-const resolveTimeZone = (professional: any): string => {
-  return professional?.businessInfo?.timezone || 'UTC';
+const resolveTimeZone = (professional: any, requestTimeZone?: unknown): string => {
+  return resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
+};
+
+/** Hour-mode bookings plan a fixed time window, not days (client bug list #23a/#24a). */
+const isHourModeBooking = (booking: any, project: any): boolean => {
+  if (booking?.scheduledStartTime) return true;
+  const snapshotUnit = booking?.scheduleSnapshot?.executionDuration?.unit;
+  if (snapshotUnit === 'hours') return true;
+  if (project?.timeMode === 'hours') return true;
+  const subIndex = booking?.selectedSubprojectIndex;
+  const sub = typeof subIndex === 'number' ? project?.subprojects?.[subIndex] : undefined;
+  if (sub?.executionDuration?.unit === 'hours') return true;
+  return project?.executionDuration?.unit === 'hours';
+};
+
+const windowEndOf = (booking: any): Date | null => {
+  const end = booking?.scheduledBufferEndDate || booking?.scheduledExecutionEndDate;
+  if (!end) return null;
+  const date = end instanceof Date ? end : new Date(end);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/**
+ * Per-resource availability for an hour-mode booking's exact time window.
+ * Day blocks cannot answer this (a 2h booking leaves the day "available"
+ * under the 3-hour free-hours rule), so check the window itself per member.
+ * Returns null per resource when the window is unknown.
+ */
+const getHourWindowAvailability = async (
+  booking: any,
+  professional: any,
+  project: any,
+  candidateIds: string[],
+  timeZone: string
+): Promise<Map<string, boolean | null>> => {
+  const result = new Map<string, boolean | null>();
+  const rawStart = booking?.scheduledStartDate;
+  const start = rawStart instanceof Date ? rawStart : rawStart ? new Date(rawStart) : null;
+  const end = windowEndOf(booking);
+  if (!start || Number.isNaN(start.getTime()) || !end || end <= start) {
+    candidateIds.forEach((id) => result.set(id, null));
+    return result;
+  }
+  const availability = resolveAvailability(professional?.companyAvailability);
+  const perMemberBlocked = await buildPerMemberBlockedData(
+    { _id: project?._id, resources: candidateIds } as any,
+    professional,
+    timeZone,
+    booking.customerBlocks,
+    booking._id?.toString?.()
+  );
+  for (const id of candidateIds) {
+    result.set(
+      id,
+      isMemberAvailableForWindow(perMemberBlocked.get(id), availability, start, end, timeZone)
+    );
+  }
+  return result;
 };
 
 const getPlannedDayKeys = (booking: any): Map<string, Set<string>> => {
@@ -179,7 +238,13 @@ const buildWindow = (booking: any, project: any, timeZone: string) => {
 const buildPlanningPayload = async (booking: any, professional: any, project: any) => {
   const candidateResources = await resolveCandidateResources(booking);
   const resourceIds = candidateResources.map((r) => r._id);
-  const timeZone = resolveTimeZone(professional);
+  const timeZone = resolveTimeZone(professional, booking.scheduleTimeZone);
+  const hourMode = isHourModeBooking(booking, project);
+  const assignedIds = new Set<string>(
+    (Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : [])
+      .map((m: any) => (m?._id || m)?.toString?.())
+      .filter(Boolean)
+  );
   const { startZoned, windowFromZoned, windowToZoned, todayZoned, isInProgress, executionDays, plannedEndZoned, windowFromReal, windowToReal } =
     buildWindow(booking, project, timeZone);
 
@@ -202,12 +267,7 @@ const buildPlanningPayload = async (booking: any, professional: any, project: an
   const hasAnyPlan = Array.isArray(booking.resourcePlan)
     && booking.resourcePlan.some((e: any) => Array.isArray(e?.days) && e.days.length > 0);
 
-  if (!hasAnyPlan) {
-    const assignedIds = new Set<string>(
-      (Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : [])
-        .map((m: any) => (m?._id || m)?.toString?.())
-        .filter(Boolean)
-    );
+  if (!hasAnyPlan && !hourMode) {
     const seedResourceIds = assignedIds.size > 0
       ? resourceIds.filter((id) => assignedIds.has(id))
       : resourceIds.slice(0, 1);
@@ -236,12 +296,38 @@ const buildPlanningPayload = async (booking: any, professional: any, project: an
     ? (customer.name || customer.username || customer.email || 'Customer')
     : 'Customer';
 
+  // Hour-mode attendance preview (client bug list #24a): day blocks use the
+  // 3-hour free-hours rule, so they cannot say whether a resource is free for
+  // the exact time window. Check the window itself per candidate resource.
+  let hourWindowAvailability = new Map<string, boolean | null>();
+  if (hourMode && resourceIds.length > 0) {
+    hourWindowAvailability = await getHourWindowAvailability(
+      booking,
+      professional,
+      project,
+      resourceIds,
+      timeZone
+    );
+  }
+
   return {
     bookingId: booking._id.toString(),
     bookingNumber: booking.bookingNumber || '',
     customerName,
     status: booking.status,
+    mode: hourMode ? 'hours' : 'days',
     startDate: formatDayKey(startZoned),
+    ...(hourMode
+      ? {
+          startTime: booking.scheduledStartTime || null,
+          endTime: booking.scheduledEndTime || null,
+          executionEndDate: booking.scheduledExecutionEndDate
+            ? new Date(booking.scheduledExecutionEndDate).toISOString()
+            : null,
+          bufferEndDate: windowEndOf(booking)?.toISOString() || null,
+          timeZone,
+        }
+      : {}),
     windowFrom: formatDayKey(windowFromZoned),
     windowTo: formatDayKey(windowToZoned),
     today: formatDayKey(todayZoned),
@@ -251,6 +337,12 @@ const buildPlanningPayload = async (booking: any, professional: any, project: an
       name: r.name,
       blockedDays: Array.from(blockedByResource.get(r._id) || new Set<string>()).sort(),
       plannedDays: Array.from(plannedByResource.get(r._id) || new Set<string>()).sort(),
+      ...(hourMode
+        ? {
+            attending: assignedIds.has(r._id),
+            windowAvailable: hourWindowAvailability.get(r._id) ?? null,
+          }
+        : {}),
     })),
   };
 };
@@ -321,13 +413,31 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'NO_RESOURCES', message: 'This booking has no resources available to plan' } });
     }
 
-    const timeZone = resolveTimeZone(professional);
+    const timeZone = resolveTimeZone(professional, booking.scheduleTimeZone);
+    const hourMode = isHourModeBooking(booking, project);
     const { startZoned, windowFromZoned, windowToZoned, todayZoned, isInProgress, windowFromReal, windowToReal } =
       buildWindow(booking, project, timeZone);
     const startKey = formatDayKey(startZoned);
     const windowFromKey = formatDayKey(windowFromZoned);
     const windowToKey = formatDayKey(windowToZoned);
     const todayKey = formatDayKey(todayZoned);
+
+    // Hour-mode bookings own a fixed time window (client bug list #24a): the
+    // board selects which assigned resources attend it instead of planning
+    // days. The instants below stay untouched by planning saves.
+    const hourWindowStart = hourMode && booking.scheduledStartDate
+      ? new Date(booking.scheduledStartDate)
+      : null;
+    const hourWindowEnd = hourMode ? windowEndOf(booking) : null;
+    const hourWindowDayKey = hourWindowStart && !Number.isNaN(hourWindowStart.getTime())
+      ? formatDayKey(toZonedDay(hourWindowStart, timeZone))
+      : null;
+    if (hourMode && (!hourWindowStart || Number.isNaN(hourWindowStart.getTime()) || !hourWindowEnd)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_PLAN', message: 'Hour-mode planning needs a scheduled time window' } });
+    }
+    if (isInProgress && hourMode && hourWindowStart && hourWindowStart.getTime() < Date.now()) {
+      return res.status(400).json({ success: false, error: { code: 'PAST_LOCKED', message: 'Attendance cannot be changed after the time window started' } });
+    }
 
     const resourceIds = candidateResources.map((r) => r._id);
     const blockedByResource = await buildPerResourceBlockedDays(
@@ -374,13 +484,16 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
         if (key < windowFromKey || key > windowToKey) {
           return res.status(400).json({ success: false, error: { code: 'OUT_OF_WINDOW', message: 'A planned day is outside the allowed window' } });
         }
-        if (blocked.has(key)) {
+        // Day blocks use the 3-hour free-hours rule and cannot judge an hour
+        // window (a 2h booking leaves its day "available"). Hour-mode
+        // attendance is validated against the exact window below.
+        if (!hourMode && blocked.has(key)) {
           return res.status(400).json({ success: false, error: { code: 'BLOCKED_DAY', message: 'A planned day is unavailable for that resource' } });
         }
         dayKeys.add(key);
       }
 
-      if (isInProgress) {
+      if (isInProgress && !hourMode) {
         const allKeys = new Set<string>([...dayKeys, ...previous]);
         for (const key of allKeys) {
           if (key >= todayKey) continue;
@@ -392,7 +505,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
         }
       }
 
-      if (dayKeys.has(startKey)) startDatePlannedResources.add(resourceId);
+      if (dayKeys.has(hourMode ? (hourWindowDayKey as string) : startKey)) startDatePlannedResources.add(resourceId);
       for (const key of dayKeys) {
         if (!maxKey || key > maxKey) maxKey = key;
       }
@@ -407,7 +520,7 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       });
     }
 
-    if (isInProgress) {
+    if (isInProgress && !hourMode) {
       for (const [rid, previous] of existingPlanned.entries()) {
         if (seenResource.has(rid)) continue;
         for (const key of previous) {
@@ -421,6 +534,98 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
     const startDateEditable = startKey >= windowFromKey && startKey <= windowToKey;
     if (startDateEditable && startDatePlannedResources.size === 0) {
       return res.status(400).json({ success: false, error: { code: 'START_DATE_REQUIRED', message: 'At least one resource must stay planned on the start date.' } });
+    }
+
+    // Should-fix 4: backfill the resolved zone on touch so legacy rows carry
+    // it in details/timeline even when the client sends no timeZone.
+    if (!booking.scheduleTimeZone && timeZone) {
+      booking.scheduleTimeZone = timeZone;
+    }
+
+    // Hour-mode save (client bug list #24a/#24b): the window is fixed; the
+    // board only chooses which assigned resources attend it. The attending
+    // subset must satisfy the minimum required resource count and every
+    // attendee must be free for the exact window, so a busy professional is
+    // replaced by available employees instead of glitching. Instants, buffer
+    // and times stay untouched, and no day-plan is written (a day-plan would
+    // full-day-block the calendar for an hour booking).
+    if (hourMode && hourWindowStart && hourWindowEnd && hourWindowDayKey) {
+      const policy = getResourcePolicy(project);
+      const attendingIds = Array.from(startDatePlannedResources);
+      if (attendingIds.length < Math.max(1, policy.minResources)) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'INSUFFICIENT_RESOURCES',
+            message: `At least ${Math.max(1, policy.minResources)} resource(s) must attend the time window`,
+          },
+        });
+      }
+
+      const windowAvailability = await getHourWindowAvailability(
+        booking,
+        professional,
+        project,
+        attendingIds,
+        timeZone
+      );
+      for (const id of attendingIds) {
+        if (windowAvailability.get(id) === false) {
+          return res.status(400).json({ success: false, error: { code: 'BLOCKED_WINDOW', message: 'A resource is unavailable for the booked time window' } });
+        }
+      }
+
+      const attendingObjectIds = attendingIds.map((id) => new mongoose.Types.ObjectId(id));
+      const calendarCandidate = {
+        _id: booking._id,
+        professional: (booking.professional as any)?._id || booking.professional,
+        assignedTeamMembers: attendingObjectIds,
+        resourcePlan: [],
+        scheduledStartDate: hourWindowStart,
+        scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
+        scheduledBufferEndDate: booking.scheduledBufferEndDate,
+      };
+      const bookingConflicts = await findTeamConflicts(
+        booking._id.toString(),
+        attendingObjectIds as any[],
+        hourWindowStart,
+        hourWindowEnd
+      );
+      const calendarConflicts = await findBookingCalendarConflictsForSchedule({
+        bookingId: booking._id,
+        booking: calendarCandidate as any,
+      });
+      const conflicts = [...bookingConflicts, ...calendarConflicts];
+      if (conflicts.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'TEAM_CONFLICT',
+            message: 'The attending resources conflict with another booking, meeting, or support reservation',
+            conflicts,
+          },
+        });
+      }
+
+      booking.resourcePlan = [];
+      booking.assignedTeamMembers = attendingObjectIds as any;
+
+      booking.statusHistory = booking.statusHistory || [];
+      booking.statusHistory.push({
+        status: booking.status,
+        timestamp: new Date(),
+        updatedBy: (req as any).user._id,
+        note: `Planning updated: hour window ${booking.scheduledStartTime || ''}-${booking.scheduledEndTime || ''} with ${attendingIds.length} resource(s)`,
+      } as any);
+
+      await withAnonymizationWriteFence([userId], async (session) => {
+        await replaceBookingCalendar(calendarCandidate as any, session);
+        await booking.save({ validateModifiedOnly: true, ...(session ? { session } : {}) });
+        return true;
+      });
+
+      const payload = await buildPlanningPayload(booking, professional, project);
+      return res.json({ success: true, data: payload });
     }
 
     const planWithDays = normalizedPlan.filter((p) => p.days.length > 0);

@@ -13,16 +13,19 @@ import {
   DAY_KEYS,
   fromZonedTime,
   getProjectAvailableSlotsForDate,
+  resolveEffectiveScheduleTimeZone,
   resolveProjectScheduleQuantity,
   getResourcePolicy,
   getUnbookableStartDates,
   getWorkingRangeUtc,
+  hasMinimumFreeWorkingSchedule,
+  isDayBlockedByCoveredMinutes,
   normalizeRangeEndInclusive,
-  PARTIAL_BLOCK_THRESHOLD_HOURS,
   startOfDayZoned,
   toZonedTime,
   type ResourcePolicy
 } from "../../utils/scheduleEngine";
+import { bookingCalendarOccupancies } from "../../utils/support/bookingCalendar";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
@@ -94,6 +97,19 @@ const toBlockedRange = (range?: {
     endDate,
     reason: range.reason,
   };
+};
+
+/**
+ * Enriched per-booking range for the team calendar. `status`/`bookingId` are
+ * additive display fields (colour + link-back); every range array below shares
+ * this type so the shapes cannot drift apart again.
+ */
+type TeamBookingRange = {
+  startDate: string;
+  endDate: string;
+  reason?: string;
+  status?: string;
+  bookingId?: string;
 };
 
 type ProfessionalStats = {
@@ -337,6 +353,34 @@ const buildNonWorkingDates = (
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return nonWorking;
+};
+
+/**
+ * Working days whose schedule is shorter than MIN_FREE_HOURS_FOR_DAY_AVAILABILITY
+ * (client bug list #2). They can never be available in day mode, even with no
+ * booking or block, so they are blocked up front instead of only once touched.
+ */
+const buildShortScheduleDates = (
+  rangeStart: Date,
+  rangeEnd: Date,
+  timeZone: string,
+  availability: Record<string, any>
+) => {
+  const shortDays: string[] = [];
+  const cursor = new Date(rangeStart);
+  while (cursor <= rangeEnd) {
+    const zonedDay = startOfDayZoned(toZonedTime(cursor, timeZone));
+    const dayAvailability = availability[DAY_KEYS[zonedDay.getUTCDay()]];
+    if (
+      dayAvailability &&
+      dayAvailability.available !== false &&
+      !hasMinimumFreeWorkingSchedule(availability, zonedDay, timeZone)
+    ) {
+      shortDays.push(toLocalMidnightUtc(cursor, timeZone).toISOString());
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return shortDays;
 };
 
 /**
@@ -827,11 +871,13 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const validatedTeamMemberIdStrings = validatedTeamMemberIds.map((id) => String(id));
 
     const professional = await User.findById(project.professionalId).select(
-      "companyAvailability companyBlockedDates companyBlockedRanges blockedDates blockedRanges businessInfo.timezone"
+      "companyAvailability companyBlockedDates companyBlockedRanges blockedDates blockedRanges businessInfo.timezone businessInfo.country"
     );
 
-    // Get professional's timezone for proper date handling
-    const timeZone = professional?.businessInfo?.timezone || "UTC";
+    // Get professional's timezone for proper date handling.
+    // Client bug list #23b: never convert wall times in UTC when the
+    // professional's business info carries no usable zone.
+    const timeZone = resolveEffectiveScheduleTimeZone(professional);
 
     const availability = resolveAvailability(professional?.companyAvailability);
     const { rangeStart, rangeEnd } = getDateRange(startDate, endDate, 180);
@@ -846,14 +892,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       weekends: nonWorkingDates,
       company: {
         dates: [] as string[],
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
       personal: {
         dates: [] as string[],
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
       bookings: {
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
     };
 
@@ -873,10 +919,12 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const dateBlockedMembers = new Map<string, Set<string>>();
     // Track which members have FULL-DAY blocks (from blockedDates, not ranges)
     const memberFullDayBlocked = new Map<string, Set<string>>(); // dateIso -> Set<memberId>
-    // Track actual blocked time ranges per member (for 4-hour threshold calculation)
+    // Track actual blocked time ranges per member (for the free-hours threshold calculation)
     const memberBlockedTimeRanges = new Map<string, Array<{ start: Date; end: Date }>>();
-    const PARTIAL_BLOCK_THRESHOLD = 4; // hours
-    const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    // Calendar days touched by at least one blocked range per member (day keys are
+    // local-midnight-UTC ISO strings). The final pass evaluates merged totals for
+    // every touched day so split blocks (e.g. 2h + 2h + 2h) count together.
+    const memberDaysWithRanges = new Map<string, Set<string>>();
 
     // Helper to mark a member as blocked on a date
     const markMemberBlocked = (dateIso: string, memberId: string) => {
@@ -910,8 +958,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       memberBlockedTimeRanges.get(memberId)!.push({ start, end });
     };
 
-    // Helper to expand a date range and mark a member blocked only when the
-    // blocked overlap with that working day is at least the threshold hours.
+    // Helper to expand a date range and record which calendar days it touches
+    // for a member. Day-mode availability (client bug list #2) requires at
+    // least MIN_FREE_HOURS_FOR_DAY_AVAILABILITY free hours within the working
+    // schedule, evaluated on merged totals in the final pass below — never on
+    // a single range in isolation.
     // Uses professional's timezone to determine which calendar days are affected
     const expandRangeAndMarkBlocked = (startIso: string, endIso: string, memberId: string) => {
       const start = new Date(startIso);
@@ -936,6 +987,12 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       const startDay = new Date(Date.UTC(startZoned.getUTCFullYear(), startZoned.getUTCMonth(), startZoned.getUTCDate()));
       const endDay = new Date(Date.UTC(endZoned.getUTCFullYear(), endZoned.getUTCMonth(), endZoned.getUTCDate()));
 
+      let touched = memberDaysWithRanges.get(memberId);
+      if (!touched) {
+        touched = new Set<string>();
+        memberDaysWithRanges.set(memberId, touched);
+      }
+
       const cursor = new Date(startDay);
       while (cursor <= endDay) {
         const dayStartZoned = startOfDayZoned(cursor);
@@ -949,68 +1006,31 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           continue;
         }
 
-        const workingRange = getWorkingRangeUtc(availability, cursor, timeZone);
-        if (!workingRange) {
-          cursor.setUTCDate(cursor.getUTCDate() + 1);
-          continue;
-        }
-
-        const overlapStart = Math.max(
-          start.getTime(),
-          dayStartUtc.getTime(),
-          workingRange.startUtc.getTime()
-        );
-        const overlapEnd = Math.min(
-          rangeEndInclusive.getTime(),
-          dayEndUtc.getTime(),
-          workingRange.endUtc.getTime()
-        );
-
-        if (overlapEnd > overlapStart) {
-          const overlapHours = (overlapEnd - overlapStart) / (1000 * 60 * 60);
-          if (overlapHours >= PARTIAL_BLOCK_THRESHOLD_HOURS) {
-            markMemberBlocked(cursor.toISOString(), memberId);
-          }
-        }
+        const dayKey = toLocalMidnightUtc(dayStartUtc, timeZone).toISOString();
+        touched.add(dayKey);
         cursor.setUTCDate(cursor.getUTCDate() + 1);
       }
     };
 
     // Compute blocked hours for a member on a specific day (within working hours)
-    const computeMemberBlockedHoursForDay = (memberId: string, dateIso: string): number => {
+    const computeMemberBlockedHoursForDay = (
+      memberId: string, dateIso: string,
+      workingRange: { startUtc: Date; endUtc: Date },
+    ): number => {
       const ranges = memberBlockedTimeRanges.get(memberId);
       if (!ranges || ranges.length === 0) return 0;
-
-      const dayUtc = new Date(dateIso);
-      const zonedDay = toZonedTime(dayUtc, timeZone);
-      const dayConfig = availability[DAY_NAMES[zonedDay.getUTCDay()]];
-      if (!dayConfig?.available || !dayConfig?.startTime || !dayConfig?.endTime) return Infinity;
-
-      const dateStr = dateIso.split('T')[0];
-      const workingStartMs = fromZonedTime(
-        new Date(Date.UTC(
-          parseInt(dateStr.slice(0, 4)), parseInt(dateStr.slice(5, 7)) - 1, parseInt(dateStr.slice(8, 10)),
-          parseInt(dayConfig.startTime.split(':')[0]), parseInt(dayConfig.startTime.split(':')[1]), 0
-        )),
-        timeZone
-      ).getTime();
-      const workingEndMs = fromZonedTime(
-        new Date(Date.UTC(
-          parseInt(dateStr.slice(0, 4)), parseInt(dateStr.slice(5, 7)) - 1, parseInt(dateStr.slice(8, 10)),
-          parseInt(dayConfig.endTime.split(':')[0]), parseInt(dayConfig.endTime.split(':')[1]), 0
-        )),
-        timeZone
-      ).getTime();
-
-      if (workingEndMs <= workingStartMs) return Infinity;
-
-      const dayStartMs = dayUtc.getTime();
-      const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+      const zonedDay = startOfDayZoned(toZonedTime(new Date(dateIso), timeZone));
+      const nextDay = new Date(zonedDay);
+      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+      const dayStartMs = fromZonedTime(zonedDay, timeZone).getTime();
+      const dayEndMs = fromZonedTime(nextDay, timeZone).getTime();
+      const workingStartMs = workingRange.startUtc.getTime();
+      const workingEndMs = workingRange.endUtc.getTime();
 
       const clamped = ranges
         .map(range => {
           const rangeStartMs = Math.max(range.start.getTime(), dayStartMs);
-          const rangeEndMs = Math.min(range.end.getTime(), dayEndMs);
+          const rangeEndMs = Math.min(normalizeRangeEndInclusive(range.end, timeZone).getTime(), dayEndMs);
           if (rangeEndMs <= rangeStartMs) return null;
           const start = Math.max(rangeStartMs, workingStartMs);
           const end = Math.min(rangeEndMs, workingEndMs);
@@ -1042,7 +1062,10 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
     const allBlockedDates = new Set<string>(nonWorkingDates);
-    const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+    buildShortScheduleDates(rangeStart, rangeEnd, timeZone, availability).forEach((dateIso) =>
+      allBlockedDates.add(dateIso)
+    );
+    const allBlockedRanges: TeamBookingRange[] = [];
 
     if (professional?.companyBlockedDates) {
       professional.companyBlockedDates.forEach((blocked) => {
@@ -1163,12 +1186,13 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     if (validatedTeamMemberIds.length > 0) {
       bookingFilter.$or.push(
         { assignedTeamMembers: { $in: validatedTeamMemberIds } },
+        { 'resourcePlan.resourceId': { $in: validatedTeamMemberIds } },
         { professional: { $in: validatedTeamMemberIds } }
       );
     }
 
     const bookings = await Booking.find(bookingFilter).select(
-      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status assignedTeamMembers professional"
+      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate status assignedTeamMembers professional resourcePlan project"
     );
 
     // Build set of project resources for efficient lookup (using validated IDs)
@@ -1208,6 +1232,18 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // Track which bookings block which resources
     bookings.forEach((booking) => {
+      if (booking.resourcePlan?.some((entry: any) => entry.days?.length)) {
+        for (const occupancy of bookingCalendarOccupancies(booking)) {
+          if (!projectResources.has(occupancy.userId)) continue;
+          // Calendar ends are exclusive; scheduler blocked ranges are inclusive.
+          const startDate = occupancy.startAt.toISOString();
+          const endDate = new Date(occupancy.endAt.getTime() - 1).toISOString();
+          blockedCategories.bookings.ranges.push({ startDate, endDate, reason: 'booking',
+            status: String(booking.status), bookingId: String(booking._id) });
+          expandRangeAndMarkBlocked(startDate, endDate, occupancy.userId);
+        }
+        return;
+      }
       const scheduledExecutionEndDate =
         booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
       const scheduledBufferStartDate =
@@ -1270,7 +1306,16 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           reason: "booking",
         });
         if (blockedRange) {
-          blockedCategories.bookings.ranges.push(blockedRange);
+          const bookingRange: TeamBookingRange = {
+            ...blockedRange,
+            // Frontend colours team-calendar booking ranges by status.
+            // Additive only; the booking id lets the UI link back. The same
+            // object reference is mirrored into `allBlockedRanges` by the
+            // loop below in simple mode, so shading and the range list agree.
+            status: (booking as any).status ? String((booking as any).status) : undefined,
+            bookingId: String(booking._id),
+          };
+          blockedCategories.bookings.ranges.push(bookingRange);
           // Mark each blocked resource for each day in the range
           blockedResourceIds.forEach((resourceId) => {
             expandRangeAndMarkBlocked(blockedRange.startDate, blockedRange.endDate, resourceId);
@@ -1300,7 +1345,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           reason: "booking-buffer",
         });
         if (bufferRange) {
-          blockedCategories.bookings.ranges.push(bufferRange);
+          blockedCategories.bookings.ranges.push({
+            ...bufferRange,
+            status: (booking as any).status ? String((booking as any).status) : undefined,
+            bookingId: String(booking._id),
+          });
           // Mark each blocked resource for each day in the range
           blockedResourceIds.forEach((resourceId) => {
             expandRangeAndMarkBlocked(bufferRange.startDate, bufferRange.endDate, resourceId);
@@ -1376,31 +1425,34 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       });
     }
 
+    // Final availability pass (client bug list #2): evaluate every touched
+    // member/day on merged totals. A member is blocked on a day when they have
+    // a full-day block OR less than MIN_FREE_HOURS_FOR_DAY_AVAILABILITY free
+    // within the working schedule. Split blocks on the same day count together.
+    validatedTeamMemberIdStrings.forEach((memberId) => {
+      const touched = memberDaysWithRanges.get(memberId);
+      if (!touched) return;
+      touched.forEach((dateIso) => {
+        if (memberFullDayBlocked.get(dateIso)?.has(memberId)) return; // already marked
+        const zonedDay = startOfDayZoned(toZonedTime(new Date(dateIso), timeZone));
+        const workingRange = getWorkingRangeUtc(availability, zonedDay, timeZone);
+        if (!workingRange) return; // non-working days are already in allBlockedDates
+        const scheduleMinutes =
+          (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
+        const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso, workingRange);
+        if (isDayBlockedByCoveredMinutes(blockedHours * 60, scheduleMinutes)) {
+          markMemberBlocked(dateIso, memberId);
+        }
+      });
+    });
+
     // Per-day blocking for multi-resource availability:
     // A day is unavailable when fewer than minResources are available.
-    // Uses the 4-hour threshold: a member is only considered "blocked" on a day
-    // if they have a full-day block OR their blocked ranges within working hours >= 4 hours.
+    // Member marks above are authoritative (full-day or free-hours rule).
     // This must match days-mode scheduling start-date validation.
     if (useMultiResourceMode) {
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
-        const fullDayBlocked = memberFullDayBlocked.get(dateIso);
-
-        // Count actually blocked members using 4-hour threshold
-        let actualBlockedCount = 0;
-        blockedMemberIds.forEach(memberId => {
-          // Full-day blocks always count
-          if (fullDayBlocked?.has(memberId)) {
-            actualBlockedCount++;
-            return;
-          }
-          // Range-based blocks: apply 4-hour threshold
-          const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
-          if (blockedHours >= PARTIAL_BLOCK_THRESHOLD) {
-            actualBlockedCount++;
-          }
-        });
-
-        const availableResources = totalResources - actualBlockedCount;
+        const availableResources = totalResources - blockedMemberIds.size;
 
         if (availableResources < minResources) {
           allBlockedDates.add(dateIso);
@@ -1408,24 +1460,9 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
         }
       });
     } else {
-      // Single resource mode: also apply 4-hour threshold for range-based blocks
+      // Single resource mode: a marked day is blocked.
       dateBlockedMembers.forEach((blockedMemberIds, dateIso) => {
-        const fullDayBlocked = memberFullDayBlocked.get(dateIso);
-
-        // Check if any member is actually blocked (full-day or >= 4 hours)
-        let hasActualBlock = false;
-        blockedMemberIds.forEach(memberId => {
-          if (fullDayBlocked?.has(memberId)) {
-            hasActualBlock = true;
-            return;
-          }
-          const blockedHours = computeMemberBlockedHoursForDay(memberId, dateIso);
-          if (blockedHours >= PARTIAL_BLOCK_THRESHOLD) {
-            hasActualBlock = true;
-          }
-        });
-
-        if (hasActualBlock) {
+        if (blockedMemberIds.size > 0) {
           allBlockedDates.add(dateIso);
           finalBlockedDateSet.add(dateIso);
         }
@@ -1434,6 +1471,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // In multi-resource days mode, don't add individual booking/personal ranges.
     // We only want to block explicit dates (all resources unavailable or full overlap).
+    // Deliberate split: `blockedCategories` above remains the full structured
+    // feed (per-booking ranges keep `status`/`bookingId` for calendar shading),
+    // while the flat `blockedRanges` list below intentionally carries no
+    // per-range detail in window mode. In simple mode the mirror loop copies
+    // the same enriched references, so both views agree.
     const useWindowBasedCheck = useMultiResourceMode && executionDays && executionDays > 0;
 
     if (!useWindowBasedCheck) {
@@ -1584,7 +1626,7 @@ export const getProjectWorkingHours = async (req: Request, res: Response) => {
     }
 
     const professional = await User.findById(project.professionalId).select(
-      "companyAvailability businessInfo.timezone"
+      "companyAvailability businessInfo.timezone businessInfo.country"
     );
 
     const availability = resolveAvailability(professional?.companyAvailability);
@@ -1592,7 +1634,7 @@ export const getProjectWorkingHours = async (req: Request, res: Response) => {
     res.json({
       success: true,
       availability,
-      timezone: professional?.businessInfo?.timezone || "UTC",
+      timezone: resolveEffectiveScheduleTimeZone(professional),
     });
   } catch (error) {
     console.error("Error fetching working hours:", error);
@@ -1667,7 +1709,7 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
     const safeDurationOverride = selectedPricing?.type === 'unit' && selectedPricing.durationBasis === 'per_unit'
       ? { ...durationOverride, execution: undefined }
       : durationOverride;
-    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, safeDurationOverride, excludeBookingId, scheduleQuantity.quantity);
+    const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, safeDurationOverride, excludeBookingId, scheduleQuantity.quantity, typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined);
 
     if (!proposals) {
       return res.status(404).json({
@@ -1744,6 +1786,7 @@ export const getProjectAvailableSlots = async (req: Request, res: Response) => {
       subprojectIndex: subprojectIndexResult.index,
       startDate: date,
       quantity: scheduleQuantity.quantity,
+      requestTimeZone: typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined,
     });
 
     if (!result) {
@@ -1847,6 +1890,7 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
       startTime: typeof startTime === "string" ? startTime : undefined,
       durationOverride: safeDurationOverrideW,
       quantity: scheduleQuantityW.quantity,
+      requestTimeZone: typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined,
     });
 
     if (!window) {
@@ -1868,6 +1912,7 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
         scheduledStartTime: window.scheduledStartTime,
         scheduledEndTime: window.scheduledEndTime,
         throughputDays: window.throughputDays,
+        timeZone: window.timeZone,
       },
     };
     console.log('[SCHEDULE WINDOW API] Success response:', response);
