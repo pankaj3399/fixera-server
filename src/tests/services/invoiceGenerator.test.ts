@@ -407,10 +407,17 @@ describe('referral customer invoice and UBL accounting', () => {
       const sign = creditNote ? -1 : 1;
       expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${(booking.payment.totalWithVat * sign).toFixed(2)}</cbc:TaxInclusiveAmount>`);
       // Sum the actual rendered UBL lines, excluding the monetary-total summary.
+      // Invoices carry the discounts as document-level allowances (BR-27),
+      // credit notes still as lines: lines minus allowances is the paid net.
       const lineXml = xml.match(/<cac:(?:InvoiceLine|CreditNoteLine)>[\s\S]*?<\/cac:(?:InvoiceLine|CreditNoteLine)>/g)!;
       const amounts = lineXml.map(line => Number(line.match(/<cbc:LineExtensionAmount[^>]*>([^<]+)/)![1]));
+      const allowances = [...xml.matchAll(/<cac:AllowanceCharge>[\s\S]*?<cbc:Amount[^>]*>([^<]+)<\/cbc:Amount>/g)].map(match => Number(match[1]));
+      expect(allowances.length > 0).toBe(!creditNote);
+      expect(xml).not.toMatch(creditNote ? /<cbc:AllowanceTotalAmount/ : /<cbc:PriceAmount[^>]*>-/);
       expect(amounts[0]).toBe(Number(original) * sign);
-      expect(round(amounts.reduce((sum, value) => sum + value, 0))).toBe(booking.payment.netAmount * sign);
+      expect(round(amounts.reduce((sum, value) => sum + value, 0) - allowances.reduce((sum, value) => sum + value, 0)))
+        .toBe(booking.payment.netAmount * sign);
+      expect(xml).toContain(`<cbc:TaxExclusiveAmount currencyID="EUR">${(booking.payment.netAmount * sign).toFixed(2)}</cbc:TaxExclusiveAmount>`);
       expect(round((Number(original) - Number(referral) - Number(loyalty) - Number(code)) * 1.21)).toBe(booking.payment.totalWithVat);
     }
   });

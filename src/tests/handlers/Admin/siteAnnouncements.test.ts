@@ -159,7 +159,8 @@ describe('admin site announcement handlers', () => {
     expect(res.statusCode).toBe(200);
     expect(findOneAndUpdate).toHaveBeenCalledWith(
       { _id: '507f1f77bcf86cd799439011' },
-      { title: 'New title' },
+      // Legacy doc without a source hash: the edit records the new hash.
+      { $set: { title: 'New title', translationSourceHash: expect.any(String) } },
       { new: true, runValidators: true },
     );
   });
@@ -198,7 +199,10 @@ describe('admin site announcement handlers', () => {
     expect(res.statusCode).toBe(200);
     expect(findOneAndUpdate).toHaveBeenCalledWith(
       { _id: '507f1f77bcf86cd799439011' },
-      { $unset: { ctaLabel: 1, ctaUrl: 1, discountCode: 1 } },
+      {
+        $set: { translationSourceHash: expect.any(String) },
+        $unset: { ctaLabel: 1, ctaUrl: 1, discountCode: 1 },
+      },
       { new: true, runValidators: true },
     );
   });
@@ -260,7 +264,7 @@ describe('listPublicSiteAnnouncements', () => {
     expect(res.statusCode).toBe(200);
     expect(aggregate).toHaveBeenCalledOnce();
     const pipeline = aggregate.mock.calls[0][0];
-    expect(pipeline[2]).toEqual({
+    expect(pipeline[4]).toEqual({
       $sort: { priority: -1, localeExact: -1, createdAt: -1 },
     });
     expect((res.body as { data: { announcements: unknown[]; country: string } }).data.country).toBe(

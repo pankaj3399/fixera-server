@@ -167,6 +167,7 @@ export const basePaymentRowDefaults = (booking: any): Record<string, any> => {
     'extraCostNetAmount',
     'extraCostCustomerDiscount',
     'extraCostPlatformCommission',
+    'extraCostCommissionPercent',
     'extraCostProfessionalPayout',
     'extraCostStatus',
     'extraCostPaymentSucceeded',

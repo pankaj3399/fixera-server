@@ -1,4 +1,5 @@
 import { retryPendingBookingCalendarReleases } from "../../utils/support/calendarReleaseRetry";
+import { kpiRangeAfterBaseline, loadDashboardBaselines } from '../../utils/adminDashboardBaselines';
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
@@ -173,7 +174,11 @@ async function executeKpiMonthlyReport(
       };
     }
 
-    const buffer = await generateKpiPdf(from, to);
+    // Same counting-since rule as the KPI dashboard: after an admin reset of
+    // the booking KPIs, the monthly report does not count data before it.
+    const baselines = await loadDashboardBaselines();
+    const range = kpiRangeAfterBaseline(from, to, baselines.get('bookingKpis') ?? null);
+    const buffer = await generateKpiPdf(range.from, range.to);
     const key = `kpi-reports/monthly/${from.toISOString().slice(0, 7)}.pdf`;
     const reportUrl = await uploadBufferToS3(buffer, key, 'application/pdf');
 
@@ -184,7 +189,7 @@ async function executeKpiMonthlyReport(
       const email = String(admin.email).trim().toLowerCase();
       if (lock?.sentRecipients.has(email)) continue;
       try {
-        const delivered = await sendKpiReportEmail(email, { from, to, reportUrl });
+        const delivered = await sendKpiReportEmail(email, { from: range.from, to: range.to, reportUrl });
         if (!delivered) throw new Error('email provider rejected delivery');
         sent += 1;
         if (lock) {

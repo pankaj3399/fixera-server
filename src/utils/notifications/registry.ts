@@ -857,7 +857,10 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
   ),
   'customer.loyalty_tier_up': def(
     'customer.loyalty_tier_up',
-    'promotions',
+    // FT3 #11: a level change alters the account's benefits and fees, so it
+    // is account information (system: push + email on by default, opt-out
+    // honoured), not a promotion (off by default).
+    'system',
     'configurable',
     'customer',
     (ctx) => ({
@@ -1489,7 +1492,10 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
   ),
   'professional.leveling_up': def(
     'professional.leveling_up',
-    'promotions',
+    // FT3 #11: a level change alters the account's benefits and fees, so it
+    // is account information (system: push + email on by default, opt-out
+    // honoured), not a promotion (off by default).
+    'system',
     'configurable',
     'professional',
     (ctx) => ({

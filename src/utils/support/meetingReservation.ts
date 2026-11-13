@@ -666,6 +666,8 @@ export async function setSupportMeetingLink(params: {
   owner: SupportEmailUser;
   meetingLink: unknown;
   now?: Date;
+  /** `admin_default` when applied from the assigned admin's saved link on submit. */
+  source?: "admin_default" | "manual";
 }): Promise<SetSupportMeetingLinkResult> {
   return setSupportMeetingLinkAttempt(params, 0);
 }
@@ -715,6 +717,7 @@ async function setSupportMeetingLinkAttempt(
     owner: SupportEmailUser;
     meetingLink: unknown;
     now?: Date;
+    source?: "admin_default" | "manual";
   },
   attempt: number,
 ): Promise<SetSupportMeetingLinkResult> {
@@ -782,6 +785,7 @@ async function setSupportMeetingLinkAttempt(
     "meeting.linkAddedBy": new Types.ObjectId(String(params.adminId)),
     "meeting.revision": revision,
     "meeting.status": "scheduled",
+    "meeting.linkSource": params.source || "manual",
   };
   if (firstLink) {
     transitionSet["meeting.confirmationEventId"] = eventId;

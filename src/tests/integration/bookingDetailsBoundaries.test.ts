@@ -1604,6 +1604,8 @@ describeDb('booking details write/read boundaries (disposable Mongo)', () => {
       kind: 'booking',
       justification: 'Provider dashboard refund',
       vatSplitRecorded: false,
+      // Phase 2: derived pro rata from the anchor payment's recorded VAT.
+      vatSplitDerived: true,
     });
     expect(firstDetails.payments.refunds[0].internalNotes).toBeUndefined();
     expect(firstDetails.booking.payment.refundedTotal).toBe(30);
@@ -1614,7 +1616,7 @@ describeDb('booking details write/read boundaries (disposable Mongo)', () => {
     });
     expect(firstDetails.meta.dataQuality.refundVatRecorded).toBe(false);
     expect(firstDetails.payments.notices.map((notice: any) => notice.code))
-      .toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
+      .toContain('REFUND_VAT_SPLIT_DERIVED');
     expect(firstDetails.activity.items.filter((item: any) => item.type === 'refund_issued'))
       .toHaveLength(1);
     expect(firstDetails.activity.items.find((item: any) => item.type === 'refund_issued'))

@@ -116,6 +116,18 @@ function compareByPublishedDesc(locale: string): (a: any, b: any) => number {
   };
 }
 
+/**
+ * Internal translation bookkeeping never served publicly. `autoTranslated`
+ * stays (the site may show a "machine translated" note).
+ */
+const INTERNAL_TRANSLATION_FIELDS = ["sourceHash", "translationRun", "translationResults"] as const;
+
+function stripInternalTranslationFields<T extends Record<string, any>>(doc: T): T {
+  const copy = { ...doc };
+  for (const field of INTERNAL_TRANSLATION_FIELDS) delete copy[field];
+  return copy;
+}
+
 /** Removes internal translation metadata added only to evaluate visibility. */
 function stripListingVisibilityMetadata<T extends Record<string, any>>(docs: T[]): T[] {
   return docs.map((doc) => {
@@ -276,7 +288,7 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
       countryCode
     );
 
-    const presigned = await presignCmsDoc(doc);
+    const presigned = await presignCmsDoc(stripInternalTranslationFields(doc as Record<string, any>));
     return res.status(200).json({ success: true, data: presigned });
   } catch (error) {
     console.error("Public get CMS content error:", error);

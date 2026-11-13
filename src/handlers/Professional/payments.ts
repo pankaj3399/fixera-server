@@ -9,6 +9,7 @@ import Payment from '../../models/payment';
 import Project from '../../models/project';
 import mongoose from 'mongoose';
 import { buildSettledTransferExpression, getTransferStatus } from '../../utils/paymentSafety';
+import { countPaymentsByService, professionalPaymentServices, professionalServiceBookingIds } from '../../utils/paymentFacetCounts';
 
 /**
  * Get payment stats for the authenticated professional
@@ -194,6 +195,38 @@ export const getPaymentStats = async (req: Request, res: Response) => {
  * refunded/partially_refunded) and transfer qualifiers
  * (transfer_pending/transfer_failed) for completed-but-unsettled rows.
  */
+/** Status options of the professional payout list (FT2 #10a/#10b). */
+export const TRANSACTION_STATUS_FILTERS = [
+  'pending', 'authorized', 'completed', 'transfer_pending', 'transfer_failed', 'refunded', 'failed',
+] as const;
+
+/**
+ * Mongo clause for one payout-list status option. `completed` means a settled
+ * transfer; captured payments awaiting or failing payout are the transfer_*
+ * options, matching the stats buckets and the row labels.
+ */
+export const transactionStatusClause = (statusFilter: string): Record<string, unknown> | null => {
+  if (!statusFilter || statusFilter === 'all') return null;
+  if (statusFilter === 'transfer_pending') {
+    return {
+      status: 'completed',
+      $or: [
+        { transferStatus: 'pending' },
+        // Legacy failed transfers also have null status/id; exclude them
+        // from "pending" so the filter matches the stats and row labels.
+        { transferStatus: null, stripeTransferId: null, 'metadata.transferFailed': { $ne: true } },
+      ],
+    };
+  }
+  if (statusFilter === 'transfer_failed') {
+    return { status: 'completed', $or: [{ transferStatus: 'failed' }, { transferStatus: null, 'metadata.transferFailed': true }] };
+  }
+  if (statusFilter === 'completed') {
+    return { status: 'completed', $expr: buildSettledTransferExpression() };
+  }
+  return { status: statusFilter };
+};
+
 export const getTransactions = async (req: Request, res: Response) => {
   try {
     const userId = req.user?._id;
@@ -208,30 +241,11 @@ export const getTransactions = async (req: Request, res: Response) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 20, 1), 50);
     const skip = (page - 1) * limit;
     const statusFilter = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+    const serviceFilter = typeof req.query.service === 'string' ? req.query.service.trim().slice(0, 200) : '';
+    // Aggregations (facet counts) do not cast, so match on an ObjectId.
+    const professionalObjectId = new mongoose.Types.ObjectId(String(userId));
 
-    const query: Record<string, unknown> = { professional: userId };
-    if (statusFilter && statusFilter !== 'all') {
-      if (statusFilter === 'transfer_pending' || statusFilter === 'transfer_failed') {
-        query.status = 'completed';
-        query.$or = statusFilter === 'transfer_pending'
-          ? [
-              { transferStatus: 'pending' },
-              // Legacy failed transfers also have null status/id; exclude them
-              // from "pending" so the filter matches the stats and row labels.
-              { transferStatus: null, stripeTransferId: null, 'metadata.transferFailed': { $ne: true } },
-            ]
-          : [{ transferStatus: 'failed' }, { transferStatus: null, 'metadata.transferFailed': true }];
-      } else {
-        query.status = statusFilter;
-        if (statusFilter === 'completed') {
-          // "Completed" means a settled transfer, the same rule as the stats
-          // bucket and the row label; captured payments still awaiting or
-          // failing payout belong to the transfer_* filters.
-          query.$expr = buildSettledTransferExpression();
-        }
-      }
-    }
-
+    const otherAnd: Record<string, unknown>[] = [];
     const search = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
     if (search) {
       const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -251,10 +265,41 @@ export const getTransactions = async (req: Request, res: Response) => {
         $or: [{ professional: userId }, { project: { $in: ownedProjectIds } }],
       }).select('_id').lean();
       if (matchingBookings.length) alternatives.push({ booking: { $in: matchingBookings.map(b => b._id) } });
-      query.$and = [{ $or: alternatives }];
+      otherAnd.push({ $or: alternatives });
     }
 
-    const [transactions, total] = await Promise.all([
+    // FT2 #10b: service filter, matched through the payment's booking.
+    const serviceClause: Record<string, unknown> | null = serviceFilter && serviceFilter !== 'all'
+      ? { booking: { $in: await professionalServiceBookingIds(userId, serviceFilter) } }
+      : null;
+
+    // The status clause sits at the top level (it may carry its own $or /
+    // $expr); search and service are $and-ed so they never collide with it.
+    const buildQuery = (
+      professional: unknown,
+      statusClause: Record<string, unknown> | null,
+      service: Record<string, unknown> | null,
+    ): Record<string, unknown> => {
+      const and = [...otherAnd, ...(service ? [service] : [])];
+      return { professional, ...(statusClause || {}), ...(and.length > 0 ? { $and: and } : {}) };
+    };
+    const query = buildQuery(userId, transactionStatusClause(statusFilter), serviceClause);
+
+    // Facet counts are best-effort: a failure leaves them unknown (null) and
+    // never blocks the payout list itself.
+    const facets = Promise.all([
+      // FT2 #10a: one count per status option, using the same clause as the
+      // filter itself so the derived transfer_* states match their rows.
+      Promise.all(TRANSACTION_STATUS_FILTERS.map((option) =>
+        Payment.countDocuments(buildQuery(userId, transactionStatusClause(option), serviceClause)))),
+      countPaymentsByService(buildQuery(professionalObjectId, transactionStatusClause(statusFilter), null)),
+      professionalPaymentServices(professionalObjectId),
+    ]).catch((facetError) => {
+      console.error('Transactions: facet counts failed; counts left unknown:', facetError?.message || facetError);
+      return null;
+    });
+
+    const [transactions, total, facetResult] = await Promise.all([
       Payment.find(query)
         .select('booking bookingNumber status currency professionalPayout createdAt capturedAt transferredAt transferStatus stripeTransferId metadata')
         .populate('booking', '_id bookingNumber')
@@ -263,7 +308,18 @@ export const getTransactions = async (req: Request, res: Response) => {
         .limit(limit)
         .lean(),
       Payment.countDocuments(query),
+      facets,
     ]);
+    let statusCounts: Record<string, number> | null = null;
+    let serviceCounts: Record<string, number> | null = null;
+    let services: string[] = [];
+    if (facetResult) {
+      const [statusCountValues, serviceCountRecord, serviceList] = facetResult;
+      statusCounts = {};
+      TRANSACTION_STATUS_FILTERS.forEach((option, index) => { statusCounts![option] = Number(statusCountValues[index]) || 0; });
+      serviceCounts = serviceCountRecord;
+      services = serviceList;
+    }
 
     const data = transactions.map((t: any) => {
       const bookingRef = t.booking && typeof t.booking === 'object' ? t.booking : null;
@@ -283,6 +339,9 @@ export const getTransactions = async (req: Request, res: Response) => {
     res.json({
       success: true,
       data,
+      statusCounts,
+      serviceCounts,
+      services,
       pagination: {
         page,
         limit,

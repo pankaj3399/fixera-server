@@ -283,6 +283,53 @@ describe('project status counts use sibling filters', () => {
   });
 });
 
+describe('project service counts use sibling filters (FT2 #10a)', () => {
+  it('keeps status/category/search, drops only the selected service, and returns per-service counts', async () => {
+    vi.clearAllMocks();
+    const chain: any = {};
+    for (const method of ['sort', 'skip', 'limit']) chain[method] = vi.fn(() => chain);
+    chain.lean = vi.fn(async () => []);
+    mocks.projectFind.mockReturnValue(chain);
+    mocks.projectCountDocuments.mockResolvedValue(0);
+    mocks.projectDistinct.mockResolvedValue(['Painting', 'Plumbing']);
+    mocks.projectAggregate.mockImplementation(async (pipeline: any[]) =>
+      pipeline.some((stage) => stage.$unwind === '$serviceValues')
+        ? [{ _id: 'Plumbing', count: 3 }, { _id: 'Painting', count: 1 }]
+        : []);
+    const res = mockRes();
+    await getProjectsMaster({ user: { id: '507f1f77bcf86cd799439011' }, query: { status: 'published', category: 'Indoor', service: 'Plumbing', search: 'A.*' } } as any, res);
+    expect(res.statusCode).toBe(200);
+    const servicePipeline = (mocks.projectAggregate.mock.calls as any[])
+      .map((call) => call[0] as any[])
+      .find((pipeline) => pipeline.some((stage) => stage.$unwind === '$serviceValues'))!;
+    const match = servicePipeline[0].$match;
+    expect(match.status).toBe('published');
+    // Category $or kept; the service clause is not applied to its own counts.
+    expect(match.$or).toEqual([{ category: 'Indoor' }, { 'services.category': 'Indoor' }]);
+    expect(JSON.stringify(match)).not.toContain('Plumbing');
+    expect(match.$and[0].$or[0].title.test('A.*')).toBe(true);
+    expect(res.body.serviceCounts).toEqual({ Plumbing: 3, Painting: 1 });
+  });
+
+  it('applies the default non-archived scope to the service counts', async () => {
+    vi.clearAllMocks();
+    const chain: any = {};
+    for (const method of ['sort', 'skip', 'limit']) chain[method] = vi.fn(() => chain);
+    chain.lean = vi.fn(async () => []);
+    mocks.projectFind.mockReturnValue(chain);
+    mocks.projectCountDocuments.mockResolvedValue(0);
+    mocks.projectDistinct.mockResolvedValue([]);
+    mocks.projectAggregate.mockResolvedValue([]);
+    const res = mockRes();
+    await getProjectsMaster({ user: { id: '507f1f77bcf86cd799439011' }, query: {} } as any, res);
+    const servicePipeline = (mocks.projectAggregate.mock.calls as any[])
+      .map((call) => call[0] as any[])
+      .find((pipeline) => pipeline.some((stage) => stage.$unwind === '$serviceValues'))!;
+    expect(servicePipeline[0].$match.status).toEqual({ $ne: 'archived' });
+    expect(res.body.serviceCounts).toEqual({});
+  });
+});
+
 describe('recorded on-hold transition', () => {
   it('records the hold start and clears it on resume', async () => {
     const doc = projectDoc({ onHoldAt: undefined });

@@ -75,7 +75,7 @@ vi.mock("../../models/project", () => {
   };
   return {
     default: {
-      find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
+      find: vi.fn(() => ({ sort() { return this; }, select() { return this; }, lean: async () => mocks.projects })),
       aggregate: vi.fn(async (pipeline: any[]) => runPipeline(pipeline)),
     },
   };
@@ -86,7 +86,9 @@ vi.mock("../../models/loyaltyConfig", () => ({ default: { getCurrentConfig: asyn
   { name: "Gold", minSpendingAmount: 1000, discountPercentage: 10, maxDiscountAmount: 5, isActive: true },
 ] }) } }));
 vi.mock("../../models/platformSettings", () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: mocks.commission }) } }));
-vi.mock("../../utils/scheduleEngine", () => ({
+vi.mock("../../utils/scheduleEngine", async (importOriginal) => ({
+  // Pure package rule (FT1 6A): which packages scale with the booked quantity.
+  isQuantityDerivedExecution: (await importOriginal<any>()).isQuantityDerivedExecution,
   resolveEffectiveScheduleTimeZone: vi.fn((professional: any) => professional?.businessInfo?.timezone || "UTC"),
   buildProjectScheduleProposalsWithData: vi.fn(async (project: any, professional: any, subprojectIndex: number | undefined, durationOverride: any, _exclude: any, quantity: number) => {
     mocks.scheduleCalls.push({ project, professional, subprojectIndex, durationOverride, quantity });

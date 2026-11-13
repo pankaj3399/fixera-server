@@ -33,6 +33,21 @@ export const getPopularProjects = async (req: Request, res: Response) => {
       { $match: match },
       // Owner eligibility runs as a lookup so the public, cached endpoint no
       // longer loads every professional id on each cache miss.
+      // Only the card fields travel through the lookups and the sort: the cover is the
+      // first image, and stored images can be large inline data URLs.
+      {
+        $project: {
+          title: 1,
+          category: 1,
+          service: 1,
+          coverImage: { $arrayElemAt: ["$media.images", 0] },
+          "subprojects.name": 1,
+          "subprojects.pricing": 1,
+          professionalId: 1,
+          "distance.address": 1,
+          createdAt: 1,
+        },
+      },
       ...eligibleProjectOwnerStages(),
       {
         $lookup: {
@@ -154,7 +169,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
           title: 1,
           category: 1,
           service: 1,
-          "media.images": 1,
+          coverImage: 1,
           "subprojects.name": 1,
           "subprojects.pricing": 1,
           professionalId: 1,
@@ -194,7 +209,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     const signedAt = new Date();
     const coverImages = await Promise.all(
       projects.map((project: any) => {
-        const image = project.media?.images?.[0];
+        const image = project.coverImage;
         return image ? signProjectMediaUrl(image, project.professionalId, signedAt) : null;
       })
     );

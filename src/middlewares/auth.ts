@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { runWithRequestActor } from '../utils/requestActor';
 import jwt from 'jsonwebtoken';
 import User, { IUser } from '../models/user';
 import connectToDatabase from '../config/db'; // Import your database connection
@@ -69,8 +70,8 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     req.user = user;
     await attachAdminPaymentsAccess(user, res);
 
-    // 8. Continue to next middleware
-    next();
+    // 8. Continue to next middleware (with the actor available to model hooks)
+    runWithRequestActor(req.user, () => next());
 
   } catch (error: any) {
     console.error('Auth middleware error:', error);
@@ -136,7 +137,7 @@ export const optionalProtect = async (
   } catch {
     // Public endpoints remain public when an optional credential is stale.
   }
-  return next();
+  return runWithRequestActor(req.user, () => next());
 };
 
 /**
@@ -219,7 +220,7 @@ export const authMiddleware = (allowedRoles: string[]) => {
       }
       await attachAdminPaymentsAccess(user, res);
 
-      next();
+      runWithRequestActor(user, () => next());
 
     } catch (error: any) {
       console.error('Auth middleware error:', error);

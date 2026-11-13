@@ -379,6 +379,79 @@ export const getBookingScheduleOptions = (booking: any): { quantity: number; dur
   };
 };
 
+const HOUR_PRICING_UNIT = /^(h|hr|hrs|hour|hours|hur)$/;
+
+/** Unit-pricing spellings that mean "hour" (mirrored in the FE packageDuration). */
+export const isHourPricingUnit = (unit: unknown) =>
+  typeof unit === 'string' && HOUR_PRICING_UNIT.test(unit.toLowerCase());
+
+/**
+ * True when the package's execution is derived from the booked quantity:
+ * customer-determined hours (hour-unit unit pricing) or a per-unit duration
+ * that the quantity multiplies. Only such executions are re-planned in day
+ * mode when they outgrow a working day (see applyWorkingDayExecutionMode).
+ */
+export const isQuantityDerivedExecution = (project: any, subprojectIndex?: number) => {
+  const pricing = typeof subprojectIndex === 'number' ? project?.subprojects?.[subprojectIndex]?.pricing : undefined;
+  if (pricing?.type !== 'unit') return false;
+  return isHourPricingUnit(pricing.unit) || pricing.durationBasis === 'per_unit';
+};
+
+/**
+ * Longest working window (hours) over the week of a resolved availability,
+ * computed with the same per-day rules the slot search uses. 0 when the
+ * professional has no working day.
+ */
+export const getLongestWorkingDayHours = (availability: Record<string, any>) => {
+  let longest = 0;
+  for (let weekday = 0; weekday < 7; weekday += 1) {
+    // 2024-01-07 is a Sunday, so the offset matches DAY_KEYS.
+    const hours = getWorkingHoursForDate(availability, new Date(Date.UTC(2024, 0, 7 + weekday)));
+    if (!hours.available || hours.startMinutes === null || hours.endMinutes === null) continue;
+    longest = Math.max(longest, (hours.endMinutes - hours.startMinutes) / 60);
+  }
+  return longest;
+};
+
+/**
+ * FT1 6B: an hour-mode execution has to fit inside one working day, so a
+ * quantity-derived execution in hours that exceeds the professional's longest
+ * working day is scheduled in DAY mode instead:
+ * ceil(totalHours / longestWorkingDayHours) working days (min 1). Executions
+ * that fit in a day stay in hour mode, and other packages are untouched.
+ */
+export const applyWorkingDayExecutionMode = <T extends { execution: Duration } | null>(
+  durations: T,
+  availability: Record<string, any>,
+  quantityDerived: boolean
+): T => {
+  if (!durations || !quantityDerived || durations.execution.unit !== 'hours') return durations;
+  const totalHours = durations.execution.value;
+  const longest = getLongestWorkingDayHours(availability);
+  if (!(longest > 0) || !(totalHours > longest)) return durations;
+  // Round away float noise first so 16 / 8 is exactly 2 days, not 3.
+  const days = Math.max(1, Math.ceil(Math.round((totalHours / longest) * 1e6) / 1e6));
+  return { ...durations, execution: { value: days, unit: 'days' } as Duration };
+};
+
+/**
+ * The durations the schedule engine actually plans with: getProjectDurations
+ * plus the working-day rule above. Every proposal, validation, window and
+ * blocking path goes through this so they agree on the mode.
+ */
+export const resolveScheduleDurations = (
+  project: any,
+  subprojectIndex: number | undefined,
+  override: DurationOverride | undefined,
+  quantity: number,
+  availability: Record<string, any>
+) =>
+  applyWorkingDayExecutionMode(
+    getProjectDurations(project, subprojectIndex, override, quantity),
+    availability,
+    isQuantityDerivedExecution(project, subprojectIndex)
+  );
+
 export const getProjectDurations = (project: any, subprojectIndex?: number, override?: DurationOverride, quantity = 1) => {
   const subproject =
     typeof subprojectIndex === "number" &&
@@ -387,9 +460,11 @@ export const getProjectDurations = (project: any, subprojectIndex?: number, over
       ? project.subprojects[subprojectIndex]
       : null;
   const unitPricing = subproject?.pricing?.type === 'unit';
-  const unit = String(subproject?.pricing?.unit || '').toLowerCase();
   const scalesDuration = unitPricing && subproject?.pricing?.durationBasis === 'per_unit';
-  const customerDeterminedHours = scalesDuration && /^(h|hr|hrs|hour|hours|hur)$/.test(unit);
+  // FT1 6A: an hour-unit unit package is always customer-determined (the
+  // booked hours are the execution), also for legacy packages saved without a
+  // duration basis: the professional cannot know the hours in advance.
+  const customerDeterminedHours = unitPricing && isHourPricingUnit(subproject?.pricing?.unit);
   if (unitPricing && (!Number.isFinite(quantity) || quantity <= 0)) return null;
 
   const hasValidExecutionOverride =
@@ -2599,14 +2674,14 @@ export const buildProjectScheduleProposalsWithData = async (
   const workBudget = createWorkBudget(options);
   throwIfWorkBudgetExhausted(workBudget);
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
+  const availability = resolveAvailability(
+    professional.companyAvailability
+  );
+  const durations = resolveScheduleDurations(project, subprojectIndex, durationOverride, quantity, availability);
   if (!durations || !durations.execution?.value) {
     return null;
   }
 
-  const availability = resolveAvailability(
-    professional.companyAvailability
-  );
   const timeZone = resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
 
@@ -2997,12 +3072,12 @@ const assembleScheduleContext = async (
   if (!project) return { ok: false, reason: "Project not found" };
   if (!professional) return { ok: false, reason: "Professional not found" };
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
+  const availability = resolveAvailability(professional.companyAvailability);
+  const durations = resolveScheduleDurations(project, subprojectIndex, durationOverride, quantity, availability);
   if (!durations || !durations.execution?.value) {
     return { ok: false, reason: "Missing execution duration" };
   }
 
-  const availability = resolveAvailability(professional.companyAvailability);
   const timeZone = resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
   const resourcePolicy = getResourcePolicy(project);
@@ -3350,14 +3425,14 @@ export const buildProjectScheduleWindow = async ({
     return null;
   }
 
-  const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
+  const availability = resolveAvailability(
+    professional.companyAvailability
+  );
+  const durations = resolveScheduleDurations(project, subprojectIndex, durationOverride, quantity, availability);
   if (!durations || !durations.execution?.value) {
     return null;
   }
 
-  const availability = resolveAvailability(
-    professional.companyAvailability
-  );
   const timeZone = resolveEffectiveScheduleTimeZone(professional, requestTimeZone);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
   const baseBlockedData = await buildBlockedData(
@@ -3737,7 +3812,8 @@ export const getUnbookableStartDates = async ({
     if (daysSubIdx >= 0) resolvedSubprojectIndex = daysSubIdx;
   }
 
-  const durations = getProjectDurations(project, resolvedSubprojectIndex, undefined, quantity);
+  const availability = resolveAvailability(professional.companyAvailability);
+  const durations = resolveScheduleDurations(project, resolvedSubprojectIndex, undefined, quantity, availability);
   if (!durations || !durations.execution?.value) {
     return [];
   }
@@ -3754,7 +3830,6 @@ export const getUnbookableStartDates = async ({
     return [];
   }
 
-  const availability = resolveAvailability(professional.companyAvailability);
   const timeZone = resolveEffectiveScheduleTimeZone(professional);
   const { isHoliday } = buildHolidayChecker(professional, timeZone);
 

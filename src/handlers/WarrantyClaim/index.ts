@@ -940,24 +940,12 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
       .populate("customer", "name email isAnonymized deletedAt")
       .populate("professional", "name email businessInfo isAnonymized deletedAt");
 
-    let claims: any[];
-    let total: number;
-    if (!searchByBookingNumber && !serviceFilter) {
-      [claims, total] = await Promise.all([
-        populateClaims(WarrantyClaim.find(query)).sort(sort).skip(skip).limit(limitNumber),
-        WarrantyClaim.countDocuments(query),
-      ]);
-    } else {
-      // Booking-number search and the service filter depend on the claim's
-      // booking (and its project), so they are joined per claim inside one
-      // aggregation over the role-scoped claims. Filtering, counting and
-      // pagination all run in the database: no candidate booking/project id
-      // list is materialized in the handler.
-      const viewerId = query.customer || query.professional || null;
-      const needsProject = Boolean(serviceFilter) || (searchByBookingNumber && Boolean(query.professional));
-      const pipeline: any[] = [
-        { $match: query },
-        { $sort: sort },
+    // Shared join stages: the claim's booking (and, when needed, its
+    // project), the role-scoped booking-number search and the service match.
+    // The list pipeline and the facet counts (FT2 #10a) use the same stages.
+    const viewerId = query.customer || query.professional || null;
+    const bookingJoinStages = (withProject: boolean): any[] => {
+      const stages: any[] = [
         {
           $lookup: {
             from: Booking.collection.collectionName,
@@ -980,8 +968,8 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
         },
         { $set: { _claimBooking: { $arrayElemAt: ["$_claimBooking", 0] } } },
       ];
-      if (needsProject) {
-        pipeline.push(
+      if (withProject) {
+        stages.push(
           {
             $lookup: {
               from: Project.collection.collectionName,
@@ -996,45 +984,111 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
           { $set: { _claimProject: { $arrayElemAt: ["$_claimProject", 0] } } },
         );
       }
-      if (searchByBookingNumber && searchRegex) {
-        const bookingNumberClause: Record<string, any> = { "_claimBooking.bookingNumber": searchRegex };
-        const bookingScope: Record<string, any> | null = query.customer
-          ? { "_claimBooking.customer": viewerId }
-          : query.professional
-            ? {
-                $or: [
-                  { "_claimBooking.professional": viewerId },
-                  // Project.professionalId is stored as a string id.
-                  { "_claimProject.professionalId": { $in: [viewerId, String(viewerId)] } },
-                ],
-              }
-            : null;
-        pipeline.push({
-          $match: {
-            $or: [
-              { claimNumber: searchRegex },
-              bookingScope ? { $and: [bookingNumberClause, bookingScope] } : bookingNumberClause,
+      return stages;
+    };
+    const bookingNumberSearchMatch = (): Record<string, any> | null => {
+      if (!searchByBookingNumber || !searchRegex) return null;
+      const bookingNumberClause: Record<string, any> = { "_claimBooking.bookingNumber": searchRegex };
+      const bookingScope: Record<string, any> | null = query.customer
+        ? { "_claimBooking.customer": viewerId }
+        : query.professional
+          ? {
+              $or: [
+                { "_claimBooking.professional": viewerId },
+                // Project.professionalId is stored as a string id.
+                { "_claimProject.professionalId": { $in: [viewerId, String(viewerId)] } },
+              ],
+            }
+          : null;
+      return {
+        $or: [
+          { claimNumber: searchRegex },
+          bookingScope ? { $and: [bookingNumberClause, bookingScope] } : bookingNumberClause,
+        ],
+      };
+    };
+    // The service captured at booking time (bookingSnapshot) wins over the
+    // live project, whose service can change after booking; the live project
+    // is used only for legacy bookings without a snapshot.
+    const serviceMatch = (value: string): Record<string, any> => ({
+      $or: [
+        { "_claimBooking.rfqData.serviceType": value },
+        { "_claimBooking.bookingSnapshot.project.service": value },
+        {
+          "_claimBooking.bookingSnapshot.project.service": null,
+          "_claimProject.service": value,
+        },
+      ],
+    });
+
+    // FT2 #10a: status and service counts over the same scope; each facet
+    // ignores its own selection and honours the other. Best-effort.
+    const facetCountsPromise = (async () => {
+      const { status: _ownStatus, ...scopeWithoutStatus } = query;
+      const searchStage = bookingNumberSearchMatch();
+      const [result] = await WarrantyClaim.aggregate([
+        { $match: scopeWithoutStatus },
+        ...bookingJoinStages(true),
+        ...(searchStage ? [{ $match: searchStage }] : []),
+        {
+          $set: {
+            _claimService: {
+              $ifNull: [
+                "$_claimBooking.rfqData.serviceType",
+                { $ifNull: ["$_claimBooking.bookingSnapshot.project.service", "$_claimProject.service"] },
+              ],
+            },
+          },
+        },
+        {
+          $facet: {
+            status: [
+              ...(serviceFilter ? [{ $match: serviceMatch(serviceFilter) }] : []),
+              { $group: { _id: "$status", count: { $sum: 1 } } },
+            ],
+            service: [
+              ...(parsedStatus ? [{ $match: { status: parsedStatus } }] : []),
+              { $match: { _claimService: { $nin: [null, ""] } } },
+              { $group: { _id: "$_claimService", count: { $sum: 1 } } },
             ],
           },
-        });
-      }
-      if (serviceFilter) {
-        // The service captured at booking time (bookingSnapshot) wins over
-        // the live project, whose service can change after booking; the
-        // live project is used only for legacy bookings without a snapshot.
-        pipeline.push({
-          $match: {
-            $or: [
-              { "_claimBooking.rfqData.serviceType": serviceFilter },
-              { "_claimBooking.bookingSnapshot.project.service": serviceFilter },
-              {
-                "_claimBooking.bookingSnapshot.project.service": null,
-                "_claimProject.service": serviceFilter,
-              },
-            ],
-          },
-        });
-      }
+        },
+      ]);
+      const toRecord = (rows: any[] | undefined) => {
+        const counts: Record<string, number> = {};
+        for (const row of rows || []) {
+          if (row && typeof row._id === "string" && row._id) counts[row._id] = Number(row.count) || 0;
+        }
+        return counts;
+      };
+      return { statusCounts: toRecord(result?.status), serviceCounts: toRecord(result?.service) };
+    })().catch((facetError) => {
+      console.error("[WARRANTY] facet counts failed; counts left unknown:", facetError?.message || facetError);
+      return { statusCounts: null, serviceCounts: null };
+    });
+
+    let claims: any[];
+    let total: number;
+    if (!searchByBookingNumber && !serviceFilter) {
+      [claims, total] = await Promise.all([
+        populateClaims(WarrantyClaim.find(query)).sort(sort).skip(skip).limit(limitNumber),
+        WarrantyClaim.countDocuments(query),
+      ]);
+    } else {
+      // Booking-number search and the service filter depend on the claim's
+      // booking (and its project), so they are joined per claim inside one
+      // aggregation over the role-scoped claims. Filtering, counting and
+      // pagination all run in the database: no candidate booking/project id
+      // list is materialized in the handler.
+      const needsProject = Boolean(serviceFilter) || (searchByBookingNumber && Boolean(query.professional));
+      const pipeline: any[] = [
+        { $match: query },
+        { $sort: sort },
+        ...bookingJoinStages(needsProject),
+      ];
+      const searchStage = bookingNumberSearchMatch();
+      if (searchStage) pipeline.push({ $match: searchStage });
+      if (serviceFilter) pipeline.push({ $match: serviceMatch(serviceFilter) });
       pipeline.push({
         $facet: {
           page: [{ $skip: skip }, { $limit: limitNumber }, { $project: { _id: 1 } }],
@@ -1052,11 +1106,14 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     }
 
     const presignedClaims = await Promise.all(claims.map((c) => presignClaim(c)));
+    const { statusCounts, serviceCounts } = await facetCountsPromise;
 
     return res.status(200).json({
       success: true,
       data: {
         claims: presignedClaims,
+        statusCounts,
+        serviceCounts,
         pagination: {
           total,
           page: pageNumber,

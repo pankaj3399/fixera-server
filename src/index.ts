@@ -7,6 +7,7 @@ import express, { Express, Request, Response} from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import errorHandler from './handlers/error';
+import { localizeApiResponses } from './i18n/middleware';
 import connectDB from './config/db';
 import BacklinkSubmission from './models/backlinkSubmission';
 import { recoverStuckVerifyingSubmissions } from './utils/backlink/verifySubmission';
@@ -40,6 +41,11 @@ app.use(cors({
   origin: true, // Reflects the request's Origin header
   credentials: true, // Allow cookies
 }));
+
+// User-facing messages follow the client's Accept-Language (en/nl/fr); bodies
+// without a supported language keep the English copy. Mounted before the body
+// parsers so their errors (invalid JSON, too large) are localized as well.
+app.use(localizeApiResponses);
 
 app.use('/api/stripe/webhooks', express.raw({ type: 'application/json' }));
 

@@ -104,3 +104,24 @@ describe('customer-view walk is bounded and matches JSON serialization', () => {
     expect(quotationForViewer(payload, 'professional')).toBe(payload);
   });
 });
+
+describe('booking overview completion extras (sprint close B)', () => {
+  const payload = () => ({
+    details: {
+      booking: { extraCosts: { total: 100, customerTotal: 120, currency: 'EUR', status: 'confirmed' } },
+      extraCosts: { totalProfessionalAmount: 100, totalCustomerAmount: 120 },
+    },
+  });
+
+  it('withholds the professional extras total from customers but keeps the customer total', () => {
+    const visible = quotationForViewer(payload(), 'customer') as any;
+    expect(visible.details.booking.extraCosts).toEqual({ customerTotal: 120, currency: 'EUR', status: 'confirmed' });
+    expect(visible.details.extraCosts.totalProfessionalAmount).toBeUndefined();
+    expect(visible.details.extraCosts.totalCustomerAmount).toBe(120);
+  });
+
+  it('keeps the professional total for professionals', () => {
+    const visible = quotationForViewer(payload(), 'professional') as any;
+    expect(visible.details.booking.extraCosts.total).toBe(100);
+  });
+});

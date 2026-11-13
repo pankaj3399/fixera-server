@@ -194,6 +194,42 @@ export const createConnectAccount = async (req: Request, res: Response) => {
   }
 };
 
+const clientUrlSource = (value: unknown): string | null => {
+  if (typeof value !== 'string' || value.length > 2048) return null;
+  try {
+    return new URL(value, 'http://placeholder.invalid').searchParams.get('source');
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * True when Stripe should send the professional back into the onboarding
+ * wizard: the client asked for it (`?source=onboarding` on the URLs it sent or
+ * a `source` field), or the professional has not finished onboarding yet.
+ */
+export const isOnboardingStripeReturn = (
+  body: unknown,
+  user: { role?: string; professionalOnboardingCompletedAt?: Date | null } | null | undefined,
+): boolean => {
+  const payload = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const requested =
+    payload.source === 'onboarding' ||
+    clientUrlSource(payload.returnUrl) === 'onboarding' ||
+    clientUrlSource(payload.refreshUrl) === 'onboarding';
+  if (requested) return true;
+  return user?.role === 'professional' && !user?.professionalOnboardingCompletedAt;
+};
+
+export const buildOnboardingReturnUrls = (frontendUrl: string, fromOnboarding: boolean) => {
+  const base = frontendUrl.replace(/\/+$/, '');
+  const query = fromOnboarding ? '?source=onboarding' : '';
+  return {
+    returnUrl: `${base}/professional/stripe/complete${query}`,
+    refreshUrl: `${base}/professional/stripe/refresh${query}`,
+  };
+};
+
 /**
  * Generate Stripe onboarding link
  * POST /api/stripe/connect/create-onboarding-link
@@ -234,11 +270,18 @@ export const createOnboardingLink = async (req: Request, res: Response) => {
       }
     }
 
-    // Generate account link for onboarding
+    // Generate account link for onboarding. The return/refresh URLs are always
+    // built from FRONTEND_URL (never echoed from the client, so no open
+    // redirect); only the onboarding marker is carried over so a professional
+    // who left mid-onboarding resumes at the Stripe step instead of step 1.
+    const { returnUrl, refreshUrl } = buildOnboardingReturnUrls(
+      STRIPE_CONFIG.frontendUrl,
+      isOnboardingStripeReturn(req.body, user),
+    );
     const accountLink = await stripe.accountLinks.create({
       account: user.stripe.accountId,
-      refresh_url: `${STRIPE_CONFIG.frontendUrl}/professional/stripe/refresh`,
-      return_url: `${STRIPE_CONFIG.frontendUrl}/professional/stripe/complete`,
+      refresh_url: refreshUrl,
+      return_url: returnUrl,
       type: 'account_onboarding',
     });
 

@@ -9,6 +9,13 @@ export function normalizeInboxSearch(raw: unknown): string {
   return raw.trim().slice(0, INBOX_SEARCH_MAX_LENGTH);
 }
 
+const CHAT_CLOSED_MESSAGE = /^Chat closed on .+ UTC$/;
+
+/** Text shaped like the close notice; only a system message with it is the real notice. */
+export function isChatClosedMessageText(text: unknown): boolean {
+  return typeof text === "string" && CHAT_CLOSED_MESSAGE.test(text.trim());
+}
+
 export function formatChatClosedMessage(closedAt: Date): string {
   const formatted = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",

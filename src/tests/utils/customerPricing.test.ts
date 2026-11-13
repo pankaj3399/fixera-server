@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  commissionedExtraCostLines,
   commissionedExtraCostTotal,
   commissionedQuoteAmount,
+  recordedExtraCostCustomerSubtotal,
+  resolveExtraCostChargeCommissionPercent,
   withCommission,
 } from "../../utils/customerPricing";
 import { computeGrossBookingAmount } from "../../utils/payment";
@@ -96,5 +99,62 @@ describe('commissioned line drift', () => {
     expect(lines.reduce((sum, line) => sum + line.price, 0)).toBeCloseTo(10, 8);
     expect(commissionedPricingLines([{ description: 'A', price: 1, vatRate: 0 },
       { description: 'B', price: 1, vatRate: 0 }], 3, 0).map(line => line.price)).toEqual([1.5, 1.5]);
+  });
+});
+
+describe("extra-cost lines at the commission that was charged", () => {
+  const extraCosts = [
+    { type: "unit_adjustment", estimatedUnits: 30, actualUnits: 35, unitPrice: 15, amount: 75 },
+    { type: "condition", amount: 50 },
+  ];
+  // Charged at 15%: 5 x 17.25 + 57.50 = 143.75, with a 3.00 loyalty discount
+  // funded from the 18.75 commission.
+  const chargedAt15 = {
+    extraCostNetAmount: 125,
+    extraCostPlatformCommission: 15.75,
+    extraCostCustomerDiscount: 3,
+  };
+
+  it("rebuilds the pre-discount customer subtotal from the recorded charge", () => {
+    expect(recordedExtraCostCustomerSubtotal(chargedAt15)).toBe(143.75);
+    expect(recordedExtraCostCustomerSubtotal({ extraCostNetAmount: 125 })).toBeUndefined();
+    expect(recordedExtraCostCustomerSubtotal(null)).toBeUndefined();
+  });
+
+  it("uses the recorded commission snapshot regardless of the live rate", () => {
+    expect(resolveExtraCostChargeCommissionPercent(
+      { ...chargedAt15, extraCostCommissionPercent: 15 }, extraCosts, 25,
+    )).toEqual({ commissionPercent: 15, source: "recorded" });
+  });
+
+  it("derives the charged commission for legacy charges when it reproduces the recorded amounts", () => {
+    expect(resolveExtraCostChargeCommissionPercent(chargedAt15, extraCosts, 10))
+      .toEqual({ commissionPercent: 15, source: "derived" });
+    // A fractional rate is recovered through the live rate when it still applies.
+    const fractional = { extraCostNetAmount: 125, extraCostPlatformCommission: 11.91, extraCostCustomerDiscount: 0 };
+    expect(resolveExtraCostChargeCommissionPercent(fractional, extraCosts, commission))
+      .toEqual({ commissionPercent: commission, source: "derived" });
+  });
+
+  it("falls back to the live commission when a legacy charge cannot be reproduced", () => {
+    const fractional = { extraCostNetAmount: 125, extraCostPlatformCommission: 11.91, extraCostCustomerDiscount: 0 };
+    expect(resolveExtraCostChargeCommissionPercent(fractional, extraCosts, 10))
+      .toEqual({ commissionPercent: 10, source: "live" });
+    expect(resolveExtraCostChargeCommissionPercent({ extraCostNetAmount: 125 }, extraCosts, 10))
+      .toEqual({ commissionPercent: 10, source: "live" });
+    expect(resolveExtraCostChargeCommissionPercent(null, extraCosts, 10))
+      .toEqual({ commissionPercent: 10, source: "live" });
+  });
+
+  it("prices each line at that commission and sums to the charged subtotal", () => {
+    expect(commissionedExtraCostLines(extraCosts, 15)).toEqual([86.25, 57.5]);
+    expect(commissionedExtraCostLines(extraCosts, 15, 143.75)).toEqual([86.25, 57.5]);
+  });
+
+  it("puts any rounding difference on the last line", () => {
+    const lines = commissionedExtraCostLines(extraCosts, 15, 143.76);
+    expect(lines).toEqual([86.25, 57.51]);
+    expect(Math.round(lines.reduce((sum, amount) => sum + amount, 0) * 100) / 100).toBe(143.76);
+    expect(commissionedExtraCostLines([], 15, 10)).toEqual([]);
   });
 });

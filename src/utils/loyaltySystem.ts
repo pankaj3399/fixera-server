@@ -80,6 +80,72 @@ export const getNextTierInfo = (tiers: ILoyaltyTier[], totalSpent: number): {
   return { nextTier, amountNeeded, progress };
 };
 
+/**
+ * Next tier after the level the customer actually holds (FT3 #14a). The
+ * progress card must be relative to the displayed level, not to a level
+ * recomputed from spend: otherwise a stored Gold with Platinum-level spend
+ * read "already at the top configured level".
+ */
+export const nextTierAfterLevel = (
+  tiers: ILoyaltyTier[],
+  level: string | null | undefined,
+  totalSpent: number,
+): { nextTier?: ILoyaltyTier; amountNeeded?: number; progress?: number } | null => {
+  const ordered = sortTiers((tiers || []).filter((tier) => tier.isActive !== false));
+  const index = ordered.findIndex((tier) => tier.name === level);
+  if (index < 0) return null;
+  const nextTier = ordered[index + 1];
+  if (!nextTier) return {};
+  const spent = Math.max(0, Number(totalSpent) || 0);
+  return {
+    nextTier,
+    amountNeeded: Math.max(0, nextTier.minSpendingAmount - spent),
+    progress: nextTier.minSpendingAmount > 0 ? Math.min(100, Math.round((spent / nextTier.minSpendingAmount) * 100)) : 100,
+  };
+};
+
+/**
+ * Brings a stale stored level up to the tier the customer's spend already
+ * qualifies for (e.g. a tier added to the config after their last booking,
+ * which is when levels are normally recomputed). Upgrades only, never on a
+ * manual override, atomic on the stored level so concurrent reads notify the
+ * tier-up once. Returns the level now stored.
+ */
+export const reconcileLoyaltyLevelUpgrade = async (
+  user: Pick<IUser, '_id' | 'loyaltyLevel' | 'manualCustomerLevelOverride' | 'role'>,
+  qualifiedLevel: string,
+): Promise<string | undefined> => {
+  const storedLevel = user.loyaltyLevel || 'Bronze';
+  if (user.role !== 'customer' || user.manualCustomerLevelOverride) return user.loyaltyLevel;
+  if (!VALID_LOYALTY_LEVELS.has(qualifiedLevel) || !isLoyaltyUpgrade(storedLevel, qualifiedLevel)) return user.loyaltyLevel;
+  const updated = await User.findOneAndUpdate(
+    {
+      _id: user._id,
+      ...(user.loyaltyLevel ? { loyaltyLevel: user.loyaltyLevel } : { loyaltyLevel: { $in: [null, 'Bronze'] } }),
+      manualCustomerLevelOverride: { $in: [null, ''] },
+    },
+    { $set: { loyaltyLevel: qualifiedLevel, lastLoyaltyUpdate: new Date() } },
+    { new: true },
+  );
+  if (!updated) {
+    // Another request changed it first; report what is stored now.
+    const current = await User.findById(user._id).select('loyaltyLevel');
+    return current?.loyaltyLevel || user.loyaltyLevel;
+  }
+  try {
+    notifyAsync({
+      userId: String(updated._id),
+      eventKey: 'customer.loyalty_tier_up',
+      entityType: 'user',
+      entityId: String(updated._id),
+      context: { levelName: qualifiedLevel },
+    });
+  } catch (notifyErr) {
+    console.error('Failed to notify loyalty tier-up:', notifyErr);
+  }
+  return qualifiedLevel;
+};
+
 // Full loyalty calculation with tier info
 export const calculateLoyaltyStatus = async (
   totalSpent: number = 0

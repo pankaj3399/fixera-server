@@ -168,3 +168,73 @@ export const checkoutCustomerTotal = (
   const options = Number(snapshot.extraOptionsTotal) || 0;
   return options > 0 ? base + optionsCustomerCharge(options, commissionPercent) : base;
 };
+
+/** The extra-cost charge facts recorded on booking.payment and the Payment row. */
+export type ExtraCostChargeRecord = {
+  extraCostCommissionPercent?: unknown;
+  extraCostNetAmount?: unknown;
+  extraCostPlatformCommission?: unknown;
+  extraCostCustomerDiscount?: unknown;
+};
+
+/**
+ * Commission-inclusive extra-cost subtotal, before the customer discount, that
+ * a recorded charge was built from: the supplier amount plus the platform
+ * commission it kept plus the discount that commission funded (see
+ * calculateExtraCostBreakdown). Undefined when the charge was not recorded.
+ */
+export const recordedExtraCostCustomerSubtotal = (record?: ExtraCostChargeRecord | null): number | undefined => {
+  const net = toFinite(record?.extraCostNetAmount);
+  const commission = toFinite(record?.extraCostPlatformCommission);
+  if (net == null || net <= 0 || commission == null || commission < 0) return undefined;
+  const discount = Math.max(0, toFinite(record?.extraCostCustomerDiscount) ?? 0);
+  return roundMoney(net + commission + discount);
+};
+
+/**
+ * Commission percent that applied to a booking's extra-cost charge. Charges
+ * record it (`extraCostCommissionPercent`); for older charges it is recovered
+ * from the recorded amounts only when that percent reproduces the recorded
+ * subtotal exactly, otherwise the live percent is the best remaining answer.
+ */
+export const resolveExtraCostChargeCommissionPercent = (
+  record: ExtraCostChargeRecord | null | undefined,
+  extraCosts: ExtraCostLike[] | undefined,
+  liveCommissionPercent: number,
+): { commissionPercent: number; source: "recorded" | "derived" | "live" } => {
+  const recorded = toFinite(record?.extraCostCommissionPercent);
+  if (recorded != null && recorded >= 0) return { commissionPercent: recorded, source: "recorded" };
+  const net = toFinite(record?.extraCostNetAmount);
+  const subtotal = recordedExtraCostCustomerSubtotal(record);
+  if (net != null && net > 0 && subtotal != null) {
+    const estimate = ((subtotal - net) / net) * 100;
+    const candidates = [
+      Math.round(estimate),
+      Math.round(estimate * 10) / 10,
+      Math.round(estimate * 100) / 100,
+      liveCommissionPercent,
+    ];
+    const match = candidates.find((percent) => Number.isFinite(percent) && percent >= 0
+      && Math.abs(commissionedExtraCostTotal(extraCosts, net, percent) - subtotal) < 0.005);
+    if (match != null) return { commissionPercent: match, source: "derived" };
+  }
+  return { commissionPercent: Math.max(0, Number(liveCommissionPercent) || 0), source: "live" };
+};
+
+/**
+ * Customer amount of every extra-cost line, before any customer discount.
+ * With a `customerTotal` the lines sum to it exactly: any rounding difference
+ * is carried by the last line.
+ */
+export const commissionedExtraCostLines = (
+  extraCosts: ExtraCostLike[] | undefined,
+  commissionPercent: number,
+  customerTotal?: number,
+): number[] => {
+  const amounts = (Array.isArray(extraCosts) ? extraCosts : [])
+    .map((cost) => commissionedExtraCostAmount(cost, commissionPercent));
+  if (customerTotal == null || !Number.isFinite(customerTotal) || amounts.length === 0) return amounts;
+  const drift = roundMoney(customerTotal - roundMoney(amounts.reduce((sum, amount) => sum + amount, 0)));
+  if (drift !== 0) amounts[amounts.length - 1] = roundMoney(amounts[amounts.length - 1] + drift);
+  return amounts;
+};

@@ -74,7 +74,11 @@ describe('warranty claim search and filters', () => {
     mocks.claimAggregate.mockResolvedValue([{ page: [], total: [] }]);
   });
 
-  const pipelineOf = () => mocks.claimAggregate.mock.calls[0][0] as any[];
+  // The list pipeline is the one that pages ($facet.page); the facet-count
+  // aggregation (FT2 #10a) is a separate call.
+  const listPipelines = () =>
+    (mocks.claimAggregate.mock.calls as any[]).map((call) => call[0] as any[]).filter((p) => p.at(-1)?.$facet?.page);
+  const pipelineOf = () => listPipelines()[0];
 
   it('searches by escaped claim number without regex injection, inside the role scope', async () => {
     const res = mockRes();
@@ -163,7 +167,7 @@ describe('warranty claim search and filters', () => {
       res,
     );
     expect(res.statusCode).toBe(200);
-    expect(mocks.claimAggregate).not.toHaveBeenCalled();
+    expect(listPipelines()).toHaveLength(0);
     const query = mocks.claimFind.mock.calls[0][0];
     expect(query.status).toBe('open');
     expect(String(query.customer)).toBe(CUSTOMER_ID);
@@ -191,5 +195,25 @@ describe('warranty claim search and filters', () => {
     expect(mocks.claimFind.mock.calls[0][0]).toEqual({ _id: { $in: [PAGE_ID] } });
     expect(res.body.data.claims.map((c: any) => c.claimNumber)).toEqual(['WC-1']);
     expect(res.body.data.pagination).toEqual({ total: 41, page: 3, limit: 20, totalPages: 3 });
+  });
+
+  it('computes facet counts inside the role scope, without the own status facet (FT2 #10a)', async () => {
+    mocks.claimAggregate.mockImplementation(async (pipeline: any[]) =>
+      pipeline.at(-1)?.$facet?.page
+        ? [{ page: [], total: [] }]
+        : [{ status: [{ _id: 'open', count: 2 }], service: [{ _id: 'Cleaning', count: 1 }] }]);
+    const res = mockRes();
+    await listMyWarrantyClaims(
+      { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { status: 'open', service: 'Cleaning' } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    const countPipeline = (mocks.claimAggregate.mock.calls as any[])
+      .map((call) => call[0] as any[])
+      .find((p) => p.at(-1)?.$facet?.status);
+    expect(String(countPipeline[0].$match.customer)).toBe(CUSTOMER_ID);
+    expect(countPipeline[0].$match.status).toBeUndefined();
+    expect(res.body.data.statusCounts).toEqual({ open: 2 });
+    expect(res.body.data.serviceCounts).toEqual({ Cleaning: 1 });
   });
 });

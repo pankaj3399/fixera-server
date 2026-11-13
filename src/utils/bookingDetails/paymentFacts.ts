@@ -100,6 +100,8 @@ export interface RefundFact {
   netAmount: number | null;
   vatRate: number | null;
   vatSplitRecorded: boolean;
+  /** VAT/net computed pro rata from the refunded payment's recorded VAT (not written by the refund itself). */
+  vatSplitDerived?: boolean;
   kind: 'booking' | 'extra_cost';
   providerRefundId: string | null;
   /** Actual actor recorded on the refund source, when one exists. */
@@ -125,6 +127,59 @@ export interface RefundFact {
  * Extra-cost refunds are excluded from the base aggregate arithmetic but kept
  * in the ledger with `kind:"extra_cost"`.
  */
+/**
+ * Pro-rata VAT split of a refund from the refunded payment's RECORDED VAT
+ * (vatBreakdown lines, else its single rate, else its VAT share). Used only
+ * when the refund writer did not record its own split; the result is
+ * labelled "derived" to the viewer. Returns null when the payment carries no
+ * usable VAT facts.
+ */
+export const deriveRefundVatSplit = (
+  amount: number,
+  payment: any,
+): { netAmount: number; vatAmount: number; vatRate: number | null } | null => {
+  if (!payment || !(amount > 0)) return null;
+  const lines = Array.isArray(payment.vatBreakdown) ? payment.vatBreakdown : [];
+  const usable = lines.filter((line: any) =>
+    Number.isFinite(Number(line?.netAmount)) && Number.isFinite(Number(line?.vatAmount)));
+  const gross = usable.reduce((sum: number, line: any) => sum + Number(line.netAmount) + Number(line.vatAmount), 0);
+  if (usable.length > 0 && gross > 0) {
+    const vat = usable.reduce((sum: number, line: any) => sum + (amount * Number(line.vatAmount)) / gross, 0);
+    const rates = Array.from(new Set(usable.map((line: any) => Number(line.vatRate)).filter((rate: number) => Number.isFinite(rate))));
+    const vatAmount = roundMoney(vat);
+    return { netAmount: roundMoney(amount - vatAmount), vatAmount, vatRate: rates.length === 1 ? (rates[0] as number) : null };
+  }
+  const rate = num(payment.vatRate);
+  if (rate != null && rate >= 0) {
+    const netAmount = roundMoney(amount / (1 + rate / 100));
+    return { netAmount, vatAmount: roundMoney(amount - netAmount), vatRate: rate };
+  }
+  const paymentVat = num(payment.vatAmount);
+  const paymentGross = num(payment.totalWithVat);
+  if (paymentVat != null && paymentGross != null && paymentGross > 0) {
+    const vatAmount = roundMoney((amount * paymentVat) / paymentGross);
+    return { netAmount: roundMoney(amount - vatAmount), vatAmount, vatRate: null };
+  }
+  return null;
+};
+
+const withDerivedVat = <T extends { amount: number; vatSplitRecorded: boolean; netAmount: number | null; vatAmount: number | null; vatRate: number | null; noticeCodes: string[] }>(
+  fact: T,
+  payment: any,
+): T & { vatSplitDerived?: boolean } => {
+  if (fact.vatSplitRecorded) return fact;
+  const derived = deriveRefundVatSplit(fact.amount, payment);
+  if (!derived) return fact;
+  return {
+    ...fact,
+    netAmount: derived.netAmount,
+    vatAmount: derived.vatAmount,
+    vatRate: derived.vatRate,
+    vatSplitDerived: true,
+    noticeCodes: [...fact.noticeCodes.filter((code) => code !== 'REFUND_VAT_SPLIT_NOT_RECORDED'), 'REFUND_VAT_SPLIT_DERIVED'],
+  };
+};
+
 export const resolveRefundFacts = (params: {
   booking: any;
   paymentRows: Array<ResolvedPaymentRow | any>;
@@ -178,7 +233,7 @@ export const resolveRefundFacts = (params: {
       const netAmount = num(refund.netAmount);
       const vatAmount = num(refund.vatAmount);
       const vatSplitRecorded = netAmount != null || vatAmount != null;
-      facts.push({
+      facts.push(withDerivedVat({
         seed: providerRefundId
           ? `provider:${providerRefundId}`
           : `payment:${paymentId || 'booking'}:${refundIndex}:${amount}`,
@@ -204,7 +259,7 @@ export const resolveRefundFacts = (params: {
         refundIndex,
         cancellationRequestId: null,
         noticeCodes: vatSplitRecorded ? [] : ['REFUND_VAT_SPLIT_NOT_RECORDED'],
-      });
+      }, payment));
     }
   }
 
@@ -221,7 +276,7 @@ export const resolveRefundFacts = (params: {
         || quoteCurrency
         || null;
       const paymentId = anchorPayment?._id ? String(anchorPayment._id) : null;
-      facts.push({
+      facts.push(withDerivedVat({
         seed: `aggregate:${paymentId || 'booking'}:${residual}`,
         amount: residual,
         currency: aggregateCurrency,
@@ -251,7 +306,7 @@ export const resolveRefundFacts = (params: {
         refundIndex: null,
         cancellationRequestId: null,
         noticeCodes: ['REFUND_VAT_SPLIT_NOT_RECORDED'],
-      });
+      }, anchorPayment));
     }
   }
 
@@ -274,7 +329,10 @@ export const resolveRefundFacts = (params: {
         && Math.abs(fact.amount - amount) < 0.01;
     });
     if (represented) continue;
-    facts.push({
+    const basePaymentRow = rows.find(
+      (row) => baseIntent && str(row.payment?.stripePaymentIntentId) === baseIntent,
+    ) || rows.find((row) => row.isFallback) || rows[0];
+    facts.push(withDerivedVat({
       seed: `cancellation:${String(request._id)}:refund`,
       amount,
       currency: str(booking?.payment?.currency) || quoteCurrency || null,
@@ -302,7 +360,7 @@ export const resolveRefundFacts = (params: {
       refundIndex: null,
       cancellationRequestId: request?._id ? String(request._id) : null,
       noticeCodes: ['REFUND_VAT_SPLIT_NOT_RECORDED'],
-    });
+    }, basePaymentRow?.payment));
   }
 
   facts.sort((a, b) => {

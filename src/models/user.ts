@@ -24,6 +24,15 @@ export interface IUser extends Document {
     timeZone?: string;
     /** Set when an admin explicitly saves their support availability schedule. */
     adminAvailabilityConfigured?: boolean;
+    /**
+     * Optional default support meeting link (Zoom personal room, Teams link or
+     * any other https URL). Applied on submit to meetings assigned to this admin.
+     */
+    supportMeetingLink?: {
+        url?: string;
+        provider?: 'zoom' | 'teams' | 'other';
+        updatedAt?: Date;
+    };
     adminStaff?: {
         invitedBy?: string;
         invitedByEmail?: string;
@@ -273,6 +282,18 @@ const UserSchema = new Schema({
     adminAvailabilityConfigured: {
         type: Boolean,
         default: false,
+    },
+    supportMeetingLink: {
+        type: new Schema(
+            {
+                url: { type: String, trim: true, maxlength: 500 },
+                provider: { type: String, enum: ['zoom', 'teams', 'other'] },
+                updatedAt: { type: Date },
+            },
+            { _id: false },
+        ),
+        required: false,
+        default: undefined,
     },
     adminStaff: {
         invitedBy: { type: String, required: false },

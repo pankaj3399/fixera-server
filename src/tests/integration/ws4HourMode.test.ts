@@ -392,4 +392,37 @@ describeDb('WS4 hour mode (disposable local MongoDB)', () => {
     expect(rows.length).toBeGreaterThan(0);
     expect(new Set(rows.map((r: any) => String(r.userId)))).toEqual(new Set([empId.toString()]));
   });
+  it('FT1 6B: a customer-hours booking frozen in day mode is planned in days', async () => {
+    // 16 customer hours with an 8 hour day were booked as 2 days: the snapshot
+    // decides, even though the project itself is in hour mode.
+    const dayBookingId = new Types.ObjectId();
+    await mongoose.connection.collection('bookings').insertOne({
+      _id: dayBookingId,
+      bookingNumber: 'WS4T-DAYS',
+      customer: customerId,
+      professional: proId,
+      project: projectId,
+      status: 'booked',
+      bookingType: 'project',
+      assignedTeamMembers: [empId],
+      scheduleSnapshot: { quantity: 16, executionDuration: { value: 2, unit: 'days' }, version: 1 },
+      scheduledStartDate: localToUtc('2026-11-16', '00:00'),
+      scheduledExecutionEndDate: localToUtc('2026-11-17', '17:00'),
+      scheduledBufferStartDate: localToUtc('2026-11-17', '17:00'),
+      scheduledBufferEndDate: localToUtc('2026-11-17', '17:00'),
+      statusHistory: [],
+      rfqData: { serviceType: 'Plumbing', description: 'WS4 day-mode hours' },
+      quote: { amount: 100, currency: 'EUR' },
+    });
+    const res: any = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await updateBookingPlanning(
+      { params: { bookingId: String(dayBookingId) }, user: { _id: proId }, body: { load: true } } as any,
+      res as any
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.success).toBe(true);
+    expect(body.data.mode).toBe('days');
+    const emp = body.data.resources.find((r: any) => r._id === empId.toString());
+    expect(emp.plannedDays).toEqual(['2026-11-16', '2026-11-17']);
+  });
 });

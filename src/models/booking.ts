@@ -1,4 +1,5 @@
 import { InvoiceSettlementBasisSchema, RefundCreditFactSchema, type InvoiceSettlementBasis, type RefundCreditFact } from "./invoiceSettlement";
+import { archiveStatusEntries, pushedStatusEntries, stampEntryActors } from '../utils/bookingEvents/archive';
 import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
@@ -453,6 +454,8 @@ export interface IBooking extends Document {
     extraCostLoyaltyTier?: string;
     extraCostLoyaltyPercentage?: number;
     extraCostPlatformCommission?: number;
+    /** Platform commission % applied when the extra-cost charge was created. */
+    extraCostCommissionPercent?: number;
     extraCostProfessionalPayout?: number;
     extraCostStatus?: 'pending' | 'succeeded' | 'failed' | 'refunded';
     extraCostPaymentSucceeded?: boolean;
@@ -645,6 +648,12 @@ export interface IBooking extends Document {
     cancelledBy: Types.ObjectId; // User who cancelled
     reason: string;
     adminResolutionNote?: string;
+    /**
+     * Invoice-facing refund description when no admin note exists: the
+     * negotiated note or the requester's description (negotiated and dispute
+     * refunds). Rendered under the refund block of the remainder invoice.
+     */
+    refundNote?: string;
     cancelledAt: Date;
     refundAmount?: number;
   };
@@ -1302,6 +1311,7 @@ const BookingSchema = new Schema({
     extraCostLoyaltyTier: { type: String },
     extraCostLoyaltyPercentage: { type: Number },
     extraCostPlatformCommission: { type: Number },
+    extraCostCommissionPercent: { type: Number, min: 0 },
     extraCostProfessionalPayout: { type: Number },
     extraCostStatus: { type: String, enum: ['pending', 'succeeded', 'failed', 'refunded'] },
     extraCostPaymentSucceeded: { type: Boolean },
@@ -1639,6 +1649,10 @@ const BookingSchema = new Schema({
     adminResolutionNote: {
       type: String,
       maxlength: 500
+    },
+    refundNote: {
+      type: String,
+      maxlength: 1000
     },
     cancelledAt: {
       type: Date
@@ -1986,6 +2000,77 @@ BookingSchema.methods.updateStatus = function(
   });
   return this.save();
 };
+
+// ── Append-only status archive (utils/bookingEvents/archive.ts) ─────────────
+// Every status transition is archived with its executioner and context,
+// whichever code path appended to statusHistory (save or atomic $push).
+BookingSchema.post('init', function (doc: any) {
+  doc.$locals.archivedStatusLength = Array.isArray(doc.statusHistory) ? doc.statusHistory.length : 0;
+  doc.$locals.archivedStatus = doc.status ?? null;
+});
+
+BookingSchema.pre('save', function () {
+  const doc: any = this;
+  const history: any[] = Array.isArray(doc.statusHistory) ? doc.statusHistory : [];
+  const start = doc.isNew ? 0 : Number(doc.$locals.archivedStatusLength ?? history.length);
+  if (history.length <= start) return;
+  const entries = history.slice(start);
+  // Copy BEFORE stamping: the archive records whether the writer named the
+  // actor (actorFromEntry) or it came from the authenticated request.
+  doc.$locals.pendingStatusArchive = {
+    entries: entries.map((entry: any) => ({
+      status: entry.status,
+      timestamp: entry.timestamp,
+      updatedBy: entry.updatedBy,
+      note: entry.note,
+    })),
+    previous: doc.isNew ? null : doc.$locals.archivedStatus ?? null,
+  };
+  stampEntryActors(entries);
+});
+
+BookingSchema.post('save', async function (doc: any) {
+  const pending = doc.$locals?.pendingStatusArchive;
+  doc.$locals.archivedStatusLength = Array.isArray(doc.statusHistory) ? doc.statusHistory.length : 0;
+  doc.$locals.archivedStatus = doc.status ?? null;
+  if (!pending) return;
+  doc.$locals.pendingStatusArchive = undefined;
+  await archiveStatusEntries(doc, pending.entries, pending.previous, doc.$session?.() ?? null);
+});
+
+BookingSchema.pre(['findOneAndUpdate', 'updateOne'], function () {
+  const query: any = this;
+  const entries = pushedStatusEntries(query.getUpdate());
+  if (entries.length === 0) return;
+  query._pendingStatusArchive = entries.map((entry: any) => ({ ...entry }));
+  stampEntryActors(entries);
+});
+
+BookingSchema.post(['findOneAndUpdate', 'updateOne'], async function (result: any) {
+  const query: any = this;
+  const entries = query._pendingStatusArchive;
+  if (!entries) return;
+  query._pendingStatusArchive = undefined;
+  try {
+    if (!result) return;
+    if (typeof result.modifiedCount === 'number' && result.modifiedCount === 0) return;
+    const filterId = query.getFilter?.()?._id;
+    const id = result?._id ?? (filterId && typeof filterId !== 'object' ? filterId : filterId?.toHexString ? filterId : undefined);
+    if (!id) return;
+    const session = query.getOptions?.()?.session ?? null;
+    const booking: any = await query.model
+      .findById(id)
+      .select('customer professional status statusHistory dispute cancellation rescheduleRequest completionAttestation customerRejectionReason')
+      .session(session)
+      .lean();
+    if (!booking) return;
+    const history: any[] = Array.isArray(booking.statusHistory) ? booking.statusHistory : [];
+    const previous = history.length > entries.length ? history[history.length - entries.length - 1]?.status ?? null : null;
+    await archiveStatusEntries(booking, entries, previous, session);
+  } catch (err) {
+    console.error('[bookingEvents] archive after update failed:', err);
+  }
+});
 
 const Booking = model<IBooking>('Booking', BookingSchema);
 

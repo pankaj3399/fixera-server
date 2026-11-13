@@ -21,6 +21,7 @@ import Payment from '../../models/payment';
 import User from '../../models/user';
 import { listMyWarrantyClaims } from '../../handlers/WarrantyClaim';
 import { getPaymentStats, getTransactions } from '../../handlers/Professional/payments';
+import { getMyPayments } from '../../handlers/Booking';
 
 const response = () => {
   const res: any = { statusCode: 200, body: undefined };
@@ -191,6 +192,35 @@ describeDb('dashboard list filters (real Mongo)', () => {
         distinctSpy.mockRestore();
         bookingFindSpy.mockRestore();
         projectFindSpy.mockRestore();
+      }
+    });
+
+    it('returns status and service counts for the claim filters (FT2 #10a)', async () => {
+      await WarrantyClaim.collection.insertMany([
+        claim(ids.bSnapshot),
+        claim(ids.bCleaning),
+        claim(ids.bRfq, { status: 'resolved' }),
+        claim(ids.bLegacy),
+        claim(ids.bLegacy, { status: 'escalated' }),
+        claim(ids.bOtherPro, { customer: OTHER_CUSTOMER, professional: OTHER_PRO }),
+      ]);
+      const list = async (query: Record<string, string>) => {
+        const res = response();
+        await listMyWarrantyClaims(claimsRequest({ _id: PRO, role: 'professional' }, query), res);
+        expect(res.statusCode).toBe(200);
+        return res.body.data;
+      };
+      const all = await list({});
+      // Snapshot service wins over the edited live project (Painting).
+      expect(all.serviceCounts).toEqual({ Plumbing: 4, Cleaning: 1 });
+      expect(all.statusCounts).toEqual({ open: 3, resolved: 1, escalated: 1 });
+      // Each facet honours the other selection, and its counts match the list.
+      const plumbing = await list({ service: 'Plumbing' });
+      expect(plumbing.statusCounts).toEqual({ open: 2, resolved: 1, escalated: 1 });
+      const open = await list({ status: 'open' });
+      expect(open.serviceCounts).toEqual({ Plumbing: 2, Cleaning: 1 });
+      for (const [service, count] of Object.entries(open.serviceCounts as Record<string, number>)) {
+        expect((await list({ status: 'open', service })).pagination.total).toBe(count);
       }
     });
 
@@ -401,6 +431,104 @@ describeDb('dashboard list filters (real Mongo)', () => {
       expect(foreign.pagination.total).toBe(0);
       // Search still composes with the status filter.
       expect((await transactions({ q: 'BK-PROJ-000201', status: 'completed' })).pagination.total).toBe(0);
+    });
+  });
+
+  describe('payment lists: facet counts and the professional service filter (FT2 #10a/#10b)', () => {
+    const projPlumbing = new Types.ObjectId();
+    const projPainting = new Types.ObjectId();
+    const projOther = new Types.ObjectId();
+    const bPlumbing1 = new Types.ObjectId();
+    const bPlumbing2 = new Types.ObjectId();
+    const bPainting = new Types.ObjectId();
+    const bRfqTiling = new Types.ObjectId();
+    const bOther = new Types.ObjectId();
+
+    beforeEach(async () => {
+      await Promise.all([Booking, Project, Payment, User].map((model) => model.collection.deleteMany({})));
+      await User.collection.insertMany([
+        { _id: PRO, name: 'Pro', email: 'pro@example.test', role: 'professional' },
+        { _id: OTHER_PRO, name: 'Other pro', email: 'other-pro@example.test', role: 'professional' },
+        { _id: CUSTOMER, name: 'Customer', email: 'customer@example.test', role: 'customer' },
+      ]);
+      await Project.collection.insertMany([
+        { _id: projPlumbing, professionalId: PRO, service: 'Plumbing', title: 'Plumbing' },
+        { _id: projPainting, professionalId: PRO, service: 'Painting', title: 'Painting' },
+        { _id: projOther, professionalId: OTHER_PRO, service: 'Plumbing', title: 'Other' },
+      ]);
+      await Booking.collection.insertMany([
+        { _id: bPlumbing1, bookingNumber: 'BK-F-1', customer: CUSTOMER, project: projPlumbing },
+        { _id: bPlumbing2, bookingNumber: 'BK-F-2', customer: CUSTOMER, project: projPlumbing },
+        { _id: bPainting, bookingNumber: 'BK-F-3', customer: CUSTOMER, project: projPainting },
+        { _id: bRfqTiling, bookingNumber: 'BK-F-4', customer: CUSTOMER, professional: PRO, rfqData: { serviceType: 'Tiling' } },
+        { _id: bOther, bookingNumber: 'BK-F-5', customer: CUSTOMER, professional: OTHER_PRO, project: projOther },
+      ]);
+      const pay = (booking: Types.ObjectId, professional: Types.ObjectId, fields: Record<string, unknown>) => ({
+        _id: new Types.ObjectId(), booking, customer: CUSTOMER, professional, currency: 'EUR',
+        professionalPayout: 100, totalWithVat: 121, createdAt: new Date(), ...fields,
+      });
+      await Payment.collection.insertMany([
+        pay(bPlumbing1, PRO, { status: 'completed', transferStatus: 'succeeded', stripeTransferId: 'tr_a', transferredAt: new Date() }),
+        pay(bPlumbing2, PRO, { status: 'completed', transferStatus: 'pending' }),
+        pay(bPainting, PRO, { status: 'authorized' }),
+        pay(bRfqTiling, PRO, { status: 'refunded' }),
+        pay(bOther, OTHER_PRO, { status: 'completed', transferStatus: 'succeeded', stripeTransferId: 'tr_b' }),
+      ]);
+    });
+
+    const proList = async (query: Record<string, string>) => {
+      const res = response();
+      await getTransactions({ user: { _id: PRO }, query } as unknown as Request, res);
+      expect(res.statusCode).toBe(200);
+      return res.body;
+    };
+
+    it('filters professional payouts by service through the booking, own scope only', async () => {
+      const plumbing = await proList({ service: 'Plumbing' });
+      expect(plumbing.data.map((r: any) => r.bookingNumber).sort()).toEqual(['BK-F-1', 'BK-F-2']);
+      expect(plumbing.pagination.total).toBe(2);
+      const tiling = await proList({ service: 'Tiling' });
+      expect(tiling.data.map((r: any) => r.bookingNumber)).toEqual(['BK-F-4']);
+      // Service composes with the derived transfer status.
+      const pendingPlumbing = await proList({ service: 'Plumbing', status: 'transfer_pending' });
+      expect(pendingPlumbing.data.map((r: any) => r.bookingNumber)).toEqual(['BK-F-2']);
+      expect(await proList({ service: 'Gardening' })).toMatchObject({ pagination: { total: 0 } });
+    });
+
+    it('returns professional status and service counts that match what each option lists', async () => {
+      const all = await proList({});
+      expect(all.services).toEqual(['Painting', 'Plumbing', 'Tiling']);
+      expect(all.serviceCounts).toEqual({ Plumbing: 2, Painting: 1, Tiling: 1 });
+      expect(all.statusCounts).toMatchObject({
+        completed: 1, transfer_pending: 1, authorized: 1, refunded: 1, transfer_failed: 0, pending: 0, failed: 0,
+      });
+      for (const [status, count] of Object.entries(all.statusCounts as Record<string, number>)) {
+        expect((await proList({ status })).pagination.total).toBe(count);
+      }
+      // Each facet ignores its own selection but honours the other one.
+      const plumbing = await proList({ service: 'Plumbing' });
+      expect(plumbing.statusCounts).toMatchObject({ completed: 1, transfer_pending: 1, authorized: 0 });
+      expect(plumbing.serviceCounts).toEqual({ Plumbing: 2, Painting: 1, Tiling: 1 });
+      const authorized = await proList({ status: 'authorized' });
+      expect(authorized.serviceCounts).toEqual({ Painting: 1 });
+    });
+
+    it('returns customer payment status and service counts honouring the sibling facet', async () => {
+      const customerList = async (query: Record<string, string>) => {
+        const res = response();
+        await getMyPayments({ user: { _id: CUSTOMER }, query } as unknown as Request, res, vi.fn());
+        expect(res.statusCode).toBe(200);
+        return res.body.data;
+      };
+      const all = await customerList({});
+      expect(all.statusCounts).toEqual({ completed: 3, authorized: 1, refunded: 1 });
+      expect(all.serviceCounts).toEqual({ Plumbing: 3, Painting: 1, Tiling: 1 });
+      const plumbing = await customerList({ service: 'Plumbing' });
+      expect(plumbing.pagination.total).toBe(3);
+      expect(plumbing.statusCounts).toEqual({ completed: 3 });
+      const completed = await customerList({ status: 'completed' });
+      expect(completed.serviceCounts).toEqual({ Plumbing: 3 });
+      expect(completed.pagination.total).toBe(3);
     });
   });
 });

@@ -1,6 +1,9 @@
 import { UserFacingError } from "../appErrors";
 
-/** Manual-link meeting mode: support admins paste a real link after booking. */
+/**
+ * Manual-link meeting mode: support admins supply a real link, either once as
+ * their saved default (applied on submit) or per meeting after booking.
+ */
 export const SUPPORT_MEETING_LINK_MODE = "manual" as const;
 export const SUPPORT_MEETING_LINK_MAX_LENGTH = 500;
 
@@ -74,4 +77,45 @@ export function safeSupportMeetingLink(value: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+export type SupportMeetingLinkProvider = "zoom" | "teams" | "other";
+
+function hostMatches(hostname: string, domain: string): boolean {
+  return hostname === domain || hostname.endsWith(`.${domain}`);
+}
+
+/** Label a validated https link by its host. Unknown hosts are simply "other". */
+export function inferSupportMeetingLinkProvider(value: string): SupportMeetingLinkProvider {
+  let hostname = "";
+  try {
+    hostname = new URL(value).hostname.toLowerCase();
+  } catch {
+    return "other";
+  }
+  if (["zoom.us", "zoom.com", "zoomgov.com"].some((domain) => hostMatches(hostname, domain))) {
+    return "zoom";
+  }
+  if (
+    hostMatches(hostname, "teams.microsoft.com")
+    || hostMatches(hostname, "teams.live.com")
+    || hostMatches(hostname, "teams.microsoft.us")
+  ) {
+    return "teams";
+  }
+  return "other";
+}
+
+/**
+ * Normalize an admin's saved default link for storage. `null`, `undefined` and
+ * blank input clear the default; anything else must pass the same rules as a
+ * per-ticket link.
+ */
+export function normalizeDefaultSupportMeetingLink(
+  value: unknown,
+): { url: string; provider: SupportMeetingLinkProvider } | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const url = assertRealHttpsMeetingLink(value);
+  return { url, provider: inferSupportMeetingLinkProvider(url) };
 }

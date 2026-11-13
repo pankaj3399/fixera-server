@@ -622,7 +622,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     if (!fact.refundedAt) {
       qualityNotes.add('UNDATED_REFUND');
     }
-    if (!fact.vatSplitRecorded) qualityNotes.add('REFUND_VAT_SPLIT_NOT_RECORDED');
+    if (!fact.vatSplitRecorded && !fact.vatSplitDerived) qualityNotes.add('REFUND_VAT_SPLIT_NOT_RECORDED');
     const refundActor = actorForId(fact.actorId, actors, viewerRole);
     const refundRef = refundFactReference(fact);
     pushEvent({
@@ -660,7 +660,9 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       },
       source: 'refund',
       visibility: 'participants',
-      noteCodes: fact.vatSplitRecorded ? undefined : ['REFUND_VAT_SPLIT_NOT_RECORDED'],
+      noteCodes: fact.vatSplitRecorded
+        ? undefined
+        : fact.vatSplitDerived ? ['REFUND_VAT_SPLIT_DERIVED'] : ['REFUND_VAT_SPLIT_NOT_RECORDED'],
     });
     markStatusCovered(coveredStatus, 'refunded', fact.refundedAt);
   }
@@ -1429,6 +1431,107 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     }
   }
 
+  // ── Append-only archive (models/bookingEvent) ──────────────────────────
+  // Each archived transition is matched to its statusHistory entry and the
+  // event built for it; the archive supplies what mutable records lost: the
+  // executioner, the note, and the context/evidence at that moment (e.g. an
+  // earlier dispute later overwritten by a second one). Archive rows with no
+  // matching event are added as their own items.
+  const archive: any[] = Array.isArray(booking.__bookingEvents) ? booking.__bookingEvents : [];
+  let archiveMatchedEntries = 0;
+  if (archive.length > 0) {
+    const usedEntries = new Set<number>();
+    const timeOf = (value: unknown) => toDate(value)?.getTime() ?? NaN;
+    const indexForRow = (row: any): number => {
+      const rowTime = timeOf(row.at);
+      for (const [index, entry] of statusHistory.entries()) {
+        if (usedEntries.has(index) || entry?.status !== row.statusTo) continue;
+        if (Math.abs(timeOf(entry.timestamp) - rowTime) <= 5_000) return index;
+      }
+      return -1;
+    };
+    for (const row of archive) {
+      const index = indexForRow(row);
+      if (index >= 0) {
+        usedEntries.add(index);
+        archiveMatchedEntries += 1;
+      }
+      const rowTime = timeOf(row.at);
+      const target = events.find((event) =>
+        (index >= 0 && event.metadata?.statusHistoryIndex === index)
+        || (event.statusTo === row.statusTo && Math.abs(timeOf(event.occurredAt) - rowTime) <= 5_000));
+      const adminAuthored = row.actorRole === 'admin';
+      const noteVisible = Boolean(row.note) && (viewerRole === 'admin' || !adminAuthored);
+      // Dispute narratives/evidence stay admin-only, like the dispute link.
+      const disputeContext = row.context?.dispute;
+      const contextVisible = Boolean(row.context) && (!disputeContext || viewerRole === 'admin');
+      const archivedContext = contextVisible ? row.context : undefined;
+      const contextDescription = archivedContext
+        ? (archivedContext.dispute?.reason
+          || archivedContext.cancellation?.reason
+          || archivedContext.reschedule?.reason
+          || archivedContext.quoteRejection?.reason
+          || archivedContext.completion?.notes
+          || null)
+        : null;
+      const attachments = contextVisible && Array.isArray(row.attachments) && row.attachments.length
+        ? await evidenceAttachments(
+            row.attachments,
+            [professionalId, customerId],
+            disputeContext ? 'dispute' : row.context?.completion ? 'completion' : 'cancellation',
+          )
+        : [];
+      const actor = row.actor
+        ? actorForId(row.actor, actors, viewerRole, {
+            roleHint: row.actorRole === 'system' || row.actorRole === 'employee' ? undefined : row.actorRole,
+          })
+        : row.actorRole === 'system' ? systemActor() : null;
+
+      if (target) {
+        target.metadata = {
+          ...(target.metadata || {}),
+          archived: true,
+          ...(archivedContext ? { archivedContext } : {}),
+        };
+        if (!target.actorRecorded && actor && isActorRecorded(actor)) {
+          target.actor = actor;
+          target.actorRecorded = true;
+          target.legacyDerived = false;
+        }
+        if (!target.description) {
+          const description = (noteVisible ? row.note : null) || contextDescription;
+          if (description) {
+            target.description = description;
+            target.descriptionSource = adminAuthored ? 'admin' : row.actorRole === 'system' ? 'system' : 'user';
+            target.descriptionLocale = 'unknown';
+          }
+        }
+        if ((!target.attachments || target.attachments.length === 0) && attachments.length) {
+          target.attachments = attachments;
+        }
+        continue;
+      }
+      const type = row.statusTo === 'dispute' ? 'dispute_opened' : 'status_changed';
+      pushEvent({
+        id: `archive:${String(row._id)}`,
+        type,
+        category: categoryForType(type === 'dispute_opened' ? 'dispute_opened' : row.statusTo === 'cancelled' ? 'cancellation_completed' : type),
+        occurredAt: toIso(row.at) || '',
+        actor,
+        actorRecorded: Boolean(row.actor),
+        description: (noteVisible ? row.note : null) || contextDescription,
+        descriptionOrigin: adminAuthored ? 'admin' : row.actorRole === 'system' ? 'system' : 'user',
+        statusFrom: row.statusFrom ?? null,
+        statusTo: row.statusTo,
+        attachments,
+        metadata: { archived: true, ...(archivedContext ? { archivedContext } : {}) },
+        source: type === 'dispute_opened' ? 'dispute' : 'status_history',
+        visibility: 'participants',
+        legacyDerived: false,
+      });
+    }
+  }
+
   // Admin areas are separate permissions. A bookings.read admin without
   // cancellations/warranty/disputes access must not receive those records or
   // their timeline events through any booking alias.
@@ -1458,12 +1561,22 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     qualityNotes.add('ATTACHMENT_UNAVAILABLE_FOR_LEGACY_RECORD');
   }
 
-  qualityNotes.add('HISTORICAL_COVERAGE_UNKNOWN');
+  // Coverage: complete only when every status transition is in the
+  // append-only archive (bookings created after it shipped); partial when some
+  // are; otherwise unknown (rebuilt from surviving mutable records).
+  const archiveCoversAll = archive.length > 0 && statusHistory.length > 0 && archiveMatchedEntries >= statusHistory.length;
+  const coverageStatus: 'complete' | 'partial' | 'unknown' = archiveCoversAll
+    ? 'complete'
+    : archive.length > 0 ? 'partial' : 'unknown';
+  if (coverageStatus !== 'complete') qualityNotes.add('HISTORICAL_COVERAGE_UNKNOWN');
   return {
     generatedAt: new Date().toISOString(),
-    // Surviving mutable state cannot prove complete historical coverage.
-    complete: false,
-    coverage: { status: 'unknown', source: 'surviving_records', appendOnlyArchive: false },
+    complete: coverageStatus === 'complete',
+    coverage: {
+      status: coverageStatus,
+      source: archive.length > 0 ? 'append_only_archive' : 'surviving_records',
+      appendOnlyArchive: archive.length > 0,
+    },
     order: 'asc',
     items: visibleEvents,
     dataQuality: {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { getEventDef } from '../../../utils/notifications/registry';
+import { resolveChannels } from '../../../utils/notifications/types';
 import { defaultLoyaltyTiers } from '../../../models/loyaltyConfig';
 import { getCurrentTier, getNextTierInfo } from '../../../utils/loyaltySystem';
 
@@ -24,6 +25,25 @@ describe('level-up inbox + email wiring (client bug list #11)', () => {
     expect(built.body).toContain('Expert');
     expect(built.clickUrl).toContain('/dashboard/benefits');
     expect(typeof built.sendEmail).toBe('function');
+  });
+
+  // FT3 #11: inbox + popup + email (and push) on level-up, for both roles,
+  // with the default notification preferences of a new account.
+  it('delivers level-up email and push by default for customers and professionals', () => {
+    const defaults = {
+      booking_updates: { push: true, email: true },
+      messages: { push: true, email: true },
+      promotions: { push: false, email: false },
+      system: { push: true, email: true },
+    };
+    for (const key of ['customer.loyalty_tier_up', 'professional.leveling_up'] as const) {
+      const def = getEventDef(key)!;
+      expect(def.category).toBe('system');
+      expect(resolveChannels(def.tier, def.category, defaults as any)).toEqual({ sendPush: true, sendEmail: true });
+      // An explicit opt-out is still honoured.
+      expect(resolveChannels(def.tier, def.category, { ...defaults, system: { push: false, email: false } } as any))
+        .toEqual({ sendPush: false, sendEmail: false });
+    }
   });
 
   it('notifies the professional when a warranty proposal is declined, with the clarification', () => {

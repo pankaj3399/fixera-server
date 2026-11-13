@@ -32,7 +32,14 @@ import type {
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
 import { getCheckoutCommissionPercent } from '../checkoutCommission';
-import { checkoutCustomerTotal, commissionedExtraCostAmount, commissionedExtraCostTotal } from '../customerPricing';
+import {
+  checkoutCustomerTotal,
+  commissionedExtraCostLines,
+  commissionedExtraCostTotal,
+  recordedExtraCostCustomerSubtotal,
+  resolveExtraCostChargeCommissionPercent,
+  type ExtraCostChargeRecord,
+} from '../customerPricing';
 import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
 import {
   presignOwnedUrl,
@@ -823,6 +830,7 @@ const buildPayments = async (params: {
       netAmount: fact.netAmount,
       vatRate: fact.vatRate,
       vatSplitRecorded: fact.vatSplitRecorded,
+      vatSplitDerived: fact.vatSplitDerived === true,
       kind: fact.kind,
       ...(canSeeAdminInternals
         ? { internalNotes: fact.internalNotes, providerRefundId: fact.providerRefundId }
@@ -831,8 +839,11 @@ const buildPayments = async (params: {
       noticeCodes: fact.noticeCodes,
     };
   });
-  if (refunds.some((refund) => !refund.vatSplitRecorded)) {
+  if (refunds.some((refund) => !refund.vatSplitRecorded && !refund.vatSplitDerived)) {
     notices.push(notice('REFUND_VAT_SPLIT_NOT_RECORDED', 'info', 'refund'));
+  }
+  if (refunds.some((refund) => refund.vatSplitDerived)) {
+    notices.push(notice('REFUND_VAT_SPLIT_DERIVED', 'info', 'refund'));
   }
 
   const byCurrencyMap = new Map<string, { charged: number; refunded: number; complete: boolean }>();
@@ -893,6 +904,27 @@ const buildPayments = async (params: {
 };
 
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * The recorded extra-cost charge (booking.payment, else its Payment row). Read
+ * from the raw records: the commission facts are stripped from viewer payloads.
+ */
+const extraCostChargeRecord = (booking: any, payments: any[]): ExtraCostChargeRecord | null => {
+  const hasCharge = (record: any) => record && num(record.extraCostNetAmount) != null;
+  const rows = resolvePaymentRows(booking, payments).map((row) => row.payment);
+  const primary = hasCharge(booking.payment) ? booking.payment : rows.find(hasCharge);
+  if (!primary) return null;
+  const recordedPercent = num(primary.extraCostCommissionPercent)
+    ?? num(booking.payment?.extraCostCommissionPercent)
+    ?? rows.map((row: any) => num(row?.extraCostCommissionPercent)).find((value) => value != null)
+    ?? undefined;
+  return {
+    extraCostNetAmount: primary.extraCostNetAmount,
+    extraCostPlatformCommission: primary.extraCostPlatformCommission,
+    extraCostCustomerDiscount: primary.extraCostCustomerDiscount,
+    extraCostCommissionPercent: recordedPercent,
+  };
+};
 
 export const buildBookingDetails = async (params: {
   booking: any;
@@ -1501,10 +1533,42 @@ export const buildBookingDetails = async (params: {
   });
 
   const extraCostPayment = paymentsDto.extraCost;
-  const extraCostCommissionPercent = viewerRole === 'professional' ? 0 : await getCheckoutCommissionPercent();
-  // Customer-side extra-cost amounts, computed here with the live commission so the
-  // customer never needs the professional base. Professionals see the base and commission.
-  const extraCostItems = (Array.isArray(booking.extraCosts) ? booking.extraCosts : []).map((item: any) => ({
+  // Customer-side extra-cost amounts, computed here so the customer never needs
+  // the professional base (professionals see the base and commission). They use
+  // the commission the extra-cost charge was made with, never a later rate.
+  const extraCostLines = Array.isArray(booking.extraCosts) ? booking.extraCosts : [];
+  const extraCostTotalAmount = num(booking.extraCostTotal);
+  const extraCostCharge = viewerRole === 'professional' ? null : extraCostChargeRecord(booking, payments);
+  const extraCostCommissionPercent = viewerRole === 'professional'
+    ? 0
+    : resolveExtraCostChargeCommissionPercent(
+        extraCostCharge,
+        extraCostLines,
+        await getCheckoutCommissionPercent(),
+      ).commissionPercent;
+  const extraCostLinesTotal = roundMoney(extraCostLines.reduce((sum: number, item: any) => sum + (num(item.amount) ?? 0), 0));
+  const extraCostLinesMatchTotal = extraCostLines.length > 0
+    && extraCostTotalAmount != null
+    && Math.abs(extraCostLinesTotal - roundMoney(extraCostTotalAmount)) < 0.005;
+  const recordedExtraCostSubtotal = recordedExtraCostCustomerSubtotal(extraCostCharge);
+  // The recorded charge is authoritative while it still describes these lines
+  // (an admin resolution can change the total afterwards).
+  const extraCostChargeMatchesLines = extraCostLinesMatchTotal
+    && recordedExtraCostSubtotal != null
+    && Math.abs(roundMoney(num(extraCostCharge?.extraCostNetAmount) ?? 0) - extraCostLinesTotal) < 0.005;
+  const extraCostCustomerTotal = viewerRole === 'professional' || extraCostTotalAmount == null
+    ? null
+    : extraCostChargeMatchesLines
+      ? recordedExtraCostSubtotal!
+      : commissionedExtraCostTotal(extraCostLines, extraCostTotalAmount, extraCostCommissionPercent);
+  const extraCostCustomerAmounts = viewerRole === 'professional'
+    ? []
+    : commissionedExtraCostLines(
+        extraCostLines,
+        extraCostCommissionPercent,
+        extraCostLinesMatchTotal && extraCostCustomerTotal != null ? extraCostCustomerTotal : undefined,
+      );
+  const extraCostItems = extraCostLines.map((item: any, index: number) => ({
     type: item.type || 'other',
     name: String(item.name || ''),
     justification: String(item.justification || ''),
@@ -1515,7 +1579,7 @@ export const buildBookingDetails = async (params: {
     actualUnits: num(item.actualUnits),
     referenceIndex: num(item.referenceIndex),
     customerCharge: null,
-    customerAmount: viewerRole === 'professional' ? null : commissionedExtraCostAmount(item, extraCostCommissionPercent),
+    customerAmount: viewerRole === 'professional' ? null : extraCostCustomerAmounts[index],
   }));
   const extraCostNotices: DetailsNotice[] = [];
   if (num(booking.extraCostTotal) != null && booking.extraCostTotal !== 0 && !extraCostPayment) {
@@ -1545,9 +1609,7 @@ export const buildBookingDetails = async (params: {
   const extraCosts: ExtraCostsDetailsDto = {
     status: booking.extraCostStatus || null,
     totalProfessionalAmount: num(booking.extraCostTotal),
-    totalCustomerAmount: viewerRole === 'professional' || num(booking.extraCostTotal) == null
-      ? null
-      : commissionedExtraCostTotal(booking.extraCosts, num(booking.extraCostTotal) ?? 0, extraCostCommissionPercent),
+    totalCustomerAmount: extraCostCustomerTotal,
     currency: paymentCurrency,
     currencySource: booking.payment?.currency ? 'payment' : quoteCurrency ? 'quote' : 'not_recorded',
     items: extraCostItems,
@@ -1837,7 +1899,9 @@ export const buildBookingDetails = async (params: {
         : null,
     extraCosts: num(booking.extraCostTotal) != null
       ? {
-          total: num(booking.extraCostTotal),
+          // The professional base is never a customer-facing figure.
+          total: viewerRole === 'customer' ? null : num(booking.extraCostTotal),
+          customerTotal: viewerRole === 'professional' ? null : extraCosts.totalCustomerAmount,
           currency: paymentCurrency,
           currencySource: booking.payment?.currency ? 'payment' : quoteCurrency ? 'quote' : 'not_recorded',
           status: booking.extraCostStatus || null,

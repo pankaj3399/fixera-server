@@ -3,7 +3,10 @@ import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
   getCustomerExtraCostNet,
+  scaledSupplierRepeatBuyerDiscount,
+  supplierRepeatBuyerDiscount,
 } from "../../utils/invoiceAccounting";
+import { calculateDiscountedPayouts } from "../../utils/discountAccounting";
 
 describe("invoice accounting", () => {
   it("keeps supplier pricing separate from the customer commission", () => {
@@ -58,5 +61,31 @@ describe("invoice accounting", () => {
       expect(getCustomerExtraCostNet({}, 37.5)).toBe(37.5);
       expect(getCustomerExtraCostNet(undefined as any, 12)).toBe(12);
     });
+  });
+});
+
+describe("supplier repeat-buyer discount (FT3 #25a)", () => {
+  it.each([[13.75, 10], [110, 10], [33.33, 17.5], [5, 0]])(
+    "matches the payout reduction for a %s customer discount at %s%% commission",
+    (discount, commission) => {
+      const base = { originalAmount: 1100, finalAmount: 1100 - discount, loyaltyDiscount: {}, pointsDiscount: {} };
+      const full = calculateDiscountedPayouts({ ...base, repeatBuyerDiscount: { amount: 0 } }, commission, 1000);
+      const withRepeat = calculateDiscountedPayouts({ ...base, repeatBuyerDiscount: { amount: discount } }, commission, 1000);
+      const share = supplierRepeatBuyerDiscount(discount, commission);
+      expect(Math.round((full.professionalPayout - withRepeat.professionalPayout) * 100) / 100).toBe(share);
+      // Full-price line minus the shown discount is the discounted (paid out) net.
+      expect(calculateSupplierInvoiceNet({ quoteAmount: 1000, repeatBuyerDiscount: share })).toBe(withRepeat.professionalPayout);
+    },
+  );
+
+  it("splits a refund-scaled line so full price minus discount is the old rounded line", () => {
+    for (const scale of [1, 216.11 / 316.11, 0.333333, 0.5]) {
+      const discounted = 237.5;
+      const shown = scaledSupplierRepeatBuyerDiscount(discounted, 12.5, scale);
+      const full = Math.round((discounted + 12.5) * scale * 100) / 100;
+      expect(Math.round((full - shown) * 100)).toBe(Math.round(discounted * scale * 100));
+    }
+    expect(scaledSupplierRepeatBuyerDiscount(237.5, 0, 1)).toBe(0);
+    expect(supplierRepeatBuyerDiscount(undefined, 10)).toBe(0);
   });
 });

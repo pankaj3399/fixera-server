@@ -139,6 +139,53 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
     }
   }
 
+  // FT3 #5: a started booking WITHOUT a resource plan used to be fully
+  // released by a partial refund. The past part of its scheduled window must
+  // stay blocked and visible for the assigned resources; future days free.
+  it.each(['direct', 'dispute', 'negotiated', 'admin'] as const)('%s: retains the past window of a started booking without a resource plan', async path => {
+    const booking = await seedRefund(path === 'dispute' ? 'dispute' : 'in_progress');
+    await Booking.collection.updateOne({ _id: booking._id }, { $unset: { resourcePlan: '' } });
+    const res = response();
+    if (path === 'direct') await refundPayment({ user: { _id: adminId }, body: { bookingId: String(booking._id), amount: 50, reason: 'Partial cancellation' } } as any, res as any);
+    else if (path === 'dispute') await resolveDispute({ user: { _id: adminId }, params: { bookingId: String(booking._id) },
+      body: { forceStatus: 'refunded', action: 'adjust', adjustedAmount: 50, resolution: 'Partial cancellation' } } as any, res as any);
+    else {
+      const request = await CancellationRequest.create({ booking: booking._id, requestedBy: customerId, requestedRole: 'customer',
+        status: path === 'admin' ? 'pending' : 'negotiating', reason: 'Partial cancellation', counterOfferAmount: 50 });
+      if (path === 'admin') await approveCancellationRequest({ user: { _id: adminId }, params: { id: String(request._id) }, body: { amount: 50 } } as any, res as any);
+      else await customerRespondToCounterOffer({ user: { _id: customerId }, params: { bookingId: String(booking._id) }, body: { decision: 'accept' } } as any, res as any);
+    }
+    expect(res.statusCode).toBe(200);
+    const pastDays = [utcDay(-2).toISOString(), utcDay(-1).toISOString()];
+    await vi.waitFor(async () => {
+      const current = await Booking.findById(booking._id).lean();
+      expect(current?.status).toBe('cancelled');
+      expect(current?.payment?.status).toBe('partially_refunded');
+      expect(current?.refundPreservesPastPlanning).toBe(true);
+      expect(current?.resourcePlan?.map((entry: any) => [String(entry.resourceId), entry.days.map((d: Date) => d.toISOString())]))
+        .toEqual([[String(proId), pastDays]]);
+      const reservations = await CalendarReservation.find({ sourceType: 'booking', sourceId: booking._id }).lean();
+      expect(reservations.length).toBeGreaterThan(0);
+      expect(reservations.every((row: any) => new Date(row.startAt) < utcDay(0) && new Date(row.startAt) >= utcDay(-2))).toBe(true);
+    }, { timeout: 10000 });
+    const { buildBookingBlockedRanges } = await import('../../utils/bookingBlocks');
+    const ranges = (await buildBookingBlockedRanges(proId)).filter(range => range.bookingId === String(booking._id));
+    expect(ranges.map(range => range.startDate)).toEqual(pastDays);
+    expect(ranges.every(range => range.retainedAfterRefund === true && range.status === 'cancelled')).toBe(true);
+  }, 30000);
+
+  it('shows completed bookings only to display consumers and never past their actual end', async () => {
+    const booking = await seedRefund('completed');
+    await Booking.collection.updateOne({ _id: booking._id }, { $set: { actualEndDate: utcDay(-1), resourcePlan: [] } });
+    const { buildBookingBlockedRanges } = await import('../../utils/bookingBlocks');
+    const blocking = await buildBookingBlockedRanges(proId);
+    expect(blocking.some(range => range.bookingId === String(booking._id))).toBe(false);
+    const display = (await buildBookingBlockedRanges(proId, { includeCompleted: true }))
+      .filter(range => range.bookingId === String(booking._id));
+    expect(display).toEqual([expect.objectContaining({ status: 'completed', reason: 'booking',
+      startDate: utcDay(-2).toISOString(), endDate: utcDay(-1).toISOString() })]);
+  });
+
   it.each(['admin', 'dispute', 'negotiated'])('%s releases the calendar and skips partial invoices after a cumulative full refund', async path => {
     const booking = await seedRefund(path === 'dispute' ? 'dispute' : 'in_progress', { status: 'partially_refunded', refundAmount: 71 });
     const res = response();

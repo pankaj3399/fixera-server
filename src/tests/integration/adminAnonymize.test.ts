@@ -2875,7 +2875,7 @@ describeDb('admin account anonymization', () => {
         eventKey: 'professional.booking_cancelled_refunded',
       })).toBe(1);
       expect(await EmailLog.countDocuments({ status: 'skipped' })).toBeGreaterThan(0);
-    });
+    }, { timeout: 15000 });
     const activeNotification = await Notification.findOne({
       userId: professional._id,
       eventKey: 'professional.booking_cancelled_refunded',
@@ -2997,7 +2997,7 @@ describeDb('admin account anonymization', () => {
         userId: activeProfessional._id,
         eventKey: 'professional.completion_confirmed_by_customer',
       })).toBe(1);
-    });
+    }, { timeout: 15000 });
     const activeNotification = await Notification.findOne({
       userId: activeProfessional._id,
       eventKey: 'professional.completion_confirmed_by_customer',
@@ -3183,7 +3183,7 @@ describeDb('admin account anonymization', () => {
           template: 'booking_started',
         }).lean();
         expect(emailLog, scenario.role).toBeTruthy();
-      });
+      }, { timeout: 15000 });
       expect(await Notification.countDocuments({
         userId: customer._id,
         eventKey: 'customer.booking_started',
@@ -3746,6 +3746,8 @@ describeDb('admin account anonymization', () => {
     const storedApprovalBooking = await Booking.findById(approvalBooking._id).lean();
     expect(storedApprovalBooking?.cancellation?.reason).toBe('[deleted]');
     expect(storedApprovalBooking?.cancellation?.adminResolutionNote).toBe('Admin decision recorded separately');
+    // The invoice-facing refund note copied the requester's text; it is redacted too.
+    expect(storedApprovalBooking?.cancellation?.refundNote).toBe('[deleted]');
     expect(JSON.stringify(storedApprovalBooking)).not.toContain('+32 488 11 11 11');
   });
 

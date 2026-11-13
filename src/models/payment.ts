@@ -82,6 +82,8 @@ export interface IPayment extends Document {
   extraCostLoyaltyTier?: string;
   extraCostLoyaltyPercentage?: number;
   extraCostPlatformCommission?: number;
+  /** Platform commission % applied when the extra-cost charge was created. */
+  extraCostCommissionPercent?: number;
   extraCostProfessionalPayout?: number;
   extraCostStatus?: "pending" | "succeeded" | "failed" | "refunded";
   extraCostPaymentSucceeded?: boolean;
@@ -264,6 +266,7 @@ const PaymentSchema = new Schema<IPayment>(
     extraCostLoyaltyTier: { type: String },
     extraCostLoyaltyPercentage: { type: Number },
     extraCostPlatformCommission: { type: Number },
+    extraCostCommissionPercent: { type: Number, min: 0 },
     extraCostProfessionalPayout: { type: Number },
     extraCostStatus: { type: String, enum: ["pending", "succeeded", "failed", "refunded"] },
     extraCostPaymentSucceeded: { type: Boolean },

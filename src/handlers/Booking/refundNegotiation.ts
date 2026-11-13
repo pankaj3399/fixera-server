@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { waitUntil } from '@vercel/functions';
 import mongoose from 'mongoose';
 import Booking from '../../models/booking';
 import User from '../../models/user';
@@ -83,11 +84,16 @@ const finalizeRefund = async (
   booking.status = isPreCompletionStatus(booking.status)
     ? REFUND_FINALIZED_BOOKING_STATUS
     : booking.status;
+  // The invoice refund block shows the negotiated note (else the requester's
+  // description) under the refund reason; see resolveInvoiceRefundDescription.
+  const refundNote = [request.professionalNote, request.reason]
+    .find((note): note is string => typeof note === 'string' && note.trim().length > 0);
   booking.cancellation = {
     cancelledBy: request.requestedBy,
     reason,
     cancelledAt: new Date(),
     refundAmount: result.amount,
+    ...(refundNote ? { refundNote: refundNote.trim().slice(0, 1000) } : {}),
   } as any;
   booking.statusHistory = booking.statusHistory || [];
   booking.statusHistory.push({
@@ -109,7 +115,9 @@ const finalizeRefund = async (
     && leavesBillableRemainder(booking.payment.totalWithVat, booking.payment.refundAmount)) {
     // Money has settled: invoice routing must survive calendar failures and
     // account removal fences. executeRefund already pruned and saved the plan.
-    void ensureRefundInvoices(String(booking._id));
+    // Registered with waitUntil so a serverless runtime finishes it after
+    // the response, as the completion invoices do.
+    waitUntil(ensureRefundInvoices(String(booking._id)));
     try {
       if (isBookingStarted(booking)) await retainPastBookingCalendar(booking);
     } catch (sideEffectError) {

@@ -7,7 +7,7 @@ vi.mock('../../utils/notifications/notify', () => ({ notify: vi.fn() }));
 
 import Booking from '../../models/booking';
 import CalendarReservation from '../../models/calendarReservation';
-import { buildProjectScheduleWindow, buildPerMemberBlockedData, buildPerResourceBlockedDays } from '../../utils/scheduleEngine';
+import { buildProjectScheduleProposals, buildProjectScheduleWindow, buildPerMemberBlockedData, buildPerResourceBlockedDays, getUnbookableStartDates, validateProjectScheduleSelection } from '../../utils/scheduleEngine';
 import { buildScheduleUpdatePayload, requestBookingReschedule, respondToBookingReschedule } from '../../handlers/Booking/payment-integration';
 import { bookingCalendarOccupancies, reserveBookingCalendar, releaseBookingCalendar } from '../../utils/support/bookingCalendar';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
@@ -138,3 +138,105 @@ describeDb('per-day substitutions survive booking and reschedule contracts', () 
   });
 
 });
+
+// FT3 #22a, the client's exact case: 3 assigned resources, at least 2 required,
+// 70% overlap, a 10-day execution. Resource B is blocked on some days, so C
+// substitutes on those days and the booking keeps its 10 working days instead
+// of being prolonged to 13.
+describeDb('FT3 #22a exact case: substitution does not prolong a 10-day booking', () => {
+  const a = new Types.ObjectId();
+  const b = new Types.ObjectId();
+  const c = new Types.ObjectId();
+  const customer = new Types.ObjectId();
+  const project = new Types.ObjectId();
+  const bBlocked = ['2027-01-13', '2027-01-14', '2027-01-15'];
+  const tenWorkingDays = ['2027-01-11', '2027-01-12', '2027-01-13', '2027-01-14', '2027-01-15', '2027-01-18', '2027-01-19', '2027-01-20', '2027-01-21', '2027-01-22'];
+
+  beforeAll(async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2027-01-01T09:00:00Z'));
+    if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+    await mongoose.connect(testUri!, { dbName: `ft3_22a_${process.pid}_${Date.now().toString(36)}`, autoCreate: false, autoIndex: false });
+    const availability = Object.fromEntries(['monday', 'tuesday', 'wednesday', 'thursday', 'friday'].map(key => [key, { available: true, startTime: '09:00', endTime: '17:00' }]));
+    await mongoose.connection.collection('users').insertMany([
+      { _id: a, name: 'Resource A', email: 'res-a-22a@test.example', role: 'professional', professionalStatus: 'approved', businessInfo: { timezone: 'UTC' }, companyAvailability: availability },
+      { _id: b, name: 'Resource B', email: 'res-b-22a@test.example', role: 'employee', employee: { companyId: String(a), isActive: true }, blockedDates: bBlocked.map((key) => ({ date: day(key), reason: 'Unavailable' })) },
+      { _id: c, name: 'Resource C', email: 'res-c-22a@test.example', role: 'employee', employee: { companyId: String(a), isActive: true } },
+      { _id: customer, name: 'Customer 22a', email: 'customer-22a@test.example', role: 'customer', location: { type: 'Point', coordinates: [4, 50], country: 'BE' } },
+    ]);
+    await mongoose.connection.collection('projects').insertOne({
+      _id: project, professionalId: a, title: 'Exact case 22a substitution regression', status: 'published',
+      resources: [String(a), String(b), String(c)], minResources: 2, minOverlapPercentage: 70,
+      executionDuration: { value: 10, unit: 'days' }, timeMode: 'days',
+      subprojects: [{ name: 'Package', pricing: { type: 'fixed', amount: 1000 }, executionDuration: { value: 10, unit: 'days' } }],
+    });
+    await CalendarReservation.createCollection();
+    await CalendarReservation.createIndexes();
+    await mongoose.connection.createCollection('counters');
+  });
+  afterAll(async () => { await mongoose.connection.dropDatabase(); await mongoose.disconnect(); vi.useRealTimers(); });
+
+  it('books A+C on the days B is blocked and ends on the 10th working day', async () => {
+    const validation = await validateProjectScheduleSelection({ projectId: String(project), subprojectIndex: 0, startDate: '2027-01-11' });
+    expect(validation).toEqual({ valid: true });
+
+    const window = await buildProjectScheduleWindow({ projectId: String(project), subprojectIndex: 0, startDate: '2027-01-11' });
+    expect(window).toBeTruthy();
+    expect(window!.scheduledExecutionEndDate.toISOString()).toBe('2027-01-22T17:00:00.000Z');
+    expect(window!.throughputDays).toBe(10);
+    expect(window!.assignedTeamMembers.map(String).sort()).toEqual([String(a), String(b), String(c)].sort());
+
+    const plan = planSummary((window as any).resourcePlan);
+    const daysOf = (id: Types.ObjectId) => plan.find((entry: any) => entry.resourceId === String(id))?.days ?? [];
+    // Every working day is staffed by two people, B never on its blocked days.
+    for (const key of tenWorkingDays) {
+      const staff = [a, b, c].filter((id) => daysOf(id).includes(key));
+      expect(staff, key).toHaveLength(2);
+    }
+    for (const key of bBlocked) {
+      expect(daysOf(b)).not.toContain(key);
+      expect(daysOf(c)).toContain(key);
+    }
+    expect(plan.flatMap((entry: any) => entry.days).every((key: string) => key <= '2027-01-22')).toBe(true);
+  });
+
+  it('keeps the start date bookable and proposes a 10-day execution', async () => {
+    const unbookable = await getUnbookableStartDates({ projectId: String(project), from: day('2027-01-11'), to: day('2027-01-11'), subprojectIndex: 0 });
+    expect(unbookable).toEqual([]);
+    // Searching from Sunday 10 Jan, the earliest window starts Monday 11 Jan
+    // and crosses all three of B's blocked days: still 10 working days.
+    vi.setSystemTime(new Date('2027-01-10T09:00:00Z'));
+    try {
+      const proposals = await buildProjectScheduleProposals(String(project), 0);
+      expect(proposals?.mode).toBe('days');
+      expect(proposals?.earliestProposal?.start).toBe('2027-01-11T00:00:00.000Z');
+      expect(proposals?.earliestProposal?.executionEnd.slice(0, 10)).toBe('2027-01-22');
+    } finally {
+      vi.setSystemTime(new Date('2027-01-01T09:00:00Z'));
+    }
+  });
+
+  it('persists the substituting plan through booking creation without prolonging it', async () => {
+    const res = response();
+    await createBooking({ user: { _id: String(customer) }, body: {
+      bookingType: 'project', projectId: String(project), selectedSubprojectIndex: 0,
+      preferredStartDate: '2027-01-11',
+      rfqData: { serviceType: 'Plumbing', description: 'Exact case 22a' },
+    } } as any, res as any, vi.fn());
+    expect(res.status).toHaveBeenCalledWith(201);
+    const created = await Booking.findOne({ customer, 'rfqData.description': 'Exact case 22a' });
+    try {
+      expect(created?.scheduledExecutionEndDate?.toISOString()).toBe('2027-01-22T17:00:00.000Z');
+      const plan = planSummary(created?.resourcePlan as any);
+      const bDays = plan.find((entry: any) => entry.resourceId === String(b))?.days ?? [];
+      const cDays = plan.find((entry: any) => entry.resourceId === String(c))?.days ?? [];
+      for (const key of bBlocked) {
+        expect(bDays).not.toContain(key);
+        expect(cDays).toContain(key);
+      }
+    } finally {
+      if (created) { await releaseBookingCalendar(created._id); await Booking.deleteOne({ _id: created._id }); }
+    }
+  });
+});
+

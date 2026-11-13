@@ -170,6 +170,9 @@ function serializeMeeting(
     linkActive: !requesterAnonymized && meeting.status === "scheduled" && Boolean(meetingLink),
     linkAddedAt: meeting.linkAddedAt ? new Date(meeting.linkAddedAt).toISOString() : null,
     linkUpdatedAt: meeting.linkUpdatedAt ? new Date(meeting.linkUpdatedAt).toISOString() : null,
+    linkSource: meetingLink && (meeting.linkSource === "admin_default" || meeting.linkSource === "manual")
+      ? meeting.linkSource
+      : null,
     confirmationEmailSentAt: meeting.linkEmailSentAt
       ? new Date(meeting.linkEmailSentAt).toISOString()
       : null,
@@ -386,6 +389,7 @@ export function serializeLegacyMeetingRequest(
       linkActive: false,
       linkAddedAt: null,
       linkUpdatedAt: null,
+      linkSource: null,
       confirmationEmailSentAt: null,
       assignedAdminName: null,
       cancellationReason: null,

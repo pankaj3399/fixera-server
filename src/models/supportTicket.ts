@@ -59,6 +59,8 @@ export interface ISupportTicketMeeting {
   linkAddedAt?: Date;
   linkAddedBy?: Types.ObjectId;
   linkUpdatedAt?: Date;
+  /** `admin_default` when the assigned admin's saved link was applied on submit. */
+  linkSource?: "admin_default" | "manual";
   /** Set only after a real confirmation email was accepted by the mail service. */
   linkEmailSentAt?: Date;
   /**
@@ -147,6 +149,7 @@ const meetingSchema = new Schema<ISupportTicketMeeting>(
     linkAddedAt: { type: Date },
     linkAddedBy: { type: Schema.Types.ObjectId, ref: "User" },
     linkUpdatedAt: { type: Date },
+    linkSource: { type: String, enum: ["admin_default", "manual"] },
     linkEmailSentAt: { type: Date },
     revision: { type: Number, default: 0, min: 0 },
     confirmationEventId: { type: String, trim: true, maxlength: 120 },

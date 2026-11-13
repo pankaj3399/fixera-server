@@ -1,4 +1,10 @@
 import { Request, Response } from 'express';
+import { isTranslatorConfigured } from '../../utils/cms/azureTranslator';
+import {
+  CampaignTranslationInputError,
+  parseCampaignTranslationRequest,
+  translateCampaignDraft,
+} from '../../utils/marketing/translateCampaign';
 import mongoose from 'mongoose';
 import MarketingCampaign, {
   MARKETING_AUDIENCE_TYPES,
@@ -750,3 +756,30 @@ export const listMarketingSubscribers = async (req: Request, res: Response) => {
 
 // silence unused type import in some TS configs
 void 0 as unknown as MarketingLocale;
+
+/**
+ * POST /admin/marketing-campaigns/auto-translate
+ * Body: { sourceLocale, targetLocales[], content: { subject, htmlContent, previewText? } }
+ * Returns translated draft content per locale. Never saves or sends anything.
+ */
+export const autoTranslateMarketingCampaign = async (req: Request, res: Response) => {
+  if (!isTranslatorConfigured()) {
+    return res.status(409).json({ success: false, msg: 'Auto-translation is not configured (AZURE_TRANSLATOR_KEY)' });
+  }
+  let input: ReturnType<typeof parseCampaignTranslationRequest>;
+  try {
+    input = parseCampaignTranslationRequest(req.body);
+  } catch (error) {
+    if (error instanceof CampaignTranslationInputError) {
+      return res.status(400).json({ success: false, msg: error.message });
+    }
+    throw error;
+  }
+  try {
+    const translations = await translateCampaignDraft(input);
+    return res.json({ success: true, data: { sourceLocale: input.sourceLocale, translations } });
+  } catch (error) {
+    console.error('Auto-translate campaign error:', error);
+    return res.status(502).json({ success: false, msg: 'Auto-translation failed. Please try again.' });
+  }
+};

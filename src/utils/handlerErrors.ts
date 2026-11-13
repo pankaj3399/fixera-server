@@ -7,6 +7,8 @@ export type HandlerErrorBody = {
   msg: string;
   code?: ErrorCode;
   field?: string;
+  /** Invalid field paths for form highlighting (never shown as text). */
+  fields?: string[];
 };
 
 type HandlerErrorResult = {
@@ -21,27 +23,53 @@ function safeFallback(fallback: string | undefined): string {
   return message || DEFAULT_MESSAGE;
 }
 
+/**
+ * Mongoose's built-in validator messages expose schema internals ("Path
+ * `email` is required.", "`x` is not a valid enum value for path `y`",
+ * "Cast to Number failed ...") and are English-only. They are never shown;
+ * the affected field names go in `fields` for form highlighting instead.
+ * Custom messages written in the schemas (e.g. "Name is required") are kept.
+ */
+const MONGOOSE_DEFAULT_MESSAGE_RES: RegExp[] = [
+  /\bPath `[^`]*`/,
+  /`[^`]*` is not a valid enum value/,
+  /\bCast to [A-Za-z]+ failed\b/,
+  /\bValidator failed for path\b/,
+  /is (?:shorter|longer) than the (?:minimum|maximum) allowed length/,
+  /is (?:less|more) than (?:minimum|maximum) allowed value/,
+];
+
+export function isMongooseDefaultMessage(message: string): boolean {
+  return MONGOOSE_DEFAULT_MESSAGE_RES.some((pattern) => pattern.test(message));
+}
+
+const GENERIC_VALIDATION_MESSAGE = 'Some fields are invalid. Check the highlighted fields and try again.';
+
 function validationErrorResult(error: unknown): HandlerErrorResult | null {
   if (!error || typeof error !== 'object' || (error as { name?: string }).name !== 'ValidationError') {
     return null;
   }
-  const validationError = error as { errors?: Record<string, { message?: unknown }> };
-  const messages = Object.values(validationError.errors || {})
-    .map((entry) => (typeof entry?.message === 'string' ? entry.message.trim() : ''))
+  const validationError = error as { errors?: Record<string, { message?: unknown; path?: unknown }> };
+  const entries = Object.entries(validationError.errors || {});
+  const fields = Array.from(
+    new Set(
+      entries
+        .map(([key, entry]) => (typeof entry?.path === 'string' && entry.path.trim() ? entry.path.trim() : key))
+        .filter(Boolean),
+    ),
+  );
+  const messages = entries
+    .map(([, entry]) => (typeof entry?.message === 'string' ? entry.message.trim() : ''))
     .filter(Boolean);
-  if (messages.length === 0) {
-    return {
-      status: 400,
-      body: {
-        success: false,
-        msg: 'Some fields are invalid. Check the highlighted fields and try again.',
-        code: 'VALIDATION',
-      },
-    };
-  }
+  const safe = messages.length > 0 && messages.every((message) => !isMongooseDefaultMessage(message));
   return {
     status: 400,
-    body: { success: false, msg: messages.join(', '), code: 'VALIDATION' },
+    body: {
+      success: false,
+      msg: safe ? Array.from(new Set(messages)).join(', ') : GENERIC_VALIDATION_MESSAGE,
+      code: 'VALIDATION',
+      ...(fields.length ? { fields } : {}),
+    },
   };
 }
 
@@ -50,10 +78,15 @@ function castErrorResult(error: unknown): HandlerErrorResult | null {
     return null;
   }
   const path = (error as { path?: unknown }).path;
-  const field = typeof path === 'string' && path.trim() ? path.trim() : 'value';
+  const field = typeof path === 'string' && path.trim() ? path.trim() : undefined;
   return {
     status: 400,
-    body: { success: false, msg: `Invalid value for "${field}".`, code: 'VALIDATION' },
+    body: {
+      success: false,
+      msg: 'One of the values has an invalid format. Check your input and try again.',
+      code: 'VALIDATION',
+      ...(field ? { field } : {}),
+    },
   };
 }
 

@@ -1946,17 +1946,17 @@ const formatUtcDateTime = (value: Date | string | null | undefined): string => {
   })} UTC`;
 };
 
-// Payment confirmed → both parties
-export const sendPaymentConfirmedEmail = async (
-  custEmail: string,
+// Payment confirmed → customer. The amount is the VAT-inclusive charge, and
+// the label says so, so it reconciles with the invoice total.
+export const buildPaymentConfirmedHtml = (
   custName: string,
   profName: string,
   amount: number,
   bookingId: string,
   currency: string = 'EUR'
-): Promise<boolean> => {
+): string => {
   const link = buildBookingLink(bookingId);
-  const custContent = `
+  return `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       ${getEmailHeader('Payment Confirmed')}
       <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
@@ -1965,7 +1965,7 @@ export const sendPaymentConfirmedEmail = async (
           Your payment for the booking with <strong>${escapeHtml(profName)}</strong> has been confirmed.
         </p>
         <div style="background: #fff; border: 2px solid #16a34a; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
-          <p style="color: #666; margin: 0 0 5px 0; font-size: 14px;">Amount Paid</p>
+          <p style="color: #666; margin: 0 0 5px 0; font-size: 14px;">Amount paid (incl. VAT)</p>
           <p style="font-size: 28px; font-weight: bold; color: #16a34a; margin: 0;">${formatCurrency(amount, currency)}</p>
         </div>
         <p style="color: #666; line-height: 1.6;">
@@ -1976,6 +1976,17 @@ export const sendPaymentConfirmedEmail = async (
       </div>
     </div>
   `;
+};
+
+export const sendPaymentConfirmedEmail = async (
+  custEmail: string,
+  custName: string,
+  profName: string,
+  amount: number,
+  bookingId: string,
+  currency: string = 'EUR'
+): Promise<boolean> => {
+  const custContent = buildPaymentConfirmedHtml(custName, profName, amount, bookingId, currency);
   // Professional "new booking" mail is sent via notify(professional.booking_created).
   return sendEmail(custEmail, 'Payment Confirmed - Fixtract', custContent, {
     template: 'payment_confirmed',

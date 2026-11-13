@@ -35,16 +35,17 @@ describe('buildPublicAnnouncementAggregationPipeline', () => {
           {
             $or: [
               { locale: { $in: ['fr', 'en'] } },
+              { 'translations.fr.title': { $exists: true } },
             ],
           },
         ],
         $or: [{ activeCountries: { $size: 0 } }, { activeCountries: 'BE' }],
       },
     });
-    expect(pipeline[2]).toEqual({
+    expect(pipeline[4]).toEqual({
       $sort: { priority: -1, localeExact: -1, createdAt: -1 },
     });
-    expect(pipeline[3]).toEqual({
+    expect(pipeline[5]).toEqual({
       $group: { _id: '$type', doc: { $first: '$$ROOT' } },
     });
   });

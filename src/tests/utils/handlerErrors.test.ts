@@ -24,13 +24,13 @@ describe('handlerErrors', () => {
     });
   });
 
-  it('preserves safe mongoose validation messages', () => {
+  it('never shows mongoose default validator text; lists the fields instead', () => {
     const result = toHandlerError(
       {
         name: 'ValidationError',
         errors: {
-          email: { message: 'Path `email` is required.' },
-          name: { message: 'Path `name` is required.' },
+          email: { message: 'Path `email` is required.', path: 'email' },
+          status: { message: '`bogus` is not a valid enum value for path `status`.', path: 'status' },
         },
       },
       'Failed to save'
@@ -39,9 +39,45 @@ describe('handlerErrors', () => {
     expect(result.status).toBe(400);
     expect(result.body).toEqual({
       success: false,
-      msg: 'Path `email` is required., Path `name` is required.',
+      msg: 'Some fields are invalid. Check the highlighted fields and try again.',
       code: 'VALIDATION',
+      fields: ['email', 'status'],
     });
+    expect(JSON.stringify(result.body)).not.toMatch(/Path `|enum value/);
+  });
+
+  it('keeps custom schema validation messages written for users', () => {
+    const result = toHandlerError(
+      {
+        name: 'ValidationError',
+        errors: {
+          name: { message: 'Name is required', path: 'name' },
+          phone: { message: 'Enter a valid phone number', path: 'phone' },
+        },
+      },
+      'Failed to save'
+    );
+    expect(result.body).toEqual({
+      success: false,
+      msg: 'Name is required, Enter a valid phone number',
+      code: 'VALIDATION',
+      fields: ['name', 'phone'],
+    });
+  });
+
+  it('a mix of custom and default messages falls back to the generic copy', () => {
+    const result = toHandlerError(
+      {
+        name: 'ValidationError',
+        errors: {
+          name: { message: 'Name is required', path: 'name' },
+          'items.0.amount': { message: 'Path `amount` (-5) is less than minimum allowed value (0).', path: 'items.0.amount' },
+        },
+      },
+      'Failed to save'
+    );
+    expect(result.body.msg).toBe('Some fields are invalid. Check the highlighted fields and try again.');
+    expect(result.body.fields).toEqual(['name', 'items.0.amount']);
   });
 
   it('does not echo cast values', () => {
@@ -56,7 +92,8 @@ describe('handlerErrors', () => {
     );
 
     expect(result.status).toBe(400);
-    expect(result.body.msg).toBe('Invalid value for "amount".');
+    expect(result.body.msg).toBe('One of the values has an invalid format. Check your input and try again.');
+    expect(result.body.field).toBe('amount');
     expect(JSON.stringify(result.body)).not.toContain('super-secret-value');
   });
 

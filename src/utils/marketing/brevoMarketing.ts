@@ -191,6 +191,26 @@ async function setBrevoContactBlacklist(
 }
 
 /**
+ * GDPR erasure: delete the marketing contact (and its list memberships) from
+ * Brevo. 'not_configured' when Brevo is off or in dry-run (nothing synced);
+ * a missing contact counts as removed. Throws a sanitized error otherwise.
+ */
+export async function deleteBrevoMarketingContact(email: string): Promise<'removed' | 'not_configured'> {
+  if (!isBrevoMarketingConfigured() || isMarketingDryRun()) return 'not_configured';
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return 'removed';
+  try {
+    await createContactsApi().deleteContact(normalized);
+    return 'removed';
+  } catch (error) {
+    const details = sanitizedBrevoError(error);
+    if (Number(details.status) === 404) return 'removed';
+    console.error('[Brevo] contact deletion failed', { email: maskEmail(normalized), ...details });
+    throw new Error('Brevo contact deletion failed');
+  }
+}
+
+/**
  * Globally suppress a contact in Brevo so an opt-out applies to any Brevo
  * campaign/list, not only future Fixtract audience resolutions.
  * Returns false when delivery is intentionally disabled and should be retried

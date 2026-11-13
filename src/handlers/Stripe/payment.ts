@@ -4,6 +4,7 @@
  */
 
 import { Request, Response } from 'express';
+import { waitUntil } from '@vercel/functions';
 import mongoose from 'mongoose';
 import Stripe from 'stripe';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
@@ -41,7 +42,7 @@ import {
 } from '../../utils/paymentRefundLedger';
 import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
 import { isBookingStarted, preparePartialRefundCancellation } from '../../utils/refundFinalization';
-import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
+import { calculateAutoDiscount, validateDiscountCode, MINIMUM_PAYMENT_AMOUNT } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
@@ -122,6 +123,7 @@ const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
   'extraCostNetAmount',
   'extraCostCustomerDiscount',
   'extraCostPlatformCommission',
+  'extraCostCommissionPercent',
   'extraCostProfessionalPayout',
   'extraCostStatus',
   'extraCostPaymentSucceeded',
@@ -209,6 +211,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     extraCostNetAmount: paymentSummary.extraCostNetAmount,
     extraCostCustomerDiscount: paymentSummary.extraCostCustomerDiscount,
     extraCostPlatformCommission: paymentSummary.extraCostPlatformCommission,
+    extraCostCommissionPercent: paymentSummary.extraCostCommissionPercent,
     extraCostProfessionalPayout: paymentSummary.extraCostProfessionalPayout,
     extraCostStatus: paymentSummary.extraCostStatus,
     extraCostPaymentSucceeded: paymentSummary.extraCostPaymentSucceeded,
@@ -555,17 +558,29 @@ export const createPaymentIntent = async (
       const ratio = chargeAmount / fullBookingAmount;
       const proratedLoyalty = Math.round(fullDiscountBreakdown.loyaltyDiscount.amount * ratio * 100) / 100;
       const proratedRepeat = Math.round(fullDiscountBreakdown.repeatBuyerDiscount.amount * ratio * 100) / 100;
-      const proratedPoints = Math.round(fullDiscountBreakdown.pointsDiscount.discountAmount * ratio * 100) / 100;
       const proratedCode = fullDiscountBreakdown.codeDiscount
         ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
         : 0;
       const proratedReferral = Math.round((fullDiscountBreakdown.referralDiscount?.amount || 0) * ratio * 100) / 100;
+      // FT3 #12: wallet points are cash-like and redeemed per checkout, so
+      // they are NOT prorated: the requested points apply to this payment in
+      // full, capped at what it can absorb, and only the points actually
+      // used leave the wallet (pointsRedeemed is what the webhook deducts).
+      // Prorating the euro amount but not the points charged the customer
+      // e.g. 20 points for EUR 10 on a 50% milestone.
+      const fullPoints = fullDiscountBreakdown.pointsDiscount;
+      const pointsRoom = Math.max(0, Math.round((chargeAmount - MINIMUM_PAYMENT_AMOUNT
+        - (proratedLoyalty + proratedRepeat + proratedCode + proratedReferral)) * 100) / 100);
+      const pointsUsed = fullPoints.conversionRate > 0
+        ? Math.min(fullPoints.pointsUsed, Math.floor(Math.round((pointsRoom / fullPoints.conversionRate) * 1e6) / 1e6))
+        : 0;
+      const proratedPoints = Math.round(pointsUsed * fullPoints.conversionRate * 100) / 100;
       const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode + proratedReferral;
       discountBreakdown = {
         ...fullDiscountBreakdown,
         loyaltyDiscount: { ...fullDiscountBreakdown.loyaltyDiscount, amount: proratedLoyalty },
         repeatBuyerDiscount: { ...fullDiscountBreakdown.repeatBuyerDiscount, amount: proratedRepeat },
-        pointsDiscount: { ...fullDiscountBreakdown.pointsDiscount, discountAmount: proratedPoints },
+        pointsDiscount: { ...fullPoints, discountAmount: proratedPoints, pointsUsed },
         codeDiscount: fullDiscountBreakdown.codeDiscount
           ? { ...fullDiscountBreakdown.codeDiscount, amount: proratedCode }
           : undefined,
@@ -1882,7 +1897,9 @@ export const refundPayment = async (req: Request, res: Response) => {
       const refreshed = await Booking.findById(bookingId).select('payment.status payment.totalWithVat');
       if (refreshed?.payment?.status === 'partially_refunded') {
         const { ensureRefundInvoices } = await import('../../utils/refundFinalization');
-        void ensureRefundInvoices(bookingId);
+        // Registered with waitUntil so a serverless runtime finishes it after
+        // the response, as the completion invoices do.
+        waitUntil(ensureRefundInvoices(bookingId));
       }
     } catch (invoiceTriggerError: any) {
       console.error(`Refund invoice trigger failed for booking ${bookingId}:`, invoiceTriggerError?.message || invoiceTriggerError);

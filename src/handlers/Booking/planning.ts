@@ -137,6 +137,9 @@ const isHourModeBooking = (booking: any, project: any): boolean => {
   if (booking?.scheduledStartTime) return true;
   const snapshotUnit = booking?.scheduleSnapshot?.executionDuration?.unit;
   if (snapshotUnit === 'hours') return true;
+  // The frozen schedule decides: customer hours longer than a working day are
+  // booked in day mode (FT1 6B) even though the package itself is hourly.
+  if (snapshotUnit === 'days') return false;
   if (project?.timeMode === 'hours') return true;
   const subIndex = booking?.selectedSubprojectIndex;
   const sub = typeof subIndex === 'number' ? project?.subprojects?.[subIndex] : undefined;

@@ -12,6 +12,7 @@ import { params } from "../../utils/requestParams";
 import { assertSupportChatWriteAllowed } from "../../utils/support/settings";
 import { maskAnonymizedUser, maskChatMessageForAnonymizedSender } from "../../utils/accountAnonymity";
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
+import { isChatClosedMessageText } from "../../utils/adminSupportChat";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
@@ -289,10 +290,30 @@ export const listMyConversations = async (
     Conversation.countDocuments(baseQuery),
   ]);
 
+  // The list shows a translated "Chat closed" preview only for the system close
+  // notice, like the thread view: a participant typing the same text must not
+  // read as support having closed the chat. Only those previews need the role.
+  const noticeIds = conversations
+    .filter((conversation: any) => isChatClosedMessageText(conversation.lastMessagePreview))
+    .map((conversation: any) => conversation._id);
+  const lastSenderRoles = new Map<string, string>();
+  if (noticeIds.length > 0) {
+    const rows = await ChatMessage.aggregate<{ _id: mongoose.Types.ObjectId; senderRole: string }>([
+      { $match: { conversationId: { $in: noticeIds } } },
+      { $sort: { conversationId: 1, _id: -1 } },
+      { $group: { _id: "$conversationId", senderRole: { $first: "$senderRole" } } },
+    ]);
+    for (const row of rows) lastSenderRoles.set(String(row._id), row.senderRole);
+  }
+
   return res.status(200).json({
     success: true,
     data: {
-      conversations: conversations.map(maskConversationForRead),
+      conversations: conversations.map((conversation: any) => {
+        const masked = maskConversationForRead(conversation);
+        const lastMessageSenderRole = lastSenderRoles.get(String(conversation._id));
+        return lastMessageSenderRole ? { ...masked, lastMessageSenderRole } : masked;
+      }),
       pagination: {
         page,
         limit,

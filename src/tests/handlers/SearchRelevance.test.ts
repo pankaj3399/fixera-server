@@ -63,7 +63,7 @@ vi.mock("../../models/project", () => {
   };
   return {
     default: {
-      find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
+      find: vi.fn(() => ({ sort() { return this; }, select() { return this; }, lean: async () => mocks.projects })),
       aggregate: vi.fn(async (pipeline: any[]) => runPipeline(pipeline)),
     },
   };
@@ -83,7 +83,9 @@ vi.mock("../../models/professionalLevelConfig", () => ({
 }));
 vi.mock("../../models/loyaltyConfig", () => ({ default: { getCurrentConfig: async () => ({ tiers: [] }) } }));
 vi.mock("../../models/platformSettings", () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: mocks.commission }) } }));
-vi.mock("../../utils/scheduleEngine", () => ({
+vi.mock("../../utils/scheduleEngine", async (importOriginal) => ({
+  // Pure package rule (FT1 6A): which packages scale with the booked quantity.
+  isQuantityDerivedExecution: (await importOriginal<any>()).isQuantityDerivedExecution,
   resolveEffectiveScheduleTimeZone: vi.fn(() => "UTC"),
   buildProjectScheduleProposalsWithData: vi.fn(async (project: any) => ({
     earliestBookableDate: mocks.schedules.get(project._id.toString()) || "2026-11-03T09:00:00.000Z",

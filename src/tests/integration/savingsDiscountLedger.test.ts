@@ -236,6 +236,63 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     }));
   });
 
+  // FT3 #12: customers redeem wallet points at checkout. The discount is
+  // fixed on the intent; the points leave the wallet once, on success.
+  it('redeems customer points at checkout and deducts them once when the payment succeeds', async () => {
+    await User.updateOne({ _id: customerId }, { $set: { points: 30, pointsExpiry: new Date(Date.now() + 90 * DAY_MS) } });
+    try {
+      const booking = await seedMilestoneBooking();
+      const bookingId = String(booking._id);
+      const intent = await createPaymentIntent(bookingId, String(customerId), 20);
+      expect(intent.success).toBe(true);
+      const stored = await Booking.findById(booking._id).lean();
+      expect((stored as any).payment.discount.pointsRedeemed).toBe(20);
+      expect((stored as any).payment.discount.pointsDiscountAmount).toBe(20);
+      const charged = stripeMocks.intentCreate.mock.calls.at(-1)![0].amount;
+      const withoutPoints = Math.round(((stored as any).payment.discount.originalAmount) * 121);
+      expect(charged).toBeLessThan(withoutPoints);
+      // Nothing leaves the wallet before the payment succeeds.
+      expect((await User.findById(customerId).lean())?.points).toBe(30);
+      const event = succeededEvent(bookingId, intent.paymentIntentId!);
+      expect((await deliverEvent(event)).statusCode).toBe(200);
+      expect((await User.findById(customerId).lean())?.points).toBe(10);
+      // A replayed webhook does not deduct again.
+      await deliverEvent(event);
+      expect((await User.findById(customerId).lean())?.points).toBe(10);
+    } finally {
+      await User.updateOne({ _id: customerId }, { $set: { points: 0 } });
+    }
+  });
+
+  it('never redeems more points than the customer holds', async () => {
+    await User.updateOne({ _id: customerId }, { $set: { points: 5, pointsExpiry: new Date(Date.now() + 90 * DAY_MS) } });
+    try {
+      const booking = await seedMilestoneBooking();
+      const intent = await createPaymentIntent(String(booking._id), String(customerId), 50);
+      expect(intent.success).toBe(true);
+      const stored = await Booking.findById(booking._id).lean();
+      expect((stored as any).payment.discount.pointsRedeemed).toBe(5);
+    } finally {
+      await User.updateOne({ _id: customerId }, { $set: { points: 0 } });
+    }
+  });
+
+  it('applies points to a milestone in full up to what it can absorb, charging only the points used', async () => {
+    await User.updateOne({ _id: customerId }, { $set: { points: 150, pointsExpiry: new Date(Date.now() + 90 * DAY_MS) } });
+    try {
+      const booking = await seedMilestoneBooking();
+      const intent = await createPaymentIntent(String(booking._id), String(customerId), 150);
+      expect(intent.success).toBe(true);
+      const discount = ((await Booking.findById(booking._id).lean()) as any).payment.discount;
+      // Milestone 1 is EUR 100 net: at most EUR 99.50 of points (Stripe minimum stays payable).
+      expect(discount.pointsRedeemed).toBe(99);
+      expect(discount.pointsDiscountAmount).toBe(99);
+      expect(discount.pointsDiscountAmount).toBe(discount.pointsRedeemed * 1);
+    } finally {
+      await User.updateOne({ _id: customerId }, { $set: { points: 0 } });
+    }
+  });
+
   it('loads the hidden customer ledger for details with a persisted Payment row', async () => {
     const booking = await seedMilestoneBooking();
     await Booking.updateOne({ _id: booking._id }, { $set: {

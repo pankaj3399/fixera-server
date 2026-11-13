@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeInvoiceBasis } from "../../utils/milestoneInvoice";
+import { normalizeInvoiceBasis, resolveInvoiceRefundDescription } from "../../utils/milestoneInvoice";
 
 const milestoneBooking = (overrides: any = {}) => ({
   milestonePayments: [
@@ -89,5 +89,29 @@ describe("normalizeInvoiceBasis", () => {
     expect(basis.serviceTotal).toBe(0);
     expect(basis.serviceNet).toBe(0);
     expect(basis.serviceVat).toBe(0);
+  });
+});
+
+describe("refund description on the remainder invoice (FT3 #5)", () => {
+  const refunded = (cancellation: Record<string, unknown>, refundReason = "Customer accepted negotiated refund: Half done") =>
+    normalizeInvoiceBasis({
+      payment: { netAmount: 100, vatAmount: 21, vatRate: 21, totalWithVat: 121, status: "partially_refunded",
+        refundAmount: 50, refundReason, refundedAt: new Date("2026-10-29T00:00:00Z") },
+      cancellation,
+    }, 10).refund;
+
+  it("prefers the explicit admin note", () => {
+    expect(refunded({ adminResolutionNote: "Admin: labour refunded", refundNote: "Negotiated note" })?.description)
+      .toBe("Admin: labour refunded");
+  });
+  it("falls back to the negotiated/dispute note when there is no admin note", () => {
+    expect(refunded({ refundNote: "Materials already bought" })?.description).toBe("Materials already bought");
+  });
+  it("skips a note the refund reason already shows", () => {
+    // Admin approval: the reason is the admin note itself, so the requester's text follows.
+    expect(refunded({ adminResolutionNote: "Approved", refundNote: "No longer needed" }, "Approved")?.description)
+      .toBe("No longer needed");
+    expect(refunded({ refundNote: "Half done" })?.description).toBeUndefined();
+    expect(resolveInvoiceRefundDescription({ cancellation: { refundNote: "  " } }, "x")).toBeUndefined();
   });
 });

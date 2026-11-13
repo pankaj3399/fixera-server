@@ -218,3 +218,49 @@ describe('per-day resource substitution (client bug list #22a)', () => {
     expect(covering?.assignment[1].resourceIds).toEqual(['m1', 'm2']);
   });
 });
+
+describe('FT3 #22a exact case: 3 resources, min 2, 70% overlap, 10 execution days', () => {
+  // Monday 2027-01-11 → 10 working days end on Friday 2027-01-22.
+  const workingDays = ['2027-01-11', '2027-01-12', '2027-01-13', '2027-01-14', '2027-01-15', '2027-01-18', '2027-01-19', '2027-01-20', '2027-01-21', '2027-01-22'];
+  const covering = (bBlocked: string[]) =>
+    findCoveringAssignmentForDays({
+      perMemberBlocked: new Map([
+        ['A', { blockedDates: new Set<string>(), blockedRanges: [] }],
+        ['B', { blockedDates: new Set(bBlocked), blockedRanges: [] }],
+        ['C', { blockedDates: new Set<string>(), blockedRanges: [] }],
+      ]) as PerMemberBlockedData,
+      availability: fullWeek(),
+      startZoned: day(2027, 1, 11),
+      executionDays: 10,
+      minResources: 2,
+      minOverlapPercentage: 70,
+      resourceIds: ['A', 'B', 'C'],
+      timeZone: TIME_ZONE,
+    });
+
+  it('substitutes C on the days B is blocked and ends after 10 working days, not 13', () => {
+    const result = covering(['2027-01-13', '2027-01-14', '2027-01-15']);
+    expect(result).not.toBeNull();
+    expect(result!.assignment.map((entry) => entry.dayKey)).toEqual(workingDays);
+    expect(result!.endZonedDay.toISOString().slice(0, 10)).toBe('2027-01-22');
+    // Every day is staffed by two people: no solo day was needed.
+    expect(result!.assignment.every((entry) => entry.resourceIds.length === 2)).toBe(true);
+    for (const blocked of ['2027-01-13', '2027-01-14', '2027-01-15']) {
+      const entry = result!.assignment.find((item) => item.dayKey === blocked)!;
+      expect(entry.resourceIds).not.toContain('B');
+      expect(entry.resourceIds).toContain('C');
+    }
+    expect(result!.assignment[0].resourceIds).toEqual(['A', 'B']);
+    expect(result!.assignedResourceIds.sort()).toEqual(['A', 'B', 'C']);
+  });
+
+  it('also holds when B is blocked on non-consecutive days', () => {
+    const result = covering(['2027-01-12', '2027-01-18', '2027-01-21']);
+    expect(result!.endZonedDay.toISOString().slice(0, 10)).toBe('2027-01-22');
+    expect(result!.assignment).toHaveLength(10);
+    for (const blocked of ['2027-01-12', '2027-01-18', '2027-01-21']) {
+      expect(result!.assignment.find((item) => item.dayKey === blocked)!.resourceIds).toEqual(expect.arrayContaining(['C']));
+    }
+  });
+});
+

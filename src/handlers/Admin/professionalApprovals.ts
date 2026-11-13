@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import { runWithRequestActor } from '../../utils/requestActor';
 import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
@@ -112,7 +113,7 @@ export const requireAdmin = async (req: Request, res: Response, next: NextFuncti
     }
 
     req.admin = adminUser;
-    return next();
+    return runWithRequestActor(adminUser, () => next());
   } catch (error: any) {
     console.error('Require admin error:', error);
     return res.status(500).json({

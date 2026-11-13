@@ -1,5 +1,6 @@
 import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from "express";
+import { waitUntil } from "@vercel/functions";
 import mongoose from "mongoose";
 import CancellationRequest, { ADMIN_ACTIONABLE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
 import Booking from "../../models/booking";
@@ -235,6 +236,8 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       cancelledAt: new Date(),
       refundAmount: refundAmount || undefined,
       ...(adminResolutionNote ? { adminResolutionNote } : {}),
+      // Invoice fallback when the admin note is absent or already the reason.
+      ...(resolvedReason?.trim() ? { refundNote: resolvedReason.trim().slice(0, 1000) } : {}),
     } as any;
 
     const adminStatusNote = (adminResolutionNote
@@ -283,7 +286,9 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       );
     }
     if (partialRefundRemainder) {
-      void ensureRefundInvoices(String(freshBooking._id));
+      // Registered with waitUntil so a serverless runtime finishes it after
+      // the response, as the completion invoices do.
+      waitUntil(ensureRefundInvoices(String(freshBooking._id)));
     }
 
     cancellation.status = "approved";

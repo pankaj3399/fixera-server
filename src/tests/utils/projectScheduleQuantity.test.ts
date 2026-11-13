@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { getProjectDurations, resolveProjectScheduleQuantity, getBookingScheduleOptions } from '../../utils/scheduleEngine';
+import {
+  getProjectDurations,
+  resolveProjectScheduleQuantity,
+  getBookingScheduleOptions,
+  getLongestWorkingDayHours,
+  isQuantityDerivedExecution,
+  resolveScheduleDurations,
+} from '../../utils/scheduleEngine';
+import { resolveAvailability } from '../../utils/availabilityHelpers';
 import Project from '../../models/project';
 
 describe('unit priced project scheduling quantity', () => {
@@ -64,4 +72,68 @@ describe('unit priced project scheduling quantity', () => {
     expect(getBookingScheduleOptions({ checkoutSnapshot: { quantity: 3 } })).toEqual({ quantity: 3 });
   });
 
+});
+
+describe('FT1 6A/6B: hour quantities longer than a working day', () => {
+  // Mon–Fri 09:00–17:00: the longest working day is 8 hours.
+  const eightHourWeek = resolveAvailability(undefined);
+  const hourly = (pricing: Record<string, unknown> = {}, executionDuration?: { value?: number; unit: 'hours' | 'days' }) => ({
+    subprojects: [{ pricing: { type: 'unit', unit: 'hour', ...pricing }, executionDuration, buffer: { value: 1, unit: 'hours' } }],
+  });
+
+  it('uses the booked hours for a legacy hour package saved without a duration basis', () => {
+    const legacy = hourly({}, { value: 3, unit: 'days' });
+    expect(isQuantityDerivedExecution(legacy, 0)).toBe(true);
+    expect(getProjectDurations(legacy, 0, undefined, 6)?.execution).toEqual({ value: 6, unit: 'hours' });
+    expect(resolveScheduleDurations(legacy, 0, undefined, 6, eightHourWeek)?.execution).toEqual({ value: 6, unit: 'hours' });
+  });
+
+  it('plans 16 customer hours with an 8 hour working day as 2 days', () => {
+    const durations = resolveScheduleDurations(hourly({ durationBasis: 'per_unit' }), 0, undefined, 16, eightHourWeek);
+    expect(durations?.execution).toEqual({ value: 2, unit: 'days' });
+    // Prep and buffer are unchanged.
+    expect(durations?.buffer).toEqual({ value: 1, unit: 'hours' });
+  });
+
+  it('rounds partial days up and keeps hour mode when the hours fit in a day', () => {
+    const pkg = hourly({ durationBasis: 'per_unit' });
+    expect(resolveScheduleDurations(pkg, 0, undefined, 17, eightHourWeek)?.execution).toEqual({ value: 3, unit: 'days' });
+    expect(resolveScheduleDurations(pkg, 0, undefined, 8, eightHourWeek)?.execution).toEqual({ value: 8, unit: 'hours' });
+    expect(resolveScheduleDurations(pkg, 0, undefined, 4, eightHourWeek)?.execution).toEqual({ value: 4, unit: 'hours' });
+  });
+
+  it('applies the same rule to a per-unit hour duration multiplied by the quantity', () => {
+    const perM2 = { subprojects: [{ pricing: { type: 'unit', unit: 'm²', durationBasis: 'per_unit' }, executionDuration: { value: 0.5, unit: 'hours' } }] };
+    expect(resolveScheduleDurations(perM2, 0, undefined, 40, eightHourWeek)?.execution).toEqual({ value: 3, unit: 'days' });
+    expect(resolveScheduleDurations(perM2, 0, undefined, 10, eightHourWeek)?.execution).toEqual({ value: 5, unit: 'hours' });
+  });
+
+  it('uses the longest working day and ignores unavailable days', () => {
+    const availability = resolveAvailability({
+      monday: { available: true, startTime: '08:00', endTime: '18:00' },
+      tuesday: { available: true, startTime: '09:00', endTime: '13:00' },
+      saturday: { available: false, startTime: '00:00', endTime: '23:00' },
+    });
+    expect(getLongestWorkingDayHours(availability)).toBe(10);
+    expect(resolveScheduleDurations(hourly(), 0, undefined, 16, availability)?.execution).toEqual({ value: 2, unit: 'days' });
+    expect(resolveScheduleDurations(hourly(), 0, undefined, 10, availability)?.execution).toEqual({ value: 10, unit: 'hours' });
+    // No working day at all: nothing to convert against, hour mode is kept.
+    expect(getLongestWorkingDayHours({ monday: { available: false } })).toBe(0);
+    expect(resolveScheduleDurations(hourly(), 0, undefined, 16, { monday: { available: false } })?.execution).toEqual({ value: 16, unit: 'hours' });
+  });
+
+  it('leaves fixed hour packages and legacy non-hour unit packages untouched', () => {
+    const fixed = { subprojects: [{ pricing: { type: 'fixed' }, executionDuration: { value: 12, unit: 'hours' } }] };
+    expect(isQuantityDerivedExecution(fixed, 0)).toBe(false);
+    expect(resolveScheduleDurations(fixed, 0, undefined, 1, eightHourWeek)?.execution).toEqual({ value: 12, unit: 'hours' });
+    const legacyM2 = { subprojects: [{ pricing: { type: 'unit', unit: 'm²' }, executionDuration: { value: 2, unit: 'days' } }] };
+    expect(isQuantityDerivedExecution(legacyM2, 0)).toBe(false);
+    expect(resolveScheduleDurations(legacyM2, 0, undefined, 1000, eightHourWeek)?.execution).toEqual({ value: 2, unit: 'days' });
+  });
+
+  it('keeps a frozen day-mode snapshot as booked', () => {
+    const options = getBookingScheduleOptions({ scheduleSnapshot: { quantity: 16, executionDuration: { value: 2, unit: 'days' } } });
+    expect(resolveScheduleDurations(hourly({ durationBasis: 'per_unit' }), 0, options.durationOverride, options.quantity, eightHourWeek)?.execution)
+      .toEqual({ value: 2, unit: 'days' });
+  });
 });

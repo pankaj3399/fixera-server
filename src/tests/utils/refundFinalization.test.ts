@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   computePostRefundInvoicePayment,
   resolveExtraCostScale,
@@ -132,5 +132,96 @@ describe("resolveExtraCostScale", () => {
   it("scales to the admin-resolved total and zeroes when declined", () => {
     expect(resolveExtraCostScale(lines, 50)).toBeCloseTo(0.625, 5);
     expect(resolveExtraCostScale(lines, 0)).toBe(0);
+  });
+});
+
+describe("FT3 #5 partial refund on a started booking without a resource plan", () => {
+  const A = "64b000000000000000000001";
+  const B = "64b000000000000000000002";
+  const noPlanBooking = (overrides: Record<string, any> = {}) => ({
+    status: "in_progress",
+    professional: A,
+    assignedTeamMembers: [A, B],
+    scheduleTimeZone: "UTC",
+    scheduledStartDate: new Date("2026-10-26T08:00:00Z"),
+    scheduledExecutionEndDate: new Date("2026-10-31T17:00:00Z"),
+    ...overrides,
+  });
+  const isoDays = (booking: any) =>
+    booking.resourcePlan.map((entry: any) => [String(entry.resourceId), entry.days.map((d: Date) => d.toISOString().slice(0, 10))]);
+
+  it("retains start -> day before the refund for every assigned resource", async () => {
+    const { retainPastScheduledWindow } = await import("../../utils/refundFinalization");
+    const booking: any = noPlanBooking();
+    expect(retainPastScheduledWindow(booking, new Date("2026-10-29T12:00:00Z"))).toBe(6);
+    expect(isoDays(booking)).toEqual([
+      [A, ["2026-10-26", "2026-10-27", "2026-10-28"]],
+      [B, ["2026-10-26", "2026-10-27", "2026-10-28"]],
+    ]);
+  });
+
+  it("prune falls back to the past window only when no planned day exists", () => {
+    const booking: any = noPlanBooking({ assignedTeamMembers: [], resourcePlan: [] });
+    expect(pruneFutureResourcePlanDays(booking, new Date("2026-10-28T09:00:00Z"))).toEqual({ keptDays: 2, removedDays: 0 });
+    // Legacy attendee fallback: the professional keeps the block.
+    expect(isoDays(booking)).toEqual([[A, ["2026-10-26", "2026-10-27"]]]);
+    // Idempotent: a second prune on the retained plan changes nothing.
+    expect(pruneFutureResourcePlanDays(booking, new Date("2026-10-28T09:00:00Z"))).toEqual({ keptDays: 2, removedDays: 0 });
+  });
+
+  it("does not synthesize days for a plan whose days were all in the future", () => {
+    const booking: any = noPlanBooking({ resourcePlan: [{ resourceId: A, days: [new Date("2026-10-30T00:00:00Z")] }] });
+    expect(pruneFutureResourcePlanDays(booking, new Date("2026-10-28T09:00:00Z"))).toEqual({ keptDays: 0, removedDays: 1 });
+    expect(booking.resourcePlan[0].days).toEqual([]);
+    // A second pass (dispute/negotiation re-prune) must not re-materialise
+    // the window from a plan that was already pruned to empty.
+    expect(pruneFutureResourcePlanDays(booking, new Date("2026-10-28T09:00:00Z"))).toEqual({ keptDays: 0, removedDays: 0 });
+    expect(booking.resourcePlan).toHaveLength(1);
+    expect(booking.resourcePlan[0].days).toEqual([]);
+  });
+
+  it("retains nothing when the window has not passed yet and clamps to the execution end", async () => {
+    const { retainPastScheduledWindow } = await import("../../utils/refundFinalization");
+    const future: any = noPlanBooking();
+    expect(retainPastScheduledWindow(future, new Date("2026-10-26T10:00:00Z"))).toBe(0);
+    expect(future.resourcePlan).toBeUndefined();
+    const finished: any = noPlanBooking({ assignedTeamMembers: [A], scheduledExecutionEndDate: new Date("2026-10-28T00:00:00Z") });
+    expect(retainPastScheduledWindow(finished, new Date("2026-11-05T10:00:00Z"))).toBe(2);
+    expect(isoDays(finished)).toEqual([[A, ["2026-10-26", "2026-10-27"]]]);
+  });
+
+  it("uses the booking time zone for the local calendar days", async () => {
+    const { retainPastScheduledWindow } = await import("../../utils/refundFinalization");
+    const booking: any = noPlanBooking({
+      assignedTeamMembers: [A],
+      scheduleTimeZone: "Europe/Brussels",
+      // 00:30 local on Oct 26 (UTC+1 after the DST change).
+      scheduledStartDate: new Date("2026-10-25T23:30:00Z"),
+    });
+    // 00:30 local on Oct 28 -> Oct 26 and 27 have passed locally.
+    expect(retainPastScheduledWindow(booking, new Date("2026-10-27T23:30:00Z"))).toBe(2);
+    expect(isoDays(booking)).toEqual([[A, ["2026-10-26", "2026-10-27"]]]);
+  });
+
+  it("preparePartialRefundCancellation cancels and keeps the past window", async () => {
+    const { preparePartialRefundCancellation } = await import("../../utils/refundFinalization");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T12:00:00Z"));
+    try {
+      const booking: any = noPlanBooking({ assignedTeamMembers: [B] });
+      preparePartialRefundCancellation(booking, isBookingStarted(booking));
+      expect(booking.status).toBe("cancelled");
+      expect(booking.refundPreservesPastPlanning).toBe(true);
+      expect(isoDays(booking)).toEqual([[B, ["2026-10-26", "2026-10-27"]]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not touch a booking that never started", async () => {
+    const { preparePartialRefundCancellation } = await import("../../utils/refundFinalization");
+    const booking: any = noPlanBooking({ status: "booked" });
+    preparePartialRefundCancellation(booking, false);
+    expect(booking.resourcePlan).toBeUndefined();
   });
 });

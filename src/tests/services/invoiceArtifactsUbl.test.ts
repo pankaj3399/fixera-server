@@ -78,11 +78,35 @@ describe("platform UBL unit prices in whole cents", () => {
   it("shows the package and extra costs at whole-cent unit prices and the discount on its own line", () => {
     const xml = buildUblInvoiceXml(unitBooking, "FIX-2026-000018", new Date("2026-10-17T00:00:00Z"), { selfBilling: false, platform });
     const prices = [...xml.matchAll(/<cbc:PriceAmount currencyID="EUR">([^<]+)<\/cbc:PriceAmount>/g)].map((match) => match[1]);
-    expect(prices).toEqual(["16.43", "16.43", "54.76", "-25.65"]);
+    // BR-27: no negative item price; the discount is a document-level allowance.
+    expect(prices).toEqual(["16.43", "16.43", "54.76"]);
     expect(xml).toMatch(/<cbc:LineExtensionAmount currencyID="EUR">492\.90<\/cbc:LineExtensionAmount>/);
-    expect(xml).toContain("Loyalty discount");
+    expect(xml).toMatch(/<cac:AllowanceCharge>\s*<cbc:ChargeIndicator>false<\/cbc:ChargeIndicator>\s*<cbc:AllowanceChargeReasonCode>95<\/cbc:AllowanceChargeReasonCode>\s*<cbc:AllowanceChargeReason>Loyalty discount<\/cbc:AllowanceChargeReason>\s*<cbc:Amount currencyID="EUR">25\.65<\/cbc:Amount>/);
+    // Lines 492.90 + 16.43 + 54.76 = 564.09; minus the 25.65 allowance = 538.44.
+    expect(xml).toMatch(/<cac:LegalMonetaryTotal>\s*<cbc:LineExtensionAmount currencyID="EUR">564\.09<\/cbc:LineExtensionAmount>/);
+    expect(xml).toMatch(/<cbc:AllowanceTotalAmount currencyID="EUR">25\.65<\/cbc:AllowanceTotalAmount>/);
     // The total is still what was charged: 468.25 + 70.19 excl. VAT.
     expect(xml).toMatch(/<cbc:TaxExclusiveAmount currencyID="EUR">538\.44<\/cbc:TaxExclusiveAmount>/);
+    expect(xml).toMatch(/<cac:TaxSubtotal>\s*<cbc:TaxableAmount currencyID="EUR">538\.44<\/cbc:TaxableAmount>/);
+  });
+});
+
+describe("platform UBL never emits a negative item price (BR-27)", () => {
+  it("renders a negative non-discount line as a negative quantity at a positive price", () => {
+    const negative = {
+      ...booking,
+      payment: { currency: "EUR", vatRate: 6, netAmount: 437.74, amount: 437.74, totalWithVat: 464.0 },
+      __manualInvoiceLines: [
+        { description: "Paint per m²", amount: 477.74, vatRate: 6, quantity: 30, unitPrice: 15.924667 },
+        { description: "Payment discount adjustment", amount: -40, vatRate: 6 },
+      ],
+    };
+    const xml = buildUblInvoiceXml(negative, "FIX-2026-000016", new Date("2026-10-15T00:00:00Z"), { selfBilling: false, platform });
+    expect(xml).not.toMatch(/<cbc:PriceAmount[^>]*>-/);
+    const adjustment = xml.match(/<cac:InvoiceLine>(?:(?!<\/cac:InvoiceLine>)[\s\S])*?Payment discount adjustment[\s\S]*?<\/cac:InvoiceLine>/)![0];
+    expect(adjustment).toMatch(/<cbc:InvoicedQuantity[^>]*>-1\.00<\/cbc:InvoicedQuantity>/);
+    expect(adjustment).toMatch(/<cbc:LineExtensionAmount currencyID="EUR">-40\.00<\/cbc:LineExtensionAmount>/);
+    expect(adjustment).toMatch(/<cbc:PriceAmount currencyID="EUR">40\.00<\/cbc:PriceAmount>/);
   });
 });
 

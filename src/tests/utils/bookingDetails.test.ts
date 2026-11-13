@@ -1,4 +1,7 @@
-vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
+const platformCommission = vi.hoisted(() => ({ percent: 10 }));
+vi.mock('../../models/platformSettings', () => ({
+  default: { getCurrentConfig: async () => ({ commissionPercent: platformCommission.percent }) },
+}));
 import { Types } from 'mongoose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -292,6 +295,7 @@ const buildDetails = async (viewerRole: 'customer' | 'professional' | 'admin', o
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  platformCommission.percent = 10;
 });
 
 describe('booking snapshot', () => {
@@ -855,6 +859,81 @@ describe('extra-cost payment currency provenance', () => {
   });
 });
 
+describe('extra-cost lines at the charged commission', () => {
+  // 5 extra m2 at 15 plus a 50 condition. Charged at 15%: 5 x 17.25 + 57.50
+  // = 143.75, less a 3.00 loyalty discount funded from the 18.75 commission.
+  const extraCosts = [
+    { type: 'unit_adjustment', name: 'Extra tiles', justification: 'Larger floor', amount: 75, estimatedUnits: 30, actualUnits: 35, unitPrice: 15, unit: 'm2' },
+    { type: 'condition', name: 'Access', justification: 'Scaffolding', amount: 50, referenceIndex: 0 },
+  ];
+  const chargedAt15 = {
+    status: 'completed',
+    currency: 'EUR',
+    extraCostStatus: 'succeeded',
+    extraCostNetAmount: 125,
+    extraCostPlatformCommission: 15.75,
+    extraCostCustomerDiscount: 3,
+    extraCostCustomerNetAmount: 140.75,
+    extraCostAmount: 140.75,
+  };
+  const details = (viewer: 'customer' | 'professional' | 'admin', chargeFacts: Record<string, any>) => buildDetails(viewer, {
+    booking: { status: 'completed', extraCosts, extraCostTotal: 125, extraCostStatus: 'confirmed', payment: chargeFacts },
+    payments: [],
+  });
+  const lineSum = (items: Array<{ customerAmount: number | null }>) =>
+    Math.round(items.reduce((sum, item) => sum + (item.customerAmount ?? 0), 0) * 100) / 100;
+
+  it('keeps per-line amounts at the recorded commission after the platform rate changes', async () => {
+    platformCommission.percent = 15;
+    const before = await details('customer', { ...chargedAt15, extraCostCommissionPercent: 15 });
+    platformCommission.percent = 25;
+    const after = await details('customer', { ...chargedAt15, extraCostCommissionPercent: 15 });
+
+    expect(before.extraCosts.items.map((item) => item.customerAmount)).toEqual([86.25, 57.5]);
+    expect(after.extraCosts.items.map((item) => item.customerAmount)).toEqual([86.25, 57.5]);
+    expect(after.extraCosts.totalCustomerAmount).toBe(143.75);
+    expect(lineSum(after.extraCosts.items)).toBe(after.extraCosts.totalCustomerAmount);
+  });
+
+  it('derives the commission of a legacy charge from its recorded amounts', async () => {
+    platformCommission.percent = 10;
+    const legacy = await details('customer', chargedAt15);
+
+    expect(legacy.extraCosts.items.map((item) => item.customerAmount)).toEqual([86.25, 57.5]);
+    expect(legacy.extraCosts.totalCustomerAmount).toBe(143.75);
+  });
+
+  it('falls back to the live commission when no charge amounts were recorded', async () => {
+    platformCommission.percent = 10;
+    const legacy = await details('customer', { status: 'completed', extraCostStatus: 'succeeded', extraCostAmount: 137.5 });
+
+    expect(legacy.extraCosts.items.map((item) => item.customerAmount)).toEqual([82.5, 55]);
+    expect(legacy.extraCosts.totalCustomerAmount).toBe(137.5);
+  });
+
+  it('makes the lines sum to the charged subtotal, carrying the rounding on the last line', async () => {
+    platformCommission.percent = 25;
+    // A charge recorded one cent above the per-line recomputation.
+    const charged = await details('customer', { ...chargedAt15, extraCostPlatformCommission: 15.76, extraCostCommissionPercent: 15 });
+
+    expect(charged.extraCosts.totalCustomerAmount).toBe(143.76);
+    expect(charged.extraCosts.items.map((item) => item.customerAmount)).toEqual([86.25, 57.51]);
+    expect(lineSum(charged.extraCosts.items)).toBe(143.76);
+  });
+
+  it('keeps the commission rate out of customer payloads and customer amounts out of professional ones', async () => {
+    platformCommission.percent = 25;
+    const customerDetails = await details('customer', { ...chargedAt15, extraCostCommissionPercent: 15 });
+    expect(JSON.stringify(customerDetails)).not.toContain('extraCostCommissionPercent');
+    expect(customerDetails.extraCosts.payment?.platformCommission ?? null).toBeNull();
+
+    const professionalDetails = await details('professional', { ...chargedAt15, extraCostCommissionPercent: 15 });
+    expect(professionalDetails.extraCosts.items.map((item) => item.customerAmount)).toEqual([null, null]);
+    expect(professionalDetails.extraCosts.totalCustomerAmount).toBeNull();
+    expect(professionalDetails.extraCosts.items.map((item) => item.professionalAmount)).toEqual([75, 50]);
+  });
+});
+
 describe('base transfer facts', () => {
   it('reads recorded transfer amount/currency from the booking payment when the Payment row lacks them', async () => {
     const details = await buildDetails('professional', {
@@ -942,17 +1021,22 @@ describe('refund facts', () => {
       justification: 'Cancelled before start',
     });
     const partial = details.payments.refunds.find((refund) => refund.amount === 20)!;
+    // Phase 2: not recorded by the refund writer, so derived pro rata from the
+    // refunded payment's recorded 21% VAT and labelled as derived.
     expect(partial).toMatchObject({
       amount: 20,
-      netAmount: null,
-      vatAmount: null,
+      netAmount: 16.53,
+      vatAmount: 3.47,
+      vatRate: 21,
       vatSplitRecorded: false,
+      vatSplitDerived: true,
       justification: 'Goodwill',
       kind: 'booking',
     });
     expect(partial.internalNotes).toBeUndefined();
     expect(details.meta.dataQuality.refundVatRecorded).toBe(false);
-    expect(details.payments.notices.map((notice) => notice.code)).toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
+    expect(details.payments.notices.map((notice) => notice.code)).toContain('REFUND_VAT_SPLIT_DERIVED');
+    expect(details.payments.notices.map((notice) => notice.code)).not.toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
   });
 
   it('keeps an aggregate-only booking refund explicit when a real Payment row exists', async () => {
@@ -982,9 +1066,10 @@ describe('refund facts', () => {
       status: 'aggregate_only',
       justification: null,
       justificationRecorded: false,
-      vatAmount: null,
-      netAmount: null,
+      vatAmount: 5.21,
+      netAmount: 24.79,
       vatSplitRecorded: false,
+      vatSplitDerived: true,
     });
     expect(details.payments.refunds[0].internalNotes).toBeUndefined();
     expect(details.payments.byCurrency).toEqual([
@@ -992,7 +1077,7 @@ describe('refund facts', () => {
     ]);
     expect(details.meta.dataQuality.refundVatRecorded).toBe(false);
     expect(details.payments.notices.map((notice) => notice.code))
-      .toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
+      .toContain('REFUND_VAT_SPLIT_DERIVED');
 
     const admin = await buildDetails('admin', {
       booking: {

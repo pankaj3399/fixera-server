@@ -282,6 +282,9 @@ export const getPointsBalance = async (
   conversionRate: number;
   euroValue: number;
   isExpired: boolean;
+  /** FT3 #12: whether points can be redeemed at checkout, and the minimum per redemption. */
+  isEnabled: boolean;
+  minRedemptionPoints: number;
 }> => {
   const [user, config] = await Promise.all([
     User.findById(userId).select('points pointsExpiry'),
@@ -301,6 +304,8 @@ export const getPointsBalance = async (
     pointsExpiry: user.pointsExpiry || null,
     conversionRate: config.conversionRate,
     euroValue: Math.round(activePoints * config.conversionRate * 100) / 100,
-    isExpired
+    isExpired,
+    isEnabled: config.isEnabled !== false,
+    minRedemptionPoints: Math.max(1, Number(config.minRedemptionPoints) || 1),
   };
 };

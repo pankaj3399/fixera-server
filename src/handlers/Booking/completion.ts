@@ -553,7 +553,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     }
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
-    const { subtotalInclCommission, loyalty, cappedLoyalty, customerNetChargeAmount, customerChargeAmount, vatAmount, platformFeeAmount, platformCommissionAmount } =
+    const { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerNetChargeAmount, customerChargeAmount, vatAmount, platformFeeAmount, platformCommissionAmount } =
       await computeExtraCostCustomerCharge(
         booking.customer as any,
         extraCostTotal,
@@ -605,6 +605,9 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostLoyaltyTier', loyalty.tier);
     booking.set('payment.extraCostLoyaltyPercentage', loyalty.percentage);
     booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
+    // Snapshot of the commission this charge used, so later commission changes
+    // never re-price the per-line amounts shown for it.
+    booking.set('payment.extraCostCommissionPercent', commissionPercent);
     booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
     booking.set('payment.extraCostStatus', 'pending');
     booking.set('payment.extraCostPaymentSucceeded', false);
@@ -624,6 +627,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
             extraCostLoyaltyTier: loyalty.tier,
             extraCostLoyaltyPercentage: loyalty.percentage,
             extraCostPlatformCommission: platformCommissionAmount,
+            extraCostCommissionPercent: commissionPercent,
             extraCostProfessionalPayout: extraCostTotal,
             extraCostStatus: 'pending',
             extraCostPaymentSucceeded: false,

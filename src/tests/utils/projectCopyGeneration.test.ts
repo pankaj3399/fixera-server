@@ -66,11 +66,50 @@ describe('project copy request validation', () => {
     expect(() => validateProjectCopyOutput('title', { titles: [titleOutput.titles[0], titleOutput.titles[0].toUpperCase(), titleOutput.titles[2]] })).toThrow(ProjectCopyOutputError);
   });
 
-  it('rejects unsupported locale, missing required context, oversized content, and oversized item lists', () => {
+  it('rejects unsupported locale, missing required context, wrong types and absurd list sizes', () => {
     expect(() => parseProjectCopyRequest({ ...request(), locale: 'de' })).toThrow(ProjectCopyInputError);
     expect(() => parseProjectCopyRequest({ ...request(), context: { service: 'Painting' } })).toThrow(ProjectCopyInputError);
-    expect(() => parseProjectCopyRequest({ ...request(), context: { ...context, description: 'x'.repeat(2401) } })).toThrow(ProjectCopyInputError);
-    expect(() => parseProjectCopyRequest({ ...request(), context: { ...context, subprojects: Array(9).fill(context.subprojects[0]) } })).toThrow(ProjectCopyInputError);
+    expect(() => parseProjectCopyRequest({ ...request(), context: { ...context, description: 42 } })).toThrow(ProjectCopyInputError);
+    expect(() => parseProjectCopyRequest({ ...request(), context: { ...context, keywords: Array(101).fill('tile') } })).toThrow(ProjectCopyInputError);
+    expect(() => parseProjectCopyRequest({ ...request(), projectId: 'x'.repeat(65) })).toThrow(ProjectCopyInputError);
+  });
+
+  // FT1 #3/#8: a valid but detailed project must never fail generation.
+  it('clips oversized texts and lists instead of rejecting a detailed project', () => {
+    const parsed = parseProjectCopyRequest({ ...request(), context: {
+      ...context,
+      description: 'x'.repeat(2401),
+      keywords: Array.from({ length: 14 }, (_, i) => `keyword ${i} ${'k'.repeat(90)}`),
+      subprojects: Array(9).fill(context.subprojects[0]),
+    } });
+    expect(parsed.context.description.length).toBeLessThanOrEqual(2400);
+    expect(parsed.context.description.endsWith('…')).toBe(true);
+    expect(parsed.context.keywords).toHaveLength(10);
+    expect(parsed.context.keywords?.every((k) => k.length <= 80)).toBe(true);
+    expect(parsed.context.subprojects).toHaveLength(8);
+  });
+
+  it('accepts what the project model allows (1000-char FAQ answers, 500-char materials, many items) within the prompt budget', () => {
+    const longFaq = Array.from({ length: 8 }, (_, i) => ({ question: `Question ${i} about the work?`, answer: 'a'.repeat(1000) }));
+    const richSubproject = {
+      ...context.subprojects[0],
+      description: 'd'.repeat(600),
+      included: Array.from({ length: 12 }, (_, i) => ({ name: `Item ${i}`, description: 'i'.repeat(400) })),
+      materials: Array.from({ length: 12 }, (_, i) => ({ name: `Material ${i}`, description: 'm'.repeat(500) })),
+    };
+    const parsed = parseProjectCopyRequest({ ...request('faqs'), context: {
+      ...context,
+      description: 'p'.repeat(1300),
+      faq: longFaq,
+      subprojects: Array(8).fill(richSubproject),
+      extraOptions: Array.from({ length: 10 }, (_, i) => ({ name: `Option ${i}`, description: 'o'.repeat(500) })),
+    } });
+    expect(JSON.stringify(parsed.context).length).toBeLessThanOrEqual(12_000);
+    // The most important facts survive the shrink: service, packages, options.
+    expect(parsed.context.service).toBe('Bathroom renovation');
+    expect(parsed.context.subprojects?.length).toBeGreaterThan(0);
+    expect(parsed.context.subprojects?.[0]?.name).toBe('Shower replacement');
+    expect(parsed.context.extraOptions?.length).toBe(10);
   });
 });
 

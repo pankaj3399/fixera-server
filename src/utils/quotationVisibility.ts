@@ -21,6 +21,8 @@ const PROFESSIONAL_AMOUNT_RULES: ReadonlyArray<{ key: string; within?: readonly 
   { key: 'extraCostNetAmount' },
   { key: 'bookedPrice' },
   { key: 'extraCostTotal' },
+  // Booking overview: extraCosts.total is the professional amount (customerTotal stays).
+  { key: 'total', within: ['extraCosts'] },
   // Base (pre-commission) prices carried by quote, versions, checkout, extra costs and milestones.
   { key: 'amount', within: ['quote'] },
   { key: 'totalAmount', within: ['quoteVersions'] },

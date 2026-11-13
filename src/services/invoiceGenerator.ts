@@ -18,6 +18,8 @@ import {
   calculateSupplierInvoiceNet,
   getCustomerExtraCostNet,
   resolveExtraCostScale,
+  scaledSupplierRepeatBuyerDiscount,
+  supplierRepeatBuyerDiscount,
 } from "../utils/invoiceAccounting";
 import {
   formatVatAnswerWithUnit,
@@ -655,6 +657,18 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
           .text(formatCurrency(data.settlement.dueAmount, data.payment.currency), 450, rowY + 16, { align: "right" })
           .font("Helvetica");
         doc.y = rowY + 36;
+        // The lines show full prices; say why the paid amount is lower.
+        if (data.discounts?.length) {
+          ensureSpace(16);
+          rowY = doc.y;
+          doc
+            .fontSize(8)
+            .fillColor("#555555")
+            .text("The total and the amount paid already include the discounts listed above.", 50, rowY, { width: 500 })
+            .fillColor("#000000")
+            .fontSize(10);
+          doc.y = rowY + 14;
+        }
       }
 
       // VAT explanation
@@ -978,12 +992,15 @@ export async function generateBookingInvoice(
     + (Number(discount?.referralDiscountAmount) || 0),
   );
   const customerLoyaltyDiscountTotal = roundInvoiceMoney(serviceLoyaltyDiscount + extraCostLoyaltyDiscount);
-  const discounts = manualLines?.length ? [] : selfBilling
-    ? [
-        discount?.repeatBuyerAmount
-          ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign }
-          : undefined,
-      ].filter(Boolean) as { label: string; amount: number }[]
+  // The supplier absorbs the repeat-buyer discount on their own (commission-
+  // exclusive) price, exactly as the payout does. The self-bill shows the full
+  // service price and that discount as its own row; the discount is deducted
+  // once, through the totals below, never folded into the line as well.
+  const supplierRepeatDiscount = manualLines?.length || exactCredit
+    ? 0
+    : supplierRepeatBuyerDiscount(discount?.repeatBuyerAmount, commissionPercent);
+  const discounts: { label: string; amount: number }[] = manualLines?.length ? [] : selfBilling
+    ? [] // Filled once the supplier service line is known (see below).
     : [
         customerLoyaltyDiscountTotal > 0 ? { label: "Loyalty discount", amount: customerLoyaltyDiscountTotal * sign } : undefined,
         discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign } : undefined,
@@ -1055,12 +1072,18 @@ export async function generateBookingInvoice(
     quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
     checkoutSnapshot: booking.checkoutSnapshot,
     selectedExtraOptions: booking.selectedExtraOptions,
-    repeatBuyerDiscount: discount?.repeatBuyerAmount,
+    repeatBuyerDiscount: supplierRepeatDiscount,
     quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking as any),
   });
   const supplierOptionTotal = (booking.selectedExtraOptions || []).reduce(
     (sum, option) => sum + (Number(option.bookedPrice) || 0),
     0
+  );
+  // Same rounding as the UBL builder, so both show the same discount cents.
+  const supplierRepeatDiscountShown = scaledSupplierRepeatBuyerDiscount(
+    supplierServiceNet - supplierOptionTotal,
+    supplierRepeatDiscount,
+    basis.supplierScale,
   );
   const serviceLabel =
     booking.rfqData?.serviceType || currentQuote?.description || booking.quote?.description || "Property service";
@@ -1111,7 +1134,7 @@ export async function generateBookingInvoice(
     : [
         {
           description: serviceLabel,
-          amount: (supplierServiceNet - supplierOptionTotal) * basis.supplierScale * sign,
+          amount: ((supplierServiceNet - supplierOptionTotal) * basis.supplierScale + supplierRepeatDiscountShown) * sign,
           vatRate: supplierVatRate,
           quantity: hasUnits ? unitQuantity : undefined,
           unitPrice: hasUnitPrice ? unitPrice : undefined,
@@ -1120,8 +1143,13 @@ export async function generateBookingInvoice(
         ...supplierOptionLines,
         ...supplierExtraCostLines,
       ];
+  if (selfBilling && supplierRepeatDiscountShown > 0) {
+    discounts.push({ label: "Repeat buyer discount", amount: supplierRepeatDiscountShown * sign });
+  }
   const supplierTotals = calculateInvoiceSideTotals({
-    lines: supplierLines,
+    lines: supplierRepeatDiscountShown > 0 && !manualLines?.length
+      ? [...supplierLines, { description: "Repeat buyer discount", amount: -supplierRepeatDiscountShown * sign, vatRate: supplierVatRate }]
+      : supplierLines,
     reverseCharge: supplierReverseCharge,
     vatRate: supplierVatRate,
     vatLabel: supplierVatDecision.vatLabel,

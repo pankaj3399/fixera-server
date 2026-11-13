@@ -22,6 +22,7 @@ import {
   isValidIanaTimeZone,
 } from "../../utils/support/availability";
 import { sendSupportTicketAcknowledgementEmail } from "../../utils/support/emails";
+import { applyAssignedAdminDefaultMeetingLink } from "../../utils/support/defaultMeetingLink";
 import {
   buildSupportMeetingSlotKeys,
   createReservedSupportMeetingRecord,
@@ -212,9 +213,10 @@ export async function createSupportItemForUser(params: {
       start: scheduledAt,
     });
 
-    // Manual-link flow: the slot is reserved immediately, while the meeting
+    // The slot is reserved immediately for the admin it is assigned to. The
+    // meeting starts pending; if that admin saved a default meeting link it is
+    // applied right below (confirmed + email with time and link). Otherwise it
     // stays pending until an authorized support admin supplies a real link.
-    // No link is fabricated and no "confirmed" email is sent here.
     const ticket = await createReservedSupportMeetingRecord(
       {
         userId: user._id,
@@ -243,6 +245,17 @@ export async function createSupportItemForUser(params: {
     } catch (error) {
       await cleanupAfterRacedCreate(ticket._id);
       throw error;
+    }
+    // Use the admin the slot was actually assigned to (combined availability
+    // picks one deterministic admin per slot), never another admin's link.
+    const autoLink = await applyAssignedAdminDefaultMeetingLink({
+      ticket,
+      adminId: selected.admin._id,
+      owner: user,
+    });
+    if (autoLink.applied) {
+      // The confirmation (time + link) replaces the "link follows" acknowledgement.
+      return { ticket: autoLink.ticket, emailSent: autoLink.emailSent };
     }
     let emailSent = false;
     try {

@@ -34,6 +34,25 @@ export type NormalizedInvoiceBasis = {
 };
 
 /**
+ * Optional description under an invoice's refund block. An explicit admin note
+ * wins; otherwise the note recorded with a negotiated or dispute refund (the
+ * negotiated note, else the requester's description). A note the refund
+ * reason already shows is skipped, so the same text is never printed twice.
+ */
+export const resolveInvoiceRefundDescription = (booking: any, reason?: string): string | undefined => {
+  const shownReason = typeof reason === "string" ? reason.trim() : "";
+  const candidates = [booking?.cancellation?.adminResolutionNote, booking?.cancellation?.refundNote];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const text = candidate.trim();
+    if (!text) continue;
+    if (shownReason && shownReason.includes(text)) continue;
+    return text;
+  }
+  return undefined;
+};
+
+/**
  * Shared PDF/UBL basis from recorded settlements. Completed quotations include
  * all settled milestones; cancellations include only paid work. No price,
  * discount, commission or rounding is reconstructed from the last checkout.
@@ -104,10 +123,7 @@ export const normalizeInvoiceBasis = (
       adjusted.vatAmount = roundMoney(serviceVat - refundVat);
     }
     const reason = typeof payment.refundReason === "string" ? payment.refundReason : undefined;
-    const description =
-      typeof booking?.cancellation?.adminResolutionNote === "string"
-        ? booking.cancellation.adminResolutionNote
-        : undefined;
+    const description = resolveInvoiceRefundDescription(booking, reason);
     refund = {
       amount: roundMoney(refundAmount),
       net: adjusted.refundNet,

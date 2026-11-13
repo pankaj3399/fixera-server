@@ -22,6 +22,8 @@ import {
   effectiveVatRateForCredit,
   getCustomerExtraCostNet,
   resolveExtraCostScale,
+  scaledSupplierRepeatBuyerDiscount,
+  supplierRepeatBuyerDiscount,
   type InvoiceAccountingLine,
 } from "../utils/invoiceAccounting";
 import {
@@ -33,7 +35,7 @@ import {
 } from "./invoiceGenerator";
 import { invoiceRefundFacts, invoiceSettledServiceLines } from "../utils/invoiceSettlements";
 import type { InvoiceSettlementBasis, RefundCreditFact, RefundCreditDispatch } from "../models/invoiceSettlement";
-import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
+import { normalizeInvoiceBasis, resolveInvoiceRefundDescription } from "../utils/milestoneInvoice";
 import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
 import { isUserFacingError, UserFacingError } from "../utils/appErrors";
@@ -443,9 +445,19 @@ type UblPlatformParty = {
   country?: string;
 };
 
-type UblLine = InvoiceAccountingLine & { price: number; vatAmount: number };
+type UblLine = InvoiceAccountingLine & {
+  price: number;
+  vatAmount: number;
+  /**
+   * A discount line (negative price). The PDF and the Odoo move show it as a
+   * negative line; the UBL invoice renders it as a document-level allowance
+   * (EN16931 BG-20) because an invoice line price may not be negative (BR-27).
+   */
+  allowance?: boolean;
+};
 
 const moneyNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+const roundUblMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
 const getExtraCostLinesForUbl = (
   booking: any,
@@ -743,17 +755,29 @@ const getRawPricingLinesForUbl = (
     if (basis.milestoneActive && basis.supplierServiceNet == null) {
       throw new Error("Cannot invoice milestone supplier amounts without recorded professional payouts.");
     }
+    // Same supplier share of the repeat-buyer discount as the PDF and the
+    // payout: shown once, as its own allowance after the full-price line.
+    const supplierRepeatDiscount = supplierRepeatBuyerDiscount(
+      basis.discount?.repeatBuyerAmount,
+      // Same commission source as the PDF builder (generateBookingInvoice).
+      Number(currentQuote?.customerTotals?.commissionPercent ?? booking.__commissionPercent) || 0,
+    );
     const supplierNet = basis.supplierServiceNet ?? calculateSupplierInvoiceNet({
       quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
       checkoutSnapshot: booking.checkoutSnapshot,
       selectedExtraOptions: booking.selectedExtraOptions,
-      repeatBuyerDiscount: basis.discount?.repeatBuyerAmount,
+      repeatBuyerDiscount: supplierRepeatDiscount,
       quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
     });
     const selectedOptions = (booking.selectedExtraOptions || []).reduce(
       (sum: number, option: any) => sum + moneyNumber(option.bookedPrice),
       0
     );
+    const discountedServiceAmount = Math.max(0, Math.round((supplierNet - selectedOptions) * basis.supplierScale * 100) / 100);
+    const repeatDiscountShown = discountedServiceAmount > 0
+      ? scaledSupplierRepeatBuyerDiscount(supplierNet - selectedOptions, supplierRepeatDiscount, basis.supplierScale)
+      : 0;
+    const fullServiceAmount = Math.round((discountedServiceAmount + repeatDiscountShown) * 100) / 100;
     const checkoutUnit = resolveInvoiceServiceUnit({
       checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
       subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
@@ -764,8 +788,8 @@ const getRawPricingLinesForUbl = (
     });
     const serviceLine: UblLine = {
       description: booking.rfqData?.serviceType || currentQuote?.description || booking.quote?.description || "Service",
-      amount: Math.max(0, Math.round((supplierNet - selectedOptions) * basis.supplierScale * 100) / 100),
-      price: Math.max(0, Math.round((supplierNet - selectedOptions) * basis.supplierScale * 100) / 100),
+      amount: fullServiceAmount,
+      price: fullServiceAmount,
       vatRate,
       vatAmount: 0,
       quantity: booking.checkoutSnapshot?.pricingType === "unit" ? moneyNumber(booking.checkoutSnapshot.quantity) : undefined,
@@ -785,7 +809,22 @@ const getRawPricingLinesForUbl = (
         vatAmount: 0,
       };
     });
-    const lines = [serviceLine, ...optionLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, false)];
+    const repeatDiscountLines: UblLine[] = repeatDiscountShown > 0
+      ? [{
+          description: "Repeat buyer discount",
+          amount: -repeatDiscountShown,
+          price: -repeatDiscountShown,
+          vatRate,
+          vatAmount: 0,
+          allowance: true,
+        }]
+      : [];
+    const lines = [
+      serviceLine,
+      ...optionLines,
+      ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, false),
+      ...repeatDiscountLines,
+    ];
     const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: supplierVat?.vatLabel });
     return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
   }
@@ -914,6 +953,7 @@ const withCustomerDiscountLines = (
         price: -share,
         vatRate: rate,
         vatAmount: 0,
+        allowance: true,
       });
     });
   });
@@ -999,7 +1039,7 @@ const buildUblPartiesAndTotals = (
   sign: number,
   pricingLines: any[],
   reverseCharge: boolean,
-  options?: { selfBilling?: boolean; platform?: UblPlatformParty; paidAmount?: number },
+  options?: { selfBilling?: boolean; platform?: UblPlatformParty; paidAmount?: number; allowanceTotal?: number },
   totals?: ReturnType<typeof calculateInvoiceSideTotals>
 ) => {
   const customer = booking.customer || {};
@@ -1012,17 +1052,35 @@ const buildUblPartiesAndTotals = (
     ? `<cbc:TaxExemptionReasonCode>VATEX-EU-IC</cbc:TaxExemptionReasonCode>
         <cbc:TaxExemptionReason>${escapeXml(REVERSE_CHARGE_LABEL)}</cbc:TaxExemptionReason>`
     : "";
-  const taxSubtotals = pricingLines.map((line: any) => `
+  // One VAT breakdown per rate (EN16931 BG-23): the taxable amount is the sum
+  // of the line amounts at that rate minus the allowances at that rate (the
+  // allowance lines carry a negative price), and the tax amount is the sum of
+  // the same lines' rounded VAT, so the subtotals add up to the TaxTotal.
+  const subtotalsByRate = new Map<string, { rate: number; taxable: number; tax: number }>();
+  for (const line of pricingLines) {
+    const rate = Number(reverseCharge ? 0 : (line.vatRate ?? booking.payment?.vatRate ?? 0)) || 0;
+    const key = toMoney(rate);
+    const entry = subtotalsByRate.get(key) || { rate, taxable: 0, tax: 0 };
+    entry.taxable += Number(line.price || 0);
+    entry.tax += Number(line.vatAmount ?? (Number(line.price || 0) * Number(line.vatRate || 0)) / 100);
+    subtotalsByRate.set(key, entry);
+  }
+  const taxSubtotals = [...subtotalsByRate.values()].map((entry) => `
     <cac:TaxSubtotal>
-      <cbc:TaxableAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price || 0) * sign)}</cbc:TaxableAmount>
-      <cbc:TaxAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.vatAmount ?? (Number(line.price || 0) * Number(line.vatRate || 0)) / 100) * sign)}</cbc:TaxAmount>
+      <cbc:TaxableAmount currencyID="${escapeXml(currency)}">${toMoney(roundUblMoney(entry.taxable) * sign)}</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="${escapeXml(currency)}">${toMoney(roundUblMoney(entry.tax) * sign)}</cbc:TaxAmount>
       <cac:TaxCategory>
         <cbc:ID>${taxCategoryId}</cbc:ID>
-        <cbc:Percent>${toMoney(reverseCharge ? 0 : (line.vatRate ?? booking.payment?.vatRate ?? 0))}</cbc:Percent>
+        <cbc:Percent>${toMoney(entry.rate)}</cbc:Percent>
         ${taxCategoryExtras}
         <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
       </cac:TaxCategory>
     </cac:TaxSubtotal>`).join("");
+  const taxExclusiveAmount = Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount);
+  const allowanceTotal = roundUblMoney(Math.max(0, Number(options?.allowanceTotal) || 0));
+  // BR-CO-13: TaxExclusive = Σ line net − allowances. The lines carry the full
+  // prices, so their sum is the charged net plus the allowances.
+  const lineExtensionAmount = roundUblMoney(taxExclusiveAmount + allowanceTotal);
 
   const professionalParty = {
     name: professional.businessInfo?.companyName || professional.name || "Supplier",
@@ -1072,9 +1130,10 @@ const buildUblPartiesAndTotals = (
     ${taxSubtotals}
   </cac:TaxTotal>`,
     monetaryTotal: `<cac:LegalMonetaryTotal>
-    <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:LineExtensionAmount>
-    <cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:TaxExclusiveAmount>
+    <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(lineExtensionAmount * sign)}</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(taxExclusiveAmount * sign)}</cbc:TaxExclusiveAmount>
     <cbc:TaxInclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:TaxInclusiveAmount>
+    ${allowanceTotal > 0 ? `<cbc:AllowanceTotalAmount currencyID="${escapeXml(currency)}">${toMoney(allowanceTotal * sign)}</cbc:AllowanceTotalAmount>` : ""}
     ${paidAmount > 0 ? `<cbc:PrepaidAmount currencyID="${escapeXml(currency)}">${toMoney(paidAmount * sign)}</cbc:PrepaidAmount>` : ""}
     <cbc:PayableAmount currencyID="${escapeXml(currency)}">${toMoney((invoiceTotal - paidAmount) * sign)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>`,
@@ -1167,16 +1226,42 @@ export const buildUblInvoiceXml = (
   // Partial refunds are billed net of the refund; the note carries the refund
   // date, amount, reason and description on both the FIX and the SUP document.
   const refundNote = describeRefundForUbl(booking, currency);
+  // Discounts become document-level allowances (EN16931 BG-20) instead of
+  // invoice lines with a negative price, which BR-27 forbids. The Odoo/Peppol
+  // line items (getPeppolLineItems) and the PDF keep their discount lines.
+  const allowanceLines = pricingLines.filter((line: UblLine) => line.allowance && Number(line.price) < 0);
+  const itemLines = pricingLines.filter((line: UblLine) => !allowanceLines.includes(line));
+  const allowanceTotal = roundUblMoney(allowanceLines.reduce((sum: number, line: UblLine) => sum - Number(line.price), 0));
   const parties = buildUblPartiesAndTotals(booking, currency, sign, pricingLines, reverseCharge, {
     selfBilling,
     platform: options?.platform,
     // Paid through Stripe: only the rest is left to transfer.
     paidAmount: getInvoicePayment(booking, selfBilling ? "supplier" : "customer", pricing.totals.totalWithVat).paidAmount,
+    allowanceTotal,
   }, pricing.totals);
-  const invoiceLines = pricingLines.map((line: any, index: number) => `
+  const allowanceCharges = allowanceLines.map((line: UblLine) => `
+  <cac:AllowanceCharge>
+    <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
+    <cbc:AllowanceChargeReasonCode>95</cbc:AllowanceChargeReasonCode>
+    <cbc:AllowanceChargeReason>${escapeXml(line.description)}</cbc:AllowanceChargeReason>
+    <cbc:Amount currencyID="${escapeXml(currency)}">${toMoney(-Number(line.price) * sign)}</cbc:Amount>
+    <cac:TaxCategory>
+      <cbc:ID>${parties.taxCategoryId}</cbc:ID>
+      <cbc:Percent>${toMoney(reverseCharge ? 0 : (line.vatRate ?? booking.payment?.vatRate ?? 0))}</cbc:Percent>
+      <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+    </cac:TaxCategory>
+  </cac:AllowanceCharge>`).join("");
+  const invoiceLines = itemLines.map((line: any, index: number) => {
+    // BR-27: the item net price may not be negative. A negative line that is
+    // not a discount (a payment adjustment, fewer units than estimated) keeps
+    // its negative amount through a negative quantity at a positive price.
+    const rawQuantity = Number(line.quantity || 1);
+    const rawPrice = Number(line.unitPrice ?? line.price) * sign;
+    const flip = rawPrice < 0 ? -1 : 1;
+    return `
     <cac:InvoiceLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toQuantity(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
+      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toQuantity(rawQuantity * flip)}</cbc:InvoicedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
@@ -1187,9 +1272,10 @@ export const buildUblInvoiceXml = (
         </cac:ClassifiedTaxCategory>
       </cac:Item>
       <cac:Price>
-        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toUnitPrice(Number(line.unitPrice ?? line.price) * sign)}</cbc:PriceAmount>
+        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toUnitPrice(rawPrice * flip)}</cbc:PriceAmount>
       </cac:Price>
-    </cac:InvoiceLine>`).join("");
+    </cac:InvoiceLine>`;
+  }).join("");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
@@ -1207,7 +1293,7 @@ export const buildUblInvoiceXml = (
   <cbc:BuyerReference>${escapeXml(booking.bookingNumber || booking._id?.toString?.())}</cbc:BuyerReference>
   ${options?.relatedInvoiceNumber ? `<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${escapeXml(options.relatedInvoiceNumber)}</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference>` : ""}
   ${parties.supplierParty}
-  ${parties.customerParty}
+  ${parties.customerParty}${allowanceCharges}
   ${parties.taxTotal}
   ${parties.monetaryTotal}${invoiceLines}
 </Invoice>`;
@@ -2574,7 +2660,7 @@ export async function ensurePartialRefundCreditArtifacts(
       const currency = booking.payment.currency || "EUR";
       const description = buildPartialRefundDescription({ amount: delta, currency,
         date: booking.payment.refundedAt, reason: booking.payment.refundReason,
-        description: booking.cancellation?.adminResolutionNote });
+        description: resolveInvoiceRefundDescription(booking, booking.payment.refundReason) });
       const artifact = await createManualInvoiceArtifact(bookingId, undefined, buildPartialRefundCreditInput({
         side, net, vat, vatRate: effectiveVatRateForCredit(net, vat, booking.payment.vatRate),
         reverseCharge: vat === 0 && Boolean(side === "customer" ? booking.payment.reverseCharge : getSupplierVatContext(booking, platform).reverseCharge),

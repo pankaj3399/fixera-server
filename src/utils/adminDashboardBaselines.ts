@@ -79,6 +79,20 @@ export const clauseForDashboard = (key: AdminDashboardBaselineKey, resetAt: Date
 export const clampKpiFrom = (from: Date, resetAt: Date | null): Date =>
   resetAt && resetAt.getTime() > from.getTime() ? resetAt : from;
 
+/**
+ * A KPI range after the bookingKpis reset: starts no earlier than the reset
+ * and never inverts (a range entirely before the reset collapses to an empty
+ * range at the baseline). Shared by the dashboard and the monthly PDF report.
+ */
+export const kpiRangeAfterBaseline = (
+  from: Date,
+  to: Date,
+  resetAt: Date | null,
+): { from: Date; to: Date } => {
+  const clampedFrom = clampKpiFrom(from, resetAt);
+  return { from: clampedFrom, to: clampedFrom.getTime() > to.getTime() ? clampedFrom : to };
+};
+
 /** Combine a base list filter with a baseline clause without mutating either. */
 export const withBaselineClause = (
   base: Record<string, unknown>,

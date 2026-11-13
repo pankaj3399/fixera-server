@@ -125,6 +125,7 @@ const PRO_PAYOUT_SUMMARY_FIELDS = [
   "platformCommission",
   "extraCostPlatformFee",
   "extraCostPlatformCommission",
+  "extraCostCommissionPercent",
   "extraCostProfessionalPayout",
   "extraCostTransferStatus",
   "extraCostTransferAttemptedAt",

@@ -48,6 +48,13 @@ export class ProjectCopyRefusalError extends Error {}
 export class ProjectCopyOutputError extends Error {}
 
 const MAX_TEXT = 1000;
+/**
+ * Wizard facts longer than the prompt budget are clipped, not rejected
+ * (FT1 #3/#8): the project model allows longer texts (e.g. FAQ answers up to
+ * 1000 chars, material descriptions up to 500), and a valid project must
+ * never fail generation just because it is detailed. Wrong types and missing
+ * required fields are still rejected.
+ */
 const cleanText = (value: unknown, max = MAX_TEXT, required = false): string | undefined => {
   if (value === undefined || value === null) {
     if (required) throw new ProjectCopyInputError();
@@ -55,9 +62,11 @@ const cleanText = (value: unknown, max = MAX_TEXT, required = false): string | u
   }
   if (typeof value !== 'string') throw new ProjectCopyInputError();
   const clean = value.replace(/\s+/gu, ' ').trim();
-  if (clean.length > max || (required && !clean)) throw new ProjectCopyInputError();
-  return clean || undefined;
+  if (required && !clean) throw new ProjectCopyInputError();
+  return clipText(clean, max) || undefined;
 };
+const clipText = (value: string, max: number): string =>
+  value.length > max ? value.slice(0, Math.max(0, max - 1)).trimEnd() + '…' : value;
 
 const optionalNumber = (value: unknown): number | undefined => {
   if (value === undefined || value === null || value === '') return undefined;
@@ -65,10 +74,61 @@ const optionalNumber = (value: unknown): number | undefined => {
   return value;
 };
 
+/** Hard ceiling on any submitted list; beyond the per-field limit lists are cut, not rejected. */
+const MAX_SUBMITTED_LIST = 100;
 const readList = <T>(value: unknown, max: number, read: (entry: unknown) => T): T[] => {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > max) throw new ProjectCopyInputError();
-  return value.map(read);
+  if (!Array.isArray(value) || value.length > MAX_SUBMITTED_LIST) throw new ProjectCopyInputError();
+  return value.slice(0, max).map(read);
+};
+
+const CONTEXT_BUDGET = 12_000;
+const contextSize = (context: ProjectCopyContext) => JSON.stringify(context).length;
+/**
+ * Shrinks a detailed project to the prompt budget, least important facts
+ * first: existing FAQ answers, item descriptions, package descriptions,
+ * existing FAQs, the long description, then extra packages. Throws only when
+ * even the reduced context does not fit.
+ */
+export const fitProjectCopyContext = (context: ProjectCopyContext): ProjectCopyContext => {
+  const steps: Array<(c: ProjectCopyContext) => ProjectCopyContext> = [
+    (c) => ({ ...c, faq: c.faq?.map((f) => ({ ...f, answer: clipText(f.answer, 200) })) }),
+    (c) => ({
+      ...c,
+      subprojects: c.subprojects?.map((sp) => ({
+        ...sp,
+        included: sp.included?.map((i) => ({ ...i, description: i.description && clipText(i.description, 120) })),
+        materials: sp.materials?.map((m) => ({ ...m, description: m.description && clipText(m.description, 120) })),
+      })),
+      extraOptions: c.extraOptions?.map((o) => ({ ...o, description: o.description && clipText(o.description, 200) })),
+      termsConditions: c.termsConditions?.map((t) => ({ ...t, description: t.description && clipText(t.description, 200) })),
+    }),
+    (c) => ({ ...c, subprojects: c.subprojects?.map((sp) => ({ ...sp, description: sp.description && clipText(sp.description, 300) })) }),
+    (c) => ({ ...c, faq: [] }),
+    (c) => ({ ...c, description: clipText(c.description, 1200) }),
+    (c) => ({
+      ...c,
+      subprojects: c.subprojects?.map((sp) => ({
+        ...sp,
+        included: sp.included?.map(({ name }) => ({ name })),
+        materials: sp.materials?.map(({ name, quantity, unit }) => ({ name, quantity, unit })),
+      })),
+    }),
+    (c) => ({ ...c, subprojects: c.subprojects?.slice(0, 4) }),
+    (c) => ({
+      ...c,
+      extraOptions: c.extraOptions?.map((o) => ({ ...o, description: o.description && clipText(o.description, 80) })),
+      termsConditions: c.termsConditions?.map((t) => ({ ...t, description: t.description && clipText(t.description, 80) })),
+    }),
+    (c) => ({ ...c, subprojects: c.subprojects?.slice(0, 2) }),
+  ];
+  let fitted = context;
+  for (const step of steps) {
+    if (contextSize(fitted) <= CONTEXT_BUDGET) return fitted;
+    fitted = step(fitted);
+  }
+  if (contextSize(fitted) > CONTEXT_BUDGET) throw new ProjectCopyInputError();
+  return fitted;
 };
 
 export const parseProjectCopyRequest = (raw: unknown): ProjectCopyRequest => {
@@ -171,8 +231,7 @@ export const parseProjectCopyRequest = (raw: unknown): ProjectCopyRequest => {
       return { question: cleanText(faq.question, 240, true) || '', answer: cleanText(faq.answer, 600, true) || '' };
     }),
   };
-  if (JSON.stringify(context).length > 12_000) throw new ProjectCopyInputError();
-  return { kind: body.kind, locale: body.locale, projectId, context };
+  return { kind: body.kind, locale: body.locale, projectId, context: fitProjectCopyContext(context) };
 };
 
 const TITLES_SCHEMA = {

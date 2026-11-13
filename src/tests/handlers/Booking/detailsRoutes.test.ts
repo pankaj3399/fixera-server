@@ -32,6 +32,10 @@ vi.mock('../../../models/cancellationRequest', () => ({
   default: { find: mocks.cancellationFind },
 }));
 
+vi.mock('../../../models/bookingEvent', () => ({
+  default: { find: () => ({ sort: () => ({ lean: async () => [] }) }) },
+}));
+
 vi.mock('../../../models/warrantyClaim', () => ({
   default: { find: mocks.warrantyFind },
 }));

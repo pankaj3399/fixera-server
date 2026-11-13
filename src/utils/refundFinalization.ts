@@ -1,5 +1,6 @@
-import { releaseBookingCalendar, replaceBookingCalendar } from "./support/bookingCalendar";
+import { bookingCalendarMemberIds, releaseBookingCalendar, replaceBookingCalendar } from "./support/bookingCalendar";
 import { DateTime } from 'luxon';
+import { Types } from 'mongoose';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -23,10 +24,72 @@ export const preparePartialRefundCancellation = (booking: any, wasStarted: boole
   if (wasStarted) pruneFutureResourcePlanDays(booking);
 };
 
+/** Today's local calendar day in the booking zone, encoded as a UTC day start. */
+const bookingTodayStart = (booking: any, now: Date): number => {
+  const localNow = DateTime.fromJSDate(now).setZone(booking?.scheduleTimeZone || 'UTC');
+  return localNow.isValid
+    ? Date.UTC(localNow.year, localNow.month - 1, localNow.day)
+    : startOfUtcDay(now).getTime();
+};
+
+/** A JS date's local calendar day in `zone`, encoded as a UTC day start. */
+const localDayKey = (value: Date, zone: string): number => {
+  const local = DateTime.fromJSDate(value).setZone(zone);
+  return local.isValid
+    ? Date.UTC(local.year, local.month - 1, local.day)
+    : startOfUtcDay(value).getTime();
+};
+
+/**
+ * A booking was never planned per resource when its plan has no entries at
+ * all. A plan whose entries were already pruned to empty days (an earlier
+ * partial-refund pass) is still a plan and must not be re-materialised.
+ */
+const hasResourcePlan = (booking: any): boolean =>
+  Array.isArray(booking?.resourcePlan) && booking.resourcePlan.length > 0;
+
+/**
+ * FT3 #5: a started booking without a resource plan holds its whole scheduled
+ * window for the assigned resources. On a partial refund the already-passed
+ * part of that window (scheduled start through the day before the refund)
+ * must stay blocked instead of being fully released, so it is materialised as
+ * a resource plan of past days for every assigned resource. Returns the
+ * number of member-days written (0 when nothing passed yet).
+ */
+export const retainPastScheduledWindow = (booking: any, now: Date = new Date()): number => {
+  if (!booking || hasResourcePlan(booking)) return 0;
+  const start = booking.scheduledStartDate ? new Date(booking.scheduledStartDate) : null;
+  const rawEnd = booking.scheduledExecutionEndDate || booking.executionEndDate;
+  const end = rawEnd ? new Date(rawEnd) : null;
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  if (end.getTime() <= start.getTime()) return 0;
+  const zone = booking.scheduleTimeZone || 'UTC';
+  const firstDay = localDayKey(start, zone);
+  // The execution end is exclusive: a window ending at midnight does not
+  // occupy the following day.
+  const lastDay = Math.min(
+    localDayKey(new Date(end.getTime() - 1), zone),
+    bookingTodayStart(booking, now) - DAY_MS,
+  );
+  if (lastDay < firstDay) return 0;
+  const members = bookingCalendarMemberIds(booking);
+  if (members.length === 0) return 0;
+  const days: number[] = [];
+  for (let day = firstDay; day <= lastDay; day += DAY_MS) days.push(day);
+  booking.resourcePlan = members.map((id) => ({
+    resourceId: new Types.ObjectId(id),
+    days: days.map((day) => new Date(day)),
+  }));
+  return days.length * members.length;
+};
+
 /**
  * Drop every planned day that has not passed yet from the in-memory resource
  * plan. Days that already passed stay exactly as they are so their resources
- * keep the block in their calendars. Returns the kept/removed day counts.
+ * keep the block in their calendars. A booking that was never planned per
+ * resource keeps the past part of its scheduled window instead (see
+ * retainPastScheduledWindow).
+ * Returns the kept/removed day counts.
  */
 export const pruneFutureResourcePlanDays = (
   booking: any,
@@ -34,11 +97,10 @@ export const pruneFutureResourcePlanDays = (
 ): { keptDays: number; removedDays: number } => {
   let keptDays = 0;
   let removedDays = 0;
-  if (!Array.isArray(booking?.resourcePlan)) return { keptDays, removedDays };
-  const localNow = DateTime.fromJSDate(now).setZone(booking.scheduleTimeZone || 'UTC');
-  const todayStart = localNow.isValid
-    ? Date.UTC(localNow.year, localNow.month - 1, localNow.day)
-    : startOfUtcDay(now).getTime();
+  if (!hasResourcePlan(booking)) {
+    return { keptDays: retainPastScheduledWindow(booking, now), removedDays };
+  }
+  const todayStart = bookingTodayStart(booking, now);
   for (const entry of booking.resourcePlan) {
     if (!Array.isArray(entry?.days)) continue;
     const kept: Date[] = [];

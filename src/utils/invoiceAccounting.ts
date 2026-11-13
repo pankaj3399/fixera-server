@@ -101,6 +101,38 @@ export const calculateSupplierInvoiceNet = (input: SupplierInvoiceBasisInput): n
 };
 
 /**
+ * The supplier's share of a customer-facing repeat-buyer discount. The
+ * discount is granted on the commission-inclusive customer price, while the
+ * professional absorbs it on their own price (see calculateDiscountedPayouts):
+ * the payout is reduced by `discount / (1 + commission%)`, rounded to cents.
+ * The self-bill shows exactly that reduction, so its net equals the payout.
+ */
+export const supplierRepeatBuyerDiscount = (repeatBuyerAmount: unknown, commissionPercent: unknown): number => {
+  const amount = Math.max(0, Number(repeatBuyerAmount) || 0);
+  if (!(amount > 0)) return 0;
+  const multiplier = 1 + Math.max(0, Number(commissionPercent) || 0) / 100;
+  // Same rounding as calculateDiscountedPayouts, so the cents always match.
+  return Math.round((amount / multiplier) * 100) / 100;
+};
+
+/**
+ * The repeat-buyer discount as rendered on a (possibly refund-scaled) supplier
+ * service line: the difference between the rounded full-price line and the
+ * rounded discounted line. Rendering `full price` and `-discount` this way
+ * keeps the line sum, and so the net/VAT/total, exactly what it was with the
+ * discount folded into the line.
+ */
+export const scaledSupplierRepeatBuyerDiscount = (
+  discountedLineNet: number,
+  discount: number,
+  scale = 1,
+): number => {
+  if (!(discount > 0)) return 0;
+  const factor = Number.isFinite(scale) ? scale : 1;
+  return money(money((discountedLineNet + discount) * factor) - money(discountedLineNet * factor));
+};
+
+/**
  * Scale factor that maps persisted extra-cost lines to the resolved extra-cost
  * total. After an admin dispute resolution the booking's `extraCostTotal` is
  * authoritative (reduced or zeroed) while `extraCosts[]` still carries the

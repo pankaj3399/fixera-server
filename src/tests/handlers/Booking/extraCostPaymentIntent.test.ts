@@ -111,6 +111,25 @@ describe('createExtraCostPaymentIntent response terms', () => {
     );
   });
 
+  it('records the commission percent the charge was built with on the booking and the Payment row', async () => {
+    mocks.platformConfig.mockResolvedValue({ commissionPercent: 12.5 });
+    const booking = createBooking();
+    mocks.bookingFindById.mockImplementation(() => {
+      const query: any = { populate: vi.fn(() => query) };
+      query.then = (resolve: (value: unknown) => unknown) => Promise.resolve(booking).then(resolve);
+      return query;
+    });
+
+    await callEndpoint();
+
+    expect(booking.payment.extraCostCommissionPercent).toBe(12.5);
+    expect(mocks.paymentFindOneAndUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ $set: expect.objectContaining({ extraCostCommissionPercent: 12.5 }) }),
+      expect.anything(),
+    );
+  });
+
   it('returns the stored VAT terms when reusing an existing intent', async () => {
     const booking = createBooking({
       payment: {

@@ -5,6 +5,7 @@ import Booking from '../../models/booking';
 import Payment from '../../models/payment';
 import CancellationRequest from '../../models/cancellationRequest';
 import WarrantyClaim from '../../models/warrantyClaim';
+import BookingEvent from '../../models/bookingEvent';
 import { resolveBookingViewerRole } from '../../utils/invoiceVisibility';
 import { referenceId } from '../../utils/bookingDetails/attachments';
 import { collectActorIds, loadActorMap } from '../../utils/bookingDetails/actors';
@@ -59,16 +60,23 @@ export const buildDetailsForBookingDocument = async (params: {
   const { booking, viewerRole, user } = params;
   const plain = typeof booking?.toObject === 'function' ? booking.toObject() : booking;
   const bookingId = String(plain._id);
-  const [payments, cancellations, warrantyClaims, discountHistory] = await Promise.all([
+  const [payments, cancellations, warrantyClaims, discountHistory, bookingEvents] = await Promise.all([
     Payment.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     CancellationRequest.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     WarrantyClaim.find({ booking: bookingId }).sort({ openedAt: 1 }).lean(),
     viewerRole === 'customer'
       ? Booking.findById(bookingId).select('paymentDiscountLedger').lean()
       : null,
+    BookingEvent.find({ booking: bookingId }).sort({ at: 1, _id: 1 }).lean(),
   ]);
   const professionalIdFromProject = referenceId(plain?.project?.professionalId);
-  const actorIds = collectActorIds(plain, payments, cancellations, warrantyClaims);
+  const actorIds = collectActorIds(
+    plain,
+    payments,
+    cancellations,
+    warrantyClaims,
+    bookingEvents.map((event: any) => event.actor),
+  );
   if (professionalIdFromProject) actorIds.push(professionalIdFromProject);
   const actors = await loadActorMap(actorIds);
   const adminAccess = viewerRole === 'admin'
@@ -88,6 +96,8 @@ export const buildDetailsForBookingDocument = async (params: {
     ...(!plain.professional && ownerProfiles[0] ? { professional: ownerProfiles[0] } : {}),
     paymentDiscountLedger: viewerRole === 'customer' ? discountHistory?.paymentDiscountLedger : undefined,
     __cancellationRequests: adminAccess && !adminAccess.cancellations ? [] : cancellations,
+    // Append-only status archive (models/bookingEvent), merged into the activity timeline.
+    __bookingEvents: bookingEvents,
   };
 
   return buildBookingDetails({

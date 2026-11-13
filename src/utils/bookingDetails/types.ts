@@ -134,7 +134,10 @@ export type BookingOverviewDto = {
     refundedTotal: number | null;
   } | null;
   extraCosts: {
+    /** Professional (pre-commission) amount; withheld from customer views. */
     total: number | null;
+    /** What the customer pays for the completion extras (commission included, excl. VAT). */
+    customerTotal: number | null;
     currency: string | null;
     currencySource: 'payment' | 'quote' | 'not_recorded';
     status: 'pending' | 'confirmed' | 'disputed' | null;
@@ -585,6 +588,8 @@ export type RefundDto = {
   netAmount: number | null;
   vatRate: number | null;
   vatSplitRecorded: boolean;
+  /** VAT/net shown were computed pro rata from the refunded payment's recorded VAT. */
+  vatSplitDerived: boolean;
   kind: 'booking' | 'extra_cost';
   internalNotes?: string | null;
   providerRefundId?: string | null;
@@ -792,7 +797,11 @@ export type ActivityItem = {
 };
 
 export type BookingActivityDto = {
-  coverage: { status: 'unknown'; source: 'surviving_records'; appendOnlyArchive: false };
+  coverage: {
+    status: 'complete' | 'partial' | 'unknown';
+    source: 'append_only_archive' | 'surviving_records';
+    appendOnlyArchive: boolean;
+  };
   generatedAt: string;
   complete: boolean;
   order: 'asc';

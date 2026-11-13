@@ -253,7 +253,8 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
         // Get booking blocked ranges for each employee
         const employeesWithBookingBlocks = await Promise.all(
             employees.map(async (member) => {
-                const bookingBlockedRanges = await buildBookingBlockedRanges(member._id as mongoose.Types.ObjectId);
+                // Display-only team calendar: completed bookings render in their colour.
+                const bookingBlockedRanges = await buildBookingBlockedRanges(member._id as mongoose.Types.ObjectId, { includeCompleted: true });
 
                 // Normalize blockedRanges dates to ISO strings
                 const normalizedBlockedRanges = (member.blockedRanges || []).map((range: any) => ({
@@ -363,7 +364,7 @@ export const updateEmployeeStatus = async (req: Request, res: Response, next: Ne
 
         res.status(200).json({
             success: true,
-            msg: `Employee ${isActive ? 'activated' : 'deactivated'} successfully`,
+            msg: isActive ? 'Employee activated successfully' : 'Employee deactivated successfully',
             data: {
                 employee: {
                     _id: employee._id,

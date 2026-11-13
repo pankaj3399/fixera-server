@@ -3,6 +3,8 @@ import User from "../models/user";
 import AccountDataGuard from "../models/accountDataGuard";
 import AuditLog from "../models/auditLog";
 import Booking from "../models/booking";
+import BookingEvent from "../models/bookingEvent";
+import { deleteBrevoMarketingContact } from "./marketing/brevoMarketing";
 import ChatMessage from "../models/chatMessage";
 import ChatReport from "../models/chatReport";
 import Conversation from "../models/conversation";
@@ -226,7 +228,7 @@ const RETAINED_CATEGORIES = [
 ] as const;
 
 const WARNINGS = [
-  "External provider records (for example Stripe, Brevo, and Odoo) are not changed by this endpoint.",
+  "Stripe and Odoo records are not changed by this endpoint (financial/legal records). The Brevo marketing contact is deleted when Brevo is configured.",
   "Invoices and credit-note files are retained as financial evidence and are not deleted.",
   "Counterparty-authored, admin-authored, and unknown-authorship free text inside retained records is preserved by policy and is not rewritten.",
   "Legacy notifications and email logs without recorded actor provenance are only redacted when their entity relationship identifies a target-owned booking, conversation, project, or request. Records with no such provenance are retained and are not matched by name or email text.",
@@ -315,6 +317,8 @@ export type AnonymizationResult = {
   redacted: AnonymizedRedactionCounts;
   cleanup: AnonymizationCleanup;
   warnings: string[];
+  /** Best-effort erasure at external providers (only on the anonymizing request). */
+  externalProviders?: { brevo: "removed" | "not_configured" | "failed" | "skipped" };
 };
 
 export type RecoverableAnonymizationAccount = {
@@ -1615,6 +1619,28 @@ const redactCancellationRequests = async (
   return changed;
 };
 
+/**
+ * Booking event archive (models/bookingEvent): free text and evidence the
+ * target wrote are redacted; the transition facts (status, time) are kept.
+ */
+const redactBookingEvents = async (userId: Types.ObjectId, session: ClientSession) => {
+  const userIdText = idString(userId);
+  const result = await BookingEvent.updateMany(
+    {
+      $or: [
+        { actor: userId },
+        { "context.dispute.raisedBy": userIdText },
+        { "context.cancellation.cancelledBy": userIdText },
+        { "context.reschedule.requestedBy": userIdText },
+        { "context.completion.confirmedBy": userIdText },
+      ],
+    },
+    { $unset: { note: 1, context: 1 }, $set: { attachments: [] } },
+    { session },
+  );
+  return result.modifiedCount;
+};
+
 const redactWarrantyClaims = async (
   data: CollectedData,
   userId: Types.ObjectId,
@@ -2021,6 +2047,12 @@ const buildBookingUpdate = (
       String(booking.cancellation.reason || ""),
     );
   }
+  // refundNote copies free text written by either party (the requester's
+  // reason, the professional's negotiated note or the dispute description),
+  // so it is redacted when any participant of the booking is anonymized.
+  if (typeof booking.cancellation?.refundNote === "string" && booking.cancellation.refundNote !== ANONYMIZED_TEXT) {
+    set["cancellation.refundNote"] = ANONYMIZED_TEXT;
+  }
 
   if (booking.rescheduleRequest) {
     if (idString(booking.rescheduleRequest.requestedBy) === userIdText) {
@@ -2381,6 +2413,7 @@ const applyDatabaseRedaction = async (
   await redactConversations(data, userId, session);
   const chatCount = await redactChat(userId, session);
   await redactCancellationRequests(data, userId, session);
+  await redactBookingEvents(userId, session);
   await redactWarrantyClaims(data, userId, session);
   const projectCount = await redactProjects(data, userId, session);
   const bookingCount = await redactBookings(data, userId, session);
@@ -2542,6 +2575,23 @@ const emptyRedactionCounts = (keys: number): AnonymizedRedactionCounts => ({
   emailLogs: 0,
   s3Objects: keys,
 });
+
+/**
+ * Deletes the target's Brevo marketing contact after the database redaction
+ * committed. Best effort: a provider failure never undoes the anonymization;
+ * it is reported to the admin instead (the original email is not retained).
+ */
+const eraseBrevoContact = async (
+  rawEmail: unknown,
+): Promise<"removed" | "not_configured" | "failed" | "skipped"> => {
+  const email = typeof rawEmail === "string" ? rawEmail.trim().toLowerCase() : "";
+  if (!email || /@anon\.local$/i.test(email)) return "skipped";
+  try {
+    return await deleteBrevoMarketingContact(email);
+  } catch {
+    return "failed";
+  }
+};
 
 const buildResult = (
   outcome: AnonymizationResult["outcome"],
@@ -2771,9 +2821,10 @@ export async function executeAccountAnonymization(input: {
     const redaction = redactionResult.redaction;
 
     const cleanup = await retryCleanupInternal(userId, { queuedKeys: data.keys });
+    const brevo = await eraseBrevoContact(data.user?.email);
     const after = await User.findById(userId).lean() as AnyDoc | null;
     invalidateFavoritesOverviewCache();
-    return buildResult(
+    const result = buildResult(
       "anonymized",
       after || existing,
       {
@@ -2783,6 +2834,12 @@ export async function executeAccountAnonymization(input: {
       },
       cleanup,
     );
+    if (brevo === "failed") {
+      result.warnings.push(
+        "The marketing contact could not be deleted from Brevo. Delete it in Brevo manually (the email is no longer stored here).",
+      );
+    }
+    return { ...result, externalProviders: { brevo } };
   } catch (error) {
     if (error instanceof AnonymizationError) {
       const latest = await User.findById(userId)

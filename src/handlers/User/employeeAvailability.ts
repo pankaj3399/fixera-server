@@ -133,7 +133,8 @@ export const getEmployeeEffectiveAvailability = async (req: Request, res: Respon
     }
 
     // Return company's weekly schedule + employee's personal blocked dates
-    const bookingBlockedRanges = await buildBookingBlockedRanges(user._id as mongoose.Types.ObjectId);
+    // Display-only employee calendar: completed bookings render in their colour.
+    const bookingBlockedRanges = await buildBookingBlockedRanges(user._id as mongoose.Types.ObjectId, { includeCompleted: true });
     return res.status(200).json({
       success: true,
       data: {

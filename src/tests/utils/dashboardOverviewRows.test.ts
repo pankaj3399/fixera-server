@@ -12,6 +12,9 @@ import {
   resolveArchiveRestoreTarget,
   resolvePinnedQuoteVersion,
   resolveSnapshotTitles,
+  normalizePriceModel,
+  joinAddress,
+  selectedPriceModel,
 } from "../../utils/bookingDetails/overviewRows";
 
 describe("shared bookings overview rows", () => {
@@ -197,6 +200,56 @@ describe("dashboard eligibility helpers", () => {
 it('derives the price model from the booking snapshot before the mutable project', () => {
   const row = buildSharedBookingsRow({ bookingSnapshot: { project: { priceModel: 'unit' } }, project: { priceModel: 'fixed' } }, 'professional');
   expect(row.priceModel).toBe('unit');
+});
+it('sends the project free-text price model as a translatable token (booking details and tables)', () => {
+  // The project stores the pricing option name; the frontend translates tokens only.
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Fixed Price' } } })).toBe('fixed');
+  expect(buildSharedBookingsRow({ bookingSnapshot: { project: { priceModel: 'Fixed price' } } }, 'customer').priceModel).toBe('fixed');
+  expect(buildSharedBookingsRow({ priceModel: 'Fixed Price' }, 'customer').priceModel).toBe('fixed');
+  expect(selectedPriceModel({ project: { priceModel: 'Price per m²' } })).toBe('m2');
+  expect(selectedPriceModel({ bookingSnapshot: { selectedSubproject: { pricing: { type: 'rfq' } } }, project: { priceModel: 'Something bespoke' } })).toBe('rfq');
+  // Unrecognised text is still shown as recorded rather than dropped.
+  expect(selectedPriceModel({ project: { priceModel: 'Something bespoke' } })).toBe('Something bespoke');
+  expect(selectedPriceModel({})).toBeNull();
+  for (const [text, token] of [
+    ['fixed', 'fixed'], ['FIXED_PRICE', 'fixed'], ['Total price', 'fixed'], ['Unit price', 'unit'], ['price_per_unit', 'unit'],
+    ['Per hour', 'hour'], ['Per day', 'day'], ['Per m2', 'm2'], ['Per room', 'room'], ['Per metre', 'meter'],
+    ['Request for quote', 'rfq'], ['RFQ', 'rfq'], ['Vaste prijs', 'fixed'], ['Prix fixe', 'fixed'],
+  ] as const) expect(normalizePriceModel(text), text).toBe(token);
+  expect(normalizePriceModel('')).toBeNull();
+  expect(normalizePriceModel(undefined)).toBeNull();
+});
+it('shows each service address part once when the street address already contains them', () => {
+  const location = { address: 'Meir 1, 2000 Antwerpen, Belgium, Antwerpen, 2000, Belgium', city: 'Antwerpen', postalCode: '2000', country: 'BE' };
+  expect(joinAddress(location)).toBe('Meir 1, 2000 Antwerpen, Belgium');
+  expect(buildSharedBookingsRow({ location }, 'customer').serviceAddress).toBe('Meir 1, 2000 Antwerpen, Belgium');
+  expect(buildSharedQuoteRow({ location }).serviceAddress).toBe('Meir 1, 2000 Antwerpen, Belgium');
+  expect(joinAddress({ address: 'Rue de la Loi 16, 1000 Bruxelles, Belgique', city: 'Bruxelles', postalCode: '1000', country: 'BE' }))
+    .toBe('Rue de la Loi 16, 1000 Bruxelles, Belgique');
+  // Separate parts are still joined as before.
+  expect(joinAddress({ address: 'Meir 1', city: 'Antwerpen', postalCode: '2000', country: 'BE' })).toBe('Meir 1, Antwerpen, 2000, BE');
+  expect(joinAddress({})).toBeNull();
+});
+it('does not label a combined legacy price model as one model, and prefers the booked subproject pricing type', () => {
+  for (const [text, token] of [
+    ['Fixed Price', 'fixed'], ['Price per hour', 'hour'], ['m2', 'm2'], ['Price per square metre', 'm2'],
+    ['Total price or m² of material', null], ['Total price or m² of material or per hour', null], ['Something bespoke', null],
+  ] as const) expect(normalizePriceModel(text), text).toBe(token);
+  // Ambiguous project text: the subproject type decides, else the raw text is shown as before.
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Total price or m² of material' }, selectedSubproject: { pricing: { type: 'unit' } } } })).toBe('unit');
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Total price or m² of material' } } })).toBe('Total price or m² of material');
+  expect(buildSharedBookingsRow({ priceModel: 'Total price or m² of material' }, 'customer').priceModel).toBe('Total price or m² of material');
+  // The subproject type wins over the project text; a unit-based project text only refines "unit".
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Fixed Price' }, selectedSubproject: { pricing: { type: 'unit' } } } })).toBe('unit');
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Price per m²' }, selectedSubproject: { pricing: { type: 'unit' } } } })).toBe('m2');
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Price per hour' }, selectedSubproject: { pricing: { type: 'fixed' } } } })).toBe('fixed');
+});
+it('keeps a city or postal code that only appears inside the street name', () => {
+  expect(joinAddress({ address: 'Rue de Namur 12', city: 'Namur', postalCode: '5000', country: 'BE' })).toBe('Rue de Namur 12, Namur, 5000, BE');
+  expect(joinAddress({ address: 'Kerkstraat 1000', city: 'Brussel', postalCode: '1000', country: 'BE' })).toBe('Kerkstraat 1000, Brussel, 1000, BE');
+  // Repeats of a later segment are still dropped, whitespace and case ignored.
+  expect(joinAddress({ address: 'Rue de Namur 12, 5000  NAMUR', city: 'Namur', postalCode: '5000', country: 'BE' })).toBe('Rue de Namur 12, 5000  NAMUR, BE');
+  expect(joinAddress({ address: 'Meir 1, Antwerpen', city: ' antwerpen ', postalCode: '2000', country: 'Belgium' })).toBe('Meir 1, Antwerpen, 2000, Belgium');
 });
 it('uses the recorded customer VAT-inclusive total for the pinned quote', () => {
   expect(pinnedVersionMoney({ currentQuoteVersion: 2, quoteVersions: [{ version: 2, totalAmount: 300, customerTotals: { totalWithVat: 363 }, currency: 'EUR' }] }).amount).toBe(363);

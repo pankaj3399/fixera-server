@@ -317,7 +317,7 @@ export const updateProfessionalLevel = async (
 export const applyPointsBoost = async (
   professionalId: mongoose.Types.ObjectId | string,
   pointsToSpend: number
-): Promise<{ boostedBookings: number; newLevel: string; levelChanged: boolean }> => {
+): Promise<{ boostedBookings: number; newLevel: string; levelChanged: boolean; leveledUp: boolean }> => {
   const [config, professional] = await Promise.all([
     ProfessionalLevelConfig.getCurrentConfig(),
     User.findById(professionalId).select('professionalLevel')
@@ -377,7 +377,7 @@ export const applyPointsBoost = async (
       }
     }
 
-    return { boostedBookings, newLevel, levelChanged };
+    return { boostedBookings, newLevel, levelChanged, leveledUp };
   } finally {
     await session.endSession();
   }

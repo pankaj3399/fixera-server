@@ -116,6 +116,8 @@ import {
   listCmsLandingSlots,
   syncCmsLandingSlots,
   listCmsServiceOptions,
+  translateCmsContent,
+  getCmsTranslationStatus,
 } from "../../handlers/Admin/cmsManagement";
 import {
   listDiscountCodes,
@@ -131,6 +133,9 @@ import {
   updateSiteAnnouncement,
   setSiteAnnouncementActive,
   deleteSiteAnnouncement,
+  getSiteAnnouncementTranslations,
+  runSiteAnnouncementTranslations,
+  saveSiteAnnouncementTranslation,
 } from "../../handlers/Admin/siteAnnouncements";
 import {
   listMarketingCampaigns,
@@ -145,6 +150,7 @@ import {
   listMarketingSubscribers,
   listMarketingTemplates,
   sendMarketingCampaignTestEmail,
+  autoTranslateMarketingCampaign,
 } from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
 import { listMarketingServiceOptions } from "../../handlers/Admin/marketingServiceOptions";
@@ -173,6 +179,10 @@ import {
   adminUpdateSupportItem,
   adminUpdateSupportMeeting,
 } from "../../handlers/Admin/supportItems";
+import {
+  getSupportMeetingLinkSettings,
+  updateSupportMeetingLinkSettings,
+} from "../../handlers/Admin/supportMeetingLinkSettings";
 import { listEmailLogs } from "../../handlers/Admin/emailLogs";
 import {
   listCancellationRequests,
@@ -226,6 +236,19 @@ import {
 } from "../../utils/adminRbac/middleware";
 
 const adminRouter = Router();
+
+const marketingAutoTranslateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.admin?._id || ipKeyGenerator(req.ip ?? 'unknown')),
+  message: {
+    success: false,
+    msg: 'Too many auto-translate requests. Please wait a few minutes and try again.',
+    code: 'RATE_LIMITED',
+  },
+});
 
 // Dashboard "reset" writes (super only, enforced by the /platform-settings rule
 // and again in the handlers). Same shape as the other admin mutation limiters.
@@ -379,6 +402,11 @@ adminRouter.route('/support/items/:kind/:id/notes').get(adminListSupportNotes).p
 adminRouter.route('/support/items/:kind/:id/replies').post(adminReplySupportItem);
 adminRouter.route('/support/items/:kind/:id/meeting').patch(adminUpdateSupportMeeting);
 adminRouter.route('/support/availability').get(adminGetSupportAvailability);
+// The signed-in admin's default meeting link (GET needs support read, PUT write).
+adminRouter
+  .route('/support/meeting-link-settings')
+  .get(getSupportMeetingLinkSettings)
+  .put(updateSupportMeetingLinkSettings);
 
 // Legacy professional support management (kept for old clients)
 adminRouter.route('/support/tickets').get(adminListTickets);
@@ -393,6 +421,9 @@ adminRouter.route('/discount-codes/:id').get(getDiscountCode).patch(updateDiscou
 // Site announcement / marketing promo surfaces
 adminRouter.route('/site-announcements').get(listSiteAnnouncements).post(createSiteAnnouncement);
 adminRouter.route('/site-announcements/:id/active').patch(setSiteAnnouncementActive);
+adminRouter.route('/site-announcements/:id/translations').get(getSiteAnnouncementTranslations);
+adminRouter.route('/site-announcements/:id/translations/run').post(runSiteAnnouncementTranslations);
+adminRouter.route('/site-announcements/:id/translations/:locale').put(saveSiteAnnouncementTranslation);
 adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(updateSiteAnnouncement).delete(deleteSiteAnnouncement);
 
 // Marketing email campaigns (Brevo)
@@ -400,6 +431,7 @@ adminRouter.route('/marketing-campaigns').get(listMarketingCampaigns).post(creat
 adminRouter.route('/marketing-campaigns/preview-audience').post(previewMarketingAudience);
 adminRouter.route('/marketing-campaigns/test-send').post(marketingTestSendLimiter, sendMarketingCampaignTestEmail);
 adminRouter.route('/marketing-campaigns/templates').get(listMarketingTemplates);
+adminRouter.route('/marketing-campaigns/auto-translate').post(marketingAutoTranslateLimiter, autoTranslateMarketingCampaign);
 adminRouter.route('/marketing-campaigns/service-options').get(listMarketingServiceOptions);
 adminRouter.route('/marketing-campaigns/:id/send').post(sendMarketingCampaignNow);
 adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaignStats);
@@ -424,6 +456,8 @@ adminRouter.route('/cms/service-options').get(listCmsServiceOptions);
 adminRouter.route('/cms/upload-image').post(cmsImageMulter.single('image'), uploadCmsImage);
 adminRouter.route('/cms/preview/:type/:slug').get(getCmsPreviewBySlug);
 adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delete(deleteCmsContent);
+adminRouter.route('/cms/:id/translate').post(translateCmsContent);
+adminRouter.route('/cms/:id/translations').get(getCmsTranslationStatus);
 
 // Email logs
 adminRouter.route('/email-logs').get(listEmailLogs);
