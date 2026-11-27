@@ -192,3 +192,28 @@ export const getUnpaidMilestoneCount = (
 
 export const countUnpaidMilestones = (booking: { milestonePayments?: Array<{ status?: string; amount?: number }> }): number =>
   getUnpaidMilestoneCount(booking.milestonePayments);
+
+/**
+ * Copy an engine schedule window onto a booking payload. Shared by booking
+ * creation and checkout promotion (FT2-4B), which re-runs the engine when the
+ * payment is confirmed. Returns the engine-resolved time zone.
+ */
+export const applyScheduleWindowToBookingData = (bookingData: any, window: any): string | null => {
+  if (window.resourcePlan) bookingData.resourcePlan = window.resourcePlan;
+  bookingData.scheduledStartDate = window.scheduledStartDate;
+  const optionalFields = [
+    'scheduledExecutionEndDate',
+    'scheduledBufferStartDate',
+    'scheduledBufferEndDate',
+    'scheduledBufferUnit',
+    'scheduledStartTime',
+    'scheduledEndTime',
+  ] as const;
+  for (const field of optionalFields) {
+    if (window[field]) bookingData[field] = window[field];
+  }
+  if (window.assignedTeamMembers && window.assignedTeamMembers.length > 0) {
+    bookingData.assignedTeamMembers = window.assignedTeamMembers;
+  }
+  return typeof window.timeZone === 'string' ? window.timeZone : null;
+};

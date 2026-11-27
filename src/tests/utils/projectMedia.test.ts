@@ -4,8 +4,10 @@ import {
   canonicalizeProjectMediaUrl,
   projectMediaKeyFor,
   projectMediaSignatureExpiresAt,
+  projectQuestionAttachmentKeyFor,
   signProjectMediaUrl,
   withSignedProjectMedia,
+  withSignedQuestionAttachments,
 } from "../../utils/projectMedia";
 
 const OWNER = "64b000000000000000000001";
@@ -141,5 +143,76 @@ describe("project media key boundary", () => {
     expect(projectMediaKeyFor(`${BUCKET}/project-images/${OWNER}/2024/a%20b.png`, OWNER)).toBe(
       `project-images/${OWNER}/2024/a b.png`,
     );
+  });
+});
+
+describe("FT1-RFQ: professional question attachments in the public project payload", () => {
+  const ATTACHMENT = `${BUCKET}/projects/6650aa/attachment/${OWNER}/1730000000002-aabbccddeeff0013.pdf`;
+  const TEMP_ATTACHMENT = `${BUCKET}/projects/temp/attachment/${OWNER}/1730000000003-aabbccddeeff0014.pdf`;
+
+  it("accepts only the owner's question-attachment keys", () => {
+    expect(projectQuestionAttachmentKeyFor(ATTACHMENT, OWNER)).toBe(
+      `projects/6650aa/attachment/${OWNER}/1730000000002-aabbccddeeff0013.pdf`,
+    );
+    expect(projectQuestionAttachmentKeyFor(TEMP_ATTACHMENT, { _id: OWNER })).not.toBeNull();
+    expect(projectQuestionAttachmentKeyFor(`${BUCKET}/project-attachments/${OWNER}/a.pdf`, OWNER)).toBe(
+      `project-attachments/${OWNER}/a.pdf`,
+    );
+    const rejected = [
+      `${BUCKET}/projects/6650aa/attachment/${OTHER}/a.pdf`,
+      `${BUCKET}/projects/6650aa/image/${OWNER}/a.png`,
+      `${BUCKET}/projects/6650aa/certification/${OWNER}/a.pdf`,
+      `${BUCKET}/rfq-attachments/${OWNER}/a.pdf`,
+      `${BUCKET}/id-proof/${OWNER}/a.pdf`,
+      `${BUCKET}/projects/6650aa/attachment/${OWNER}/..%2F..%2F..%2Fid-proof%2F${OWNER}%2Fa.pdf`,
+      `https://other-bucket.s3.us-east-1.amazonaws.com/projects/6650aa/attachment/${OWNER}/a.pdf`,
+      "https://files.example.com/a.pdf",
+    ];
+    for (const url of rejected) expect(projectQuestionAttachmentKeyFor(url, OWNER), url).toBeNull();
+    expect(projectQuestionAttachmentKeyFor(ATTACHMENT, null)).toBeNull();
+  });
+
+  it("signs RFQ and post-booking question attachments without mutating the stored project", async () => {
+    const stored = {
+      _id: "p1",
+      professionalId: { _id: OWNER, name: "Pro" },
+      rfqQuestions: [
+        {
+          question: "Floor plan?",
+          type: "attachment",
+          professionalAttachments: [ATTACHMENT, "https://files.example.com/a.pdf", `${BUCKET}/id-proof/${OWNER}/a.pdf`],
+        },
+        { question: "Colour?", type: "text" },
+      ],
+      postBookingQuestions: [
+        { question: "Access?", type: "text", professionalAttachments: [{ url: TEMP_ATTACHMENT, name: "Access.pdf" }] },
+      ],
+    };
+    const signed: any = await withSignedQuestionAttachments(stored, { now: DAY });
+    const [first, external, idProof] = signed.rfqQuestions[0].professionalAttachments;
+    expect(first.startsWith(`${ATTACHMENT}?`)).toBe(true);
+    const params = new URL(first).searchParams;
+    expect(params.get("X-Amz-Signature")).toMatch(/^[0-9a-f]{64}$/);
+    expect(params.get("X-Amz-Expires")).toBe("604800");
+    expect(params.get("X-Amz-Date")).toBe("20261103T000000Z");
+    expect(external).toBe("https://files.example.com/a.pdf");
+    expect(idProof).toBe(`${BUCKET}/id-proof/${OWNER}/a.pdf`);
+    expect(signed.rfqQuestions[1]).toEqual(stored.rfqQuestions[1]);
+    const post = signed.postBookingQuestions[0].professionalAttachments[0];
+    expect(post.name).toBe("Access.pdf");
+    expect(post.url).toMatch(/X-Amz-Signature=/);
+    expect(stored.rfqQuestions[0].professionalAttachments[0]).toBe(ATTACHMENT);
+    // Stable within the signing window, so the 5-minute page cache serves a working link.
+    const again: any = await withSignedQuestionAttachments(stored, { now: LATER_SAME_DAY });
+    expect(again.rfqQuestions[0].professionalAttachments[0]).toBe(first);
+  });
+
+  it("re-signs an already signed attachment instead of nesting signatures", async () => {
+    const once: any = await withSignedQuestionAttachments(
+      { professionalId: OWNER, rfqQuestions: [{ professionalAttachments: [ATTACHMENT] }] },
+      { now: DAY },
+    );
+    const twice: any = await withSignedQuestionAttachments(once, { now: DAY });
+    expect(twice.rfqQuestions[0].professionalAttachments[0]).toBe(once.rfqQuestions[0].professionalAttachments[0]);
   });
 });

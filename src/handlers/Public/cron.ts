@@ -4,6 +4,7 @@ import { Request, Response } from 'express';
 import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
+import { expireStaleCheckoutSessions } from '../../utils/checkoutSession';
 import { retryStuckPeppolDispatches, sanitizePeppolRetryResultForResponse } from '../../utils/retryPeppolDispatches';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
 import {
@@ -384,6 +385,17 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
     marketing = { error: message };
   }
 
+  // FT2-4B: close unpaid wizard checkouts past their hold (best effort; an
+  // open checkout blocks no calendar, and the TTL index is the backstop).
+  let checkoutSessions: { checked: number; abandoned: number; promoted: number; inFlight: number; errors: number } | undefined;
+  try {
+    const swept = await expireStaleCheckoutSessions();
+    checkoutSessions = { ...swept, errors: swept.errors.length };
+    if (swept.errors.length > 0) console.error('[Cron] Checkout session sweep errors:', swept.errors);
+  } catch (error: unknown) {
+    console.error('[Cron] Checkout session sweep failed:', error);
+  }
+
   const durationMs = Date.now() - startedAt;
 
   const kpiError =
@@ -417,6 +429,7 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
     data: {
       ...sanitizeReminderErrors(reminders),
       durationMs,
+      ...(checkoutSessions ? { checkoutSessions } : {}),
       ...(kpiMonthly ? { kpiMonthly: sanitizeKpiErrors(kpiMonthly) } : {}),
       ...(marketing ? { marketing: sanitizeMarketingResult(marketing) } : {}),
     },

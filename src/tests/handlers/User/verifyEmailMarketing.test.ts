@@ -1,16 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { userFindOne, userFindByIdAndUpdate, enablePromotionalEmail } = vi.hoisted(() => ({
+const { userFindOne, userFindOneAndUpdate, enablePromotionalEmail, writeFence } = vi.hoisted(() => ({
   userFindOne: vi.fn(),
-  userFindByIdAndUpdate: vi.fn(),
+  userFindOneAndUpdate: vi.fn(),
   enablePromotionalEmail: vi.fn(),
+  writeFence: vi.fn(async (_ids: unknown[], write: (session: undefined) => Promise<unknown>) => write(undefined)),
 }));
 
 vi.mock('../../../models/user', () => ({
   default: {
     findOne: userFindOne,
-    findByIdAndUpdate: userFindByIdAndUpdate,
+    findOneAndUpdate: userFindOneAndUpdate,
   },
+}));
+
+vi.mock('../../../utils/support/accountGuard', () => ({
+  withAnonymizationWriteFence: writeFence,
 }));
 
 vi.mock('../../../utils/marketing/audience', () => ({
@@ -48,7 +53,7 @@ function mockUser(overrides: Record<string, unknown> = {}) {
 describe('verifyEmailOTP pending marketing opt-in', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    userFindByIdAndUpdate.mockResolvedValue({ _id: 'user-1', email: 'buyer@example.com' });
+    userFindOneAndUpdate.mockResolvedValue({ _id: 'user-1', email: 'buyer@example.com' });
   });
 
   it('activates and enrolls the opt-in only after OTP verification', async () => {
@@ -61,8 +66,15 @@ describe('verifyEmailOTP pending marketing opt-in', () => {
       vi.fn(),
     );
 
-    expect(userFindByIdAndUpdate).toHaveBeenCalledWith(
-      'user-1',
+    expect(writeFence).toHaveBeenCalledWith(['user-1'], expect.any(Function));
+    expect(userFindOneAndUpdate).toHaveBeenCalledWith(
+      {
+        _id: 'user-1',
+        email: 'buyer@example.com',
+        isEmailVerified: { $ne: true },
+        verificationCode: '123456',
+        verificationCodeExpires: { $gt: expect.any(Date) },
+      },
       {
         $set: expect.objectContaining({
           isEmailVerified: true,
@@ -90,11 +102,29 @@ describe('verifyEmailOTP pending marketing opt-in', () => {
       vi.fn(),
     );
 
-    const update = userFindByIdAndUpdate.mock.calls[0]?.[1] as {
+    const update = userFindOneAndUpdate.mock.calls[0]?.[1] as {
       $set: Record<string, unknown>;
     };
     expect(update.$set.marketingConsentAt).toBeUndefined();
     expect(update.$set['notificationPreferences.promotions.email']).toBeUndefined();
+    expect(enablePromotionalEmail).not.toHaveBeenCalled();
+  });
+
+  it('fails without verifying when the email or code changed after the check', async () => {
+    // A signup email change replaced the address and code between the read
+    // and the write: the conditional update matches nothing.
+    mockUser({ marketingOptInPending: true });
+    userFindOneAndUpdate.mockResolvedValue(null);
+
+    const res = resMock();
+    await verifyEmailOTP(
+      { body: { email: 'buyer@example.com', otp: '123456' } } as any,
+      res,
+      vi.fn(),
+    );
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false }));
     expect(enablePromotionalEmail).not.toHaveBeenCalled();
   });
 });

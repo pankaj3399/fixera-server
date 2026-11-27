@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { refundCountsAsCash } from '../paymentRefunds';
+import { convertFromStripeAmount } from '../payment';
 
 /**
  * Read-only normalization of the two persisted payment sources:
@@ -31,6 +32,23 @@ const iso = (value: unknown): string | null => {
 };
 
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * `transferAmount` is persisted exactly as sent to `stripe.transfers.create`:
+ * in MINOR units of `transferCurrency` (cents for EUR), because the refund
+ * path reverses that stored value directly. Every stored value has always
+ * been written that way (capturePaymentAndTransfer is the only writer), so
+ * read paths convert unconditionally; showing the raw value as money
+ * displays the payout multiplied by 100.
+ */
+export const transferAmountInMajorUnits = (
+  minorAmount: unknown,
+  currency: string | null | undefined,
+): number | null => {
+  const value = num(minorAmount);
+  if (value == null) return null;
+  return roundMoney(convertFromStripeAmount(value, str(currency) || 'EUR'));
+};
 
 export const opaqueRefundReference = (seed: string): string =>
   createHash('sha256').update(seed).digest('hex').slice(0, 16);

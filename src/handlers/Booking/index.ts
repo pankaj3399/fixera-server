@@ -14,7 +14,8 @@ import {
 } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
-import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
+import { signListInvoiceLinks } from "../../utils/bookingDetails/listInvoiceLinks";
+import { resolveSubprojectIndex, applyScheduleWindowToBookingData } from "../../utils/bookingHelpers";
 import { sendCancellationRequestAdminEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
@@ -65,6 +66,9 @@ import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot
 import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
 import { bookingWithCustomerProjectPrices } from '../../utils/customerPriceView';
 import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
+import type { ICheckoutSchedule } from '../../models/checkoutSession';
+import { CHECKOUT_SLOT_UNAVAILABLE_MESSAGE } from '../Stripe/checkoutPromotion';
+import { startCheckoutSession, populateCheckoutBooking, findOpenCheckoutForCustomer, abandonCheckoutSession, CheckoutPaymentInProgressError } from '../../utils/checkoutSession';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -751,6 +755,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     // Should-fix 4: the engine-resolved conversion zone for scheduleTimeZone
     // (assigned in the project branch when a window is computed).
     let engineScheduleZone: string | null = null;
+    // FT2-4B: inputs to re-check availability when a checkout is promoted.
+    let checkoutSchedule: ICheckoutSchedule | undefined;
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
       if (!professional || professional.role !== 'professional') {
@@ -1029,30 +1035,18 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
-        if (window.resourcePlan) bookingData.resourcePlan = window.resourcePlan;
-        engineScheduleZone = typeof window.timeZone === 'string' ? window.timeZone : null;
-        bookingData.scheduledStartDate = window.scheduledStartDate;
-        if (window.scheduledExecutionEndDate) {
-          bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
-        }
-        if (window.scheduledBufferStartDate) {
-          bookingData.scheduledBufferStartDate = window.scheduledBufferStartDate;
-        }
-        if (window.scheduledBufferEndDate) {
-          bookingData.scheduledBufferEndDate = window.scheduledBufferEndDate;
-        }
-        if (window.scheduledBufferUnit) {
-          bookingData.scheduledBufferUnit = window.scheduledBufferUnit;
-        }
-        if (window.scheduledStartTime) {
-          bookingData.scheduledStartTime = window.scheduledStartTime;
-        }
-        if (window.scheduledEndTime) {
-          bookingData.scheduledEndTime = window.scheduledEndTime;
-        }
-        if (window.assignedTeamMembers && window.assignedTeamMembers.length > 0) {
-          bookingData.assignedTeamMembers = window.assignedTeamMembers;
-        }
+        engineScheduleZone = applyScheduleWindowToBookingData(bookingData, window);
+        checkoutSchedule = {
+          projectId: String(projectId),
+          ...(typeof subprojectIndex === 'number' ? { subprojectIndex } : {}),
+          startDate: normalizedStartDate,
+          ...(typeof rawStartTime === 'string' ? { startTime: rawStartTime } : {}),
+          ...(customerBlocks ? { customerBlocks } : {}),
+          quantity: scheduleQuantity.quantity,
+          ...(resolveScheduleTimeZone(req.body?.timeZone || req.body?.scheduleTimeZone)
+            ? { requestTimeZone: resolveScheduleTimeZone(req.body?.timeZone || req.body?.scheduleTimeZone) as string }
+            : {}),
+        };
       }
 
       if (!bookingData.assignedTeamMembers && fallbackTeamMembers) {
@@ -1236,6 +1230,42 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       scheduleTimeZone,
     });
 
+    // FT2-4B: a pay-at-checkout booking does not exist until its payment is
+    // confirmed. Keep the prepared payload in a checkout session instead: no
+    // Booking row, no calendar reservation and no notification. The confirmed
+    // payment promotes it (handlers/Stripe/checkoutPromotion.ts).
+    if (bookingData.status === 'quote_accepted') {
+      if (!bookingData.scheduledStartDate || !checkoutSchedule) {
+        return res.status(400).json({
+          success: false,
+          msg: "Please select a start date before continuing to payment",
+        });
+      }
+      let checkout;
+      try {
+        checkout = await startCheckoutSession({
+          bookingData,
+          schedule: checkoutSchedule,
+        });
+      } catch (startError) {
+        if (startError instanceof CheckoutPaymentInProgressError) {
+          return res.status(409).json({
+            success: false,
+            code: 'PAYMENT_IN_PROGRESS',
+            msg: startError.message,
+          });
+        }
+        throw startError;
+      }
+      const preview = await populateCheckoutBooking(checkout);
+      return res.status(201).json({
+        success: true,
+        msg: "Checkout started. Proceed to payment.",
+        booking: bookingForRequest(preview, req.user),
+        checkout: { id: String(checkout._id), expiresAt: checkout.expiresAt },
+      });
+    }
+
     let booking: IBooking | null = null;
     bookingData._id = new mongoose.Types.ObjectId();
     const calendarBooking = {
@@ -1318,6 +1348,42 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
   } catch (error: any) {
     console.error('Create booking error:', error);
     return sendHandlerError(res, error, "We couldn't create your booking. Please try again.");
+  }
+};
+
+/**
+ * FT2-4B: the payment page's back button. Closes the customer's unpaid
+ * checkout (cancels its intent, releases a reserved referral benefit, deletes
+ * the session) so going back to the wizard leaves nothing behind.
+ * POST /api/bookings/:bookingId/checkout/abandon
+ */
+export const abandonCheckout = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { bookingId } = req.params;
+    const checkout = await findOpenCheckoutForCustomer(bookingId, req.user?._id);
+    if (!checkout) {
+      return res.status(200).json({ success: true, data: { outcome: 'none' } });
+    }
+    const outcome = await abandonCheckoutSession(checkout);
+    if (outcome === 'in_flight') {
+      return res.status(409).json({
+        success: false,
+        code: 'PAYMENT_IN_PROGRESS',
+        msg: 'Your payment is still being processed. Please wait a moment.',
+      });
+    }
+    // 'conflict': the payment had succeeded but its slot was taken, so it was
+    // refunded and no booking exists; the customer goes back to the wizard.
+    return res.status(200).json({
+      success: true,
+      data: {
+        outcome,
+        ...(outcome === 'promoted' ? { redirectTo: `/bookings/${checkout._id}/payment/success` } : {}),
+        ...(outcome === 'conflict' ? { message: CHECKOUT_SLOT_UNAVAILABLE_MESSAGE } : {}),
+      },
+    });
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -1625,9 +1691,15 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (row && typeof row._id === 'string' && row._id) serviceCounts[row._id] = Number(row.count) || 0;
     }
 
+    // Invoice PDFs are private S3 objects: sign the links the table offers
+    // (FT2-13), as the detail endpoint does.
+    const signedBookings = await Promise.all(
+      visibleBookings.map((row) => signListInvoiceLinks(row, presignS3Url)),
+    );
+
     return res.status(200).json({
       success: true,
-      bookings: visibleBookings,
+      bookings: signedBookings,
       distinctServices: distinctServices.filter(Boolean).sort(),
       statusCounts,
       serviceCounts,
@@ -1690,12 +1762,33 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       )
       .populate('assignedTeamMembers', 'name email');
 
-    const booking = await bookingQuery;
+    let booking: any = await bookingQuery;
+    // FT2-4B: an unpaid wizard checkout is visible only to its own customer,
+    // on the payment page. It is not a booking for anyone else.
+    const openCheckout = booking || isAdmin ? null : await findOpenCheckoutForCustomer(bookingId, userId);
+    if (openCheckout) booking = await populateCheckoutBooking(openCheckout);
 
     if (!booking) {
       return res.status(404).json({
         success: false,
         msg: "Booking not found"
+      });
+    }
+
+    if (openCheckout) {
+      return res.status(200).json({
+        success: true,
+        booking: bookingForViewer(
+          await bookingWithCustomerProjectPrices(booking, 'customer', getCheckoutCommissionPercent),
+          'customer',
+        ),
+        viewerRole: 'customer',
+        checkout: {
+          id: String(openCheckout._id),
+          expiresAt: openCheckout.expiresAt,
+          projectId: openCheckout.project ? String(openCheckout.project) : undefined,
+          selectedSubprojectIndex: openCheckout.bookingData?.selectedSubprojectIndex,
+        },
       });
     }
 

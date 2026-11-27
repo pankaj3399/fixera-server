@@ -78,6 +78,11 @@ vi.mock('../../../handlers/Stripe/payment', () => ({
   RefundError: class RefundError extends Error {},
 }));
 
+vi.mock('../../../utils/s3Upload', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../utils/s3Upload')>()),
+  presignS3Url: vi.fn(async (url: string) => (url.includes('.amazonaws.com/') ? `${url}?X-Amz-Signature=signed` : null)),
+}));
+
 vi.mock('../../../services/invoiceArtifacts', () => ({
   ensureBookingInvoiceArtifacts: vi.fn(),
 }));
@@ -409,6 +414,34 @@ describe('dashboard list counts and search', () => {
     const alternatives = mocks.paymentFind.mock.calls[0][0].$and[0].$or;
     expect(alternatives).toHaveLength(1);
     expect(alternatives[0].bookingNumber).toBeInstanceOf(RegExp);
+  });
+
+
+  it('FT2-13: signs the private invoice link each viewer gets, so Download no longer ends on an S3 error', async () => {
+    const stored = 'https://fixera-bucket.s3.eu-west-1.amazonaws.com/invoices/FIX-2026-0001.pdf';
+    const supplier = 'https://fixera-bucket.s3.eu-west-1.amazonaws.com/invoices/SUP-2026-0001.pdf';
+    const doc = {
+      _id: 'b1', bookingType: 'project', status: 'completed', customer: CUSTOMER_ID, professional: { _id: PRO_ID, name: 'Piet' },
+      payment: { status: 'completed', currency: 'EUR', invoiceNumber: 'FIX-2026-0001', invoiceUrl: stored, supplierInvoiceNumber: 'SUP-2026-0001', supplierInvoiceUrl: supplier },
+      toObject() { return { ...this, toObject: undefined } },
+    };
+    mocks.bookingFind.mockReturnValue(chainFor([doc]));
+    mocks.bookingCountDocuments.mockResolvedValue(1);
+    mocks.bookingAggregate.mockResolvedValue([]);
+    mocks.paymentFind.mockReturnValue({ select: () => ({ lean: async () => [] }), lean: async () => [] });
+
+    const customer = mockRes();
+    await getMyBookings({ user: { _id: CUSTOMER_ID }, query: {} } as any, customer, vi.fn());
+    expect(customer.statusCode).toBe(200);
+    expect(customer.body.bookings[0].payment.invoiceUrl).toBe(`${stored}?X-Amz-Signature=signed`);
+    expect(customer.body.bookings[0].payment.supplierInvoiceUrl).toBeUndefined();
+
+    mocks.userFindById.mockResolvedValue({ _id: PRO_ID, role: 'professional' });
+    const professional = mockRes();
+    await getMyBookings({ user: { _id: PRO_ID }, query: {} } as any, professional, vi.fn());
+    expect(professional.statusCode).toBe(200);
+    expect(professional.body.bookings[0].payment.supplierInvoiceUrl).toBe(`${supplier}?X-Amz-Signature=signed`);
+    expect(professional.body.bookings[0].payment.invoiceUrl).toBeUndefined();
   });
 
 });

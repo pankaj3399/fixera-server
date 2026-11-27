@@ -403,6 +403,9 @@ export interface IBooking extends Document {
     stripePaymentIntentId?: string;
     stripeClientSecret?: string;
     stripeChargeId?: string;
+    benefitsAppliedIntentId?: string;
+    pointsAppliedIntentId?: string;
+    discountCodeAppliedIntentId?: string;
     stripeTransferId?: string;
     stripeDestinationPayment?: string;
     transferCurrency?: string;
@@ -1253,6 +1256,14 @@ const BookingSchema = new Schema({
     stripePaymentIntentId: { type: String },
     stripeClientSecret: { type: String },
     stripeChargeId: { type: String },
+    // Checkout benefits of a paid intent, applied once each by the webhook.
+    // Each effect commits with its own marker (same transaction), so a retry
+    // after a partial failure finishes the missing one without repeating the
+    // other: redeemed points, then discount-code usage. benefitsAppliedIntentId
+    // is set when both are settled.
+    benefitsAppliedIntentId: { type: String },
+    pointsAppliedIntentId: { type: String },
+    discountCodeAppliedIntentId: { type: String },
 
     // Stripe Connect transfer fields
     stripeTransferId: { type: String },

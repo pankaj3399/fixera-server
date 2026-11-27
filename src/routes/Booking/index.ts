@@ -12,6 +12,7 @@ import {
   uploadRFQAttachment,
   proceedAtStandardVatRate,
   previewVatDecision,
+  abandonCheckout,
 } from '../../handlers/Booking';
 import {
   respondToQuoteWithPayment,
@@ -90,6 +91,8 @@ router.get('/:bookingId/discount-preview', getDiscountPreview);
 // Respond to quote (accept/reject) - Customer only - WITH PAYMENT INTEGRATION
 router.post('/:bookingId/respond', respondToQuoteWithPayment);
 router.post('/:bookingId/payment-intent', ensurePaymentIntent);
+// FT2-4B: payment page back button (unpaid wizard checkout only)
+router.post('/:bookingId/checkout/abandon', abandonCheckout);
 router.post('/:bookingId/schedule', setBookingSchedule);
 router.post('/:bookingId/reschedule-request', requestBookingReschedule);
 router.post('/:bookingId/respond-reschedule', respondToBookingReschedule);

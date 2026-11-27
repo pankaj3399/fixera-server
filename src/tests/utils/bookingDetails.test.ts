@@ -996,7 +996,8 @@ describe('base transfer facts', () => {
           stripePaymentIntentId: 'pi_secret_123',
           stripeTransferId: 'tr_from_booking',
           transferStatus: 'succeeded',
-          transferAmount: 100,
+          // Stored as sent to stripe.transfers.create: minor units (cents).
+          transferAmount: 10050,
           transferCurrency: 'EUR',
           transferAttemptedAt: new Date('2026-02-03T11:00:00.000Z'),
         },
@@ -1007,12 +1008,43 @@ describe('base transfer facts', () => {
       })],
     });
 
+    // BPQ-1: the payments tab showed the payout x100 (cents as euros).
     expect(details.payments.records[0].transfer).toMatchObject({
       status: 'succeeded',
       currency: 'EUR',
-      amount: 100,
+      amount: 100.5,
       attemptedAt: '2026-02-03T11:00:00.000Z',
     });
+  });
+
+  it('converts the stored minor-unit transfer amount with the transfer (settlement) currency', async () => {
+    const zeroDecimal = await buildDetails('professional', {
+      booking: {
+        payment: {
+          status: 'completed',
+          stripePaymentIntentId: 'pi_secret_123',
+          transferStatus: 'succeeded',
+          transferAmount: 12000,
+          transferCurrency: 'JPY',
+        },
+      },
+      payments: [payment({ stripePaymentIntentId: 'pi_secret_123', transferStatus: 'succeeded' })],
+    });
+    expect(zeroDecimal.payments.records[0].transfer).toMatchObject({ currency: 'JPY', amount: 12000 });
+
+    const usd = await buildDetails('admin', {
+      booking: {
+        payment: {
+          status: 'completed',
+          stripePaymentIntentId: 'pi_secret_123',
+          transferStatus: 'succeeded',
+          transferAmount: 9512,
+          transferCurrency: 'USD',
+        },
+      },
+      payments: [payment({ stripePaymentIntentId: 'pi_secret_123', transferStatus: 'succeeded' })],
+    });
+    expect(usd.payments.records[0].transfer).toMatchObject({ currency: 'USD', amount: 95.12 });
   });
 
   it('keeps milestone rows out of the base transfer fallback', async () => {
@@ -1602,7 +1634,8 @@ describe('activity', () => {
   it('emits a payout amount line for a released payment without replacing recorded totals', async () => {
     const released = payment({
       transferredAt: paidTime,
-      transferAmount: 100,
+      // Minor units, as recorded from the Stripe transfer.
+      transferAmount: 10000,
       professionalPayout: 95,
     });
     const activity = await buildBookingActivity({

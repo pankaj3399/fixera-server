@@ -43,6 +43,8 @@ export interface IUser extends Document {
     };
     verificationCode?: string;
     verificationCodeExpires?: Date;
+    /** Last email change made from the signup code step (cooldown between edits). */
+    signupEmailChangedAt?: Date;
     vatNumber?: string;
     isVatVerified?: boolean;
     idProofUrl?: string;
@@ -311,6 +313,10 @@ const UserSchema = new Schema({
     verificationCodeExpires: {
         type: Date,
         select: false 
+    },
+    signupEmailChangedAt: {
+        type: Date,
+        select: false
     },
     vatNumber: {
         type: String,

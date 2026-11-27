@@ -42,6 +42,7 @@ import {
   canonicalizeProjectMedia,
   withSignedProjectMedia,
   withSignedProjectMediaList,
+  withSignedQuestionAttachments,
 } from "../../utils/projectMedia";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 import {
@@ -781,11 +782,13 @@ export const getPublishedProject = async (req: Request, res: Response) => {
       : null;
     // Owner and payments-authorized admins keep stored prices; everyone else gets customer prices only.
     const seesBasePricing = viewerSeesBasePricing(req.user, project.professionalId, res.locals?.canReadPayments === true);
-    const serialized = await withSignedProjectMedia(publicProjectPricingView(
+    // Media and the professional's question attachments are private S3
+    // objects; the booking wizard can only open them through signed URLs.
+    const serialized = await withSignedQuestionAttachments(await withSignedProjectMedia(publicProjectPricingView(
       serializePublicProject(project),
       seesBasePricing,
       await getCheckoutCommissionPercent(),
-    ));
+    )));
     const vatManagement = vatConfig?.vatManagement?.enabled
       ? {
           enabled: true,

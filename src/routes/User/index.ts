@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { getCommissionRate } from '../../handlers/Public/customerPrices';
 import { VerifyPhone } from "../../handlers/User/verify/phone";
 import { VerifyPhoneCheck } from "../../handlers/User/verify/phone";
+import { getSignupContact, updateSignupContact } from "../../handlers/User/signupContact";
 import emailVerificationRoutes from "./verify/email";
 import { protect } from "../../middlewares/auth";
 import { GetCurrentUser } from "../../handlers";
@@ -73,6 +74,7 @@ userRouter.route('/me').get(GetCurrentUser)
 userRouter.route("/verify-phone").post(VerifyPhone)
 userRouter.route("/verify-phone-check").post(VerifyPhoneCheck)
 userRouter.use("/verify-email", emailVerificationRoutes);
+userRouter.route("/signup-contact").get(getSignupContact).patch(updateSignupContact)
 userRouter.route("/vat/validate").post(validateVAT)
 userRouter.route("/vat").put(updateUserVAT)
 userRouter.route("/vat/validate-and-populate").post(validateAndPopulateVAT) 

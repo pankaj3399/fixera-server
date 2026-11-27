@@ -7,7 +7,13 @@ import { generateOTP, sendOTPEmail, sendWelcomeEmail } from "../../utils/emailSe
 import twilio from 'twilio';
 import mongoose from "mongoose";
 import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
-import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
+import {
+  SIGNUP_EMAIL_RE,
+  buildSignupLocation,
+  hashSignupPassword,
+  resolveBusinessCustomerFields,
+  signupPasswordError,
+} from "../../utils/signupValidation";
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
 import {
@@ -164,8 +170,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     }
 
     // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!SIGNUP_EMAIL_RE.test(email)) {
       return res.status(400).json({
         success: false,
         msg: "Please provide a valid email address"
@@ -173,10 +178,11 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     }
 
     // Validate password strength
-    if (password.length < 6) {
+    const passwordError = signupPasswordError(password);
+    if (passwordError) {
       return res.status(400).json({
         success: false,
-        msg: "Password must be at least 6 characters long"
+        msg: passwordError
       });
     }
 
@@ -216,8 +222,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     }
 
     // Hash password
-    const saltRounds = 12; // Increased for better security
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const hashedPassword = await hashSignupPassword(password);
 
     // Prepare verification artifacts
     const emailOtp = generateOTP();
@@ -243,54 +248,27 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
         userData.customerType = customerType;
       }
 
-      // Location data
-      if (address && city && country && postalCode) {
-        userData.location = {
-          address: address.trim(),
-          city: city.trim(),
-          country: country.trim(),
-          postalCode: postalCode.trim()
-        };
-
-        // Add coordinates if provided (from geocoding)
-        if (latitude !== undefined && longitude !== undefined) {
-          userData.location.type = 'Point';
-          userData.location.coordinates = [parseFloat(longitude), parseFloat(latitude)]; // [lng, lat]
-        }
+      // Location data (with coordinates when geocoded)
+      const location = buildSignupLocation({ address, city, country, postalCode, latitude, longitude });
+      if (location) {
+        userData.location = location;
       }
 
       // Business customer fields
       if (customerType === 'business') {
-        if (!companyName) {
+        const business = await resolveBusinessCustomerFields(companyName, vatNumber);
+        if (!business.ok) {
           return res.status(400).json({
             success: false,
-            msg: "Company name is required for business customers"
+            msg: business.msg
           });
         }
-
         // Store company name in businessInfo for consistency
         userData.businessInfo = {
-          companyName: companyName.trim()
+          companyName: business.companyName
         };
-
-        if (!vatNumber) {
-          return res.status(400).json({
-            success: false,
-            msg: "VAT number is required for business customers"
-          });
-        }
-
-        const formattedVAT = formatVATNumber(vatNumber);
-        if (!isValidVATFormat(formattedVAT)) {
-          return res.status(400).json({
-            success: false,
-            msg: "Invalid VAT number format"
-          });
-        }
-
-        userData.vatNumber = formattedVAT;
-        const viesValidationResult = await validateVATNumber(formattedVAT);
-        userData.isVatVerified = viesValidationResult.valid;
+        userData.vatNumber = business.vatNumber;
+        userData.isVatVerified = business.isVatVerified;
       }
     }
 

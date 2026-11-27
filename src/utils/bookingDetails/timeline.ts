@@ -19,6 +19,7 @@ import {
   refundFactReference,
   resolvePaymentRows,
   resolveRefundFacts,
+  transferAmountInMajorUnits,
 } from './paymentFacts';
 
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -550,6 +551,20 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
           ...(paymentCurrency ? { currency: paymentCurrency } : {}),
         }
       : undefined;
+    // The recorded transfer is stored in minor units of its own (settlement)
+    // currency; the professional payout is a major-unit amount in the
+    // payment currency.
+    const transferCurrency = typeof payment.transferCurrency === 'string' && payment.transferCurrency
+      ? payment.transferCurrency
+      : paymentCurrency;
+    const recordedTransferAmount = transferCurrency
+      ? transferAmountInMajorUnits(payment.transferAmount, transferCurrency)
+      : null;
+    const payoutLine = recordedTransferAmount != null && transferCurrency
+      ? { amount: recordedTransferAmount, currency: transferCurrency }
+      : finite(payment.professionalPayout) != null && paymentCurrency
+        ? { amount: finite(payment.professionalPayout)!, currency: paymentCurrency }
+        : null;
     const paymentEvents: Array<[string, unknown]> = [
       ['payment_authorized', payment.authorizedAt],
       ['payment_captured', payment.capturedAt || payment.paidAt],
@@ -586,17 +601,8 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
             ? 'cancelled'
             : null,
         amounts,
-        ...(type === 'payment_released' && paymentCurrency && (
-          finite(payment.transferAmount) != null || finite(payment.professionalPayout) != null
-        )
-          ? {
-              amountLines: [{
-                kind: 'payout' as const,
-                amount: finite(payment.transferAmount) ?? finite(payment.professionalPayout)!,
-                currency: paymentCurrency,
-                recorded: true as const,
-              }],
-            }
+        ...(type === 'payment_released' && payoutLine
+          ? { amountLines: [{ kind: 'payout' as const, ...payoutLine, recorded: true as const }] }
           : {}),
         attachments: [],
         metadata: {

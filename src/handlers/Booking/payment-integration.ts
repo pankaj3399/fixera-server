@@ -10,6 +10,7 @@ import { getReferralReservationToken, releaseReferralReservation } from '../../u
 import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { quoteAmountIncludesSelectedExtras } from '../../utils/payment';
 import Booking, { BookingStatus } from '../../models/booking';
+import { findOpenCheckoutForCustomer, hydrateCheckoutBooking, populateCheckoutBooking } from '../../utils/checkoutSession';
 import Project from '../../models/project';
 import PlatformSettings from '../../models/platformSettings';
 import { createPaymentIntent, captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
@@ -1066,7 +1067,10 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       });
     }
 
-    const booking = await Booking.findById(bookingId);
+    let booking: any = await Booking.findById(bookingId);
+    // FT2-4B: an unpaid wizard checkout is paid from its checkout session.
+    const checkout = booking ? null : await findOpenCheckoutForCustomer(bookingId, userId);
+    if (checkout) booking = hydrateCheckoutBooking(checkout);
     if (!booking) {
       return res.status(404).json({
         success: false,
@@ -1173,10 +1177,13 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       });
     }
 
-    const refreshedBooking = await Booking.findById(bookingId)
-      .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
-      .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
-      .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
+    const refreshedCheckout = checkout ? await findOpenCheckoutForCustomer(bookingId, userId) : null;
+    const refreshedBooking = refreshedCheckout
+      ? await populateCheckoutBooking(refreshedCheckout)
+      : await Booking.findById(bookingId)
+        .populate('customer', 'name email phone customerType location isAnonymized deletedAt')
+        .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
+        .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
     return res.json({
       success: true,

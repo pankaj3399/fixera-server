@@ -54,7 +54,7 @@ import {
 import { sanitizePaymentForViewer } from '../invoiceVisibility';
 import { filterPaymentForAdminArea } from './adminAccess';
 import { buildBookingActivity } from './timeline';
-import { refundFactReference, resolvePaymentRows, resolveRefundFacts } from './paymentFacts';
+import { refundFactReference, resolvePaymentRows, resolveRefundFacts, transferAmountInMajorUnits } from './paymentFacts';
 import { refundCountsAsCash } from '../paymentRefunds';
 import { resolveAcceptedQuoteVersion } from './quoteTotals';
 import { isBookingSnapshotComplete, isValidIanaTimeZone } from './snapshot';
@@ -709,10 +709,14 @@ const buildPayments = async (params: {
       : null;
     const transferStatus = payment.transferStatus || baseTransferFallback?.transferStatus || null;
     const transferId = payment.stripeTransferId || baseTransferFallback?.stripeTransferId || null;
-    const transferAmount = num(payment.transferAmount) ?? num(baseTransferFallback?.transferAmount);
     const transferCurrency = str(payment.transferCurrency)
       || str(baseTransferFallback?.transferCurrency)
       || currency;
+    // Stored in minor units of the transfer currency (see paymentFacts).
+    const transferAmount = transferAmountInMajorUnits(
+      num(payment.transferAmount) ?? num(baseTransferFallback?.transferAmount),
+      transferCurrency,
+    );
     const transferAttemptedAt = iso(payment.transferAttemptedAt)
       || iso(baseTransferFallback?.transferAttemptedAt);
     const transfer = transferStatus || transferId || transferAmount != null

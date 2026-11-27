@@ -158,6 +158,90 @@ export const withSignedProjectMedia = async <T = any>(
   return { ...plain, media } as T;
 };
 
+/**
+ * Returns the S3 key when `url` is a question attachment the project owner
+ * uploaded (`projects/<projectId|temp>/attachment/<ownerId>/<file>`, written
+ * by uploadQuestionAttachment, or a legacy `project-attachments/` key that
+ * carries the owner segment), else null. Customer answers, ID proofs and other
+ * professionals' files are never signed through a project.
+ */
+export const projectQuestionAttachmentKeyFor = (url: unknown, ownerId: unknown): string | null => {
+  if (typeof url !== "string" || !url.trim()) return null;
+  const owner = idText(ownerId);
+  if (!owner) return null;
+  const trimmed = canonicalizeProjectMediaUrl(url.trim());
+  if (!isAllowedS3Url(trimmed)) return null;
+  const key = parseS3KeyFromUrl(trimmed);
+  if (!key) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(key);
+  } catch {
+    return null;
+  }
+  const segments = decoded.split("/");
+  if (segments.length < 3 || segments.some((s) => !s || s === "." || s === "..")) return null;
+  if (segments[0] === "projects") {
+    if (segments.length < 5 || segments[2] !== "attachment" || segments[3] !== owner) return null;
+    return decoded;
+  }
+  if (segments[0] === "project-attachments") {
+    return segments.slice(1, -1).includes(owner) ? decoded : null;
+  }
+  return null;
+};
+
+const signQuestionAttachment = async (attachment: unknown, ownerId: unknown, now: Date): Promise<unknown> => {
+  const url = typeof attachment === "string"
+    ? attachment
+    : attachment && typeof attachment === "object" ? (attachment as { url?: unknown }).url : null;
+  const key = projectQuestionAttachmentKeyFor(url, ownerId);
+  if (!key) return attachment;
+  let signed: string;
+  try {
+    signed = await getPresignedUrl(key, PROJECT_MEDIA_URL_TTL_SECONDS, { signingDate: signingDateFor(now) });
+  } catch {
+    return attachment;
+  }
+  return typeof attachment === "string" ? signed : { ...(attachment as object), url: signed };
+};
+
+/**
+ * FT1-RFQ: professional files attached to RFQ / post-booking questions live in
+ * the private bucket like project media, so the stored object URL answers 403
+ * when the customer opens it in the booking wizard. Sign them for display
+ * (same stable six-day window as media). Only for read-only payloads: the
+ * professional's editor must keep the stored object URLs.
+ */
+export const withSignedQuestionAttachments = async <T = any>(
+  project: T,
+  options: { ownerId?: unknown; now?: Date } = {},
+): Promise<T> => {
+  const plain = plainOf(project);
+  if (!plain || typeof plain !== "object") return plain;
+  const ownerId = options.ownerId ?? plain.professionalId;
+  const now = options.now ?? new Date();
+  const next: Record<string, unknown> = { ...plain };
+  for (const field of ["rfqQuestions", "postBookingQuestions"] as const) {
+    if (!Array.isArray(plain[field])) continue;
+    next[field] = await Promise.all(
+      (plain[field] as any[]).map(async (question) => {
+        if (!question || typeof question !== "object" || !Array.isArray(question.professionalAttachments)) {
+          return question;
+        }
+        return {
+          ...question,
+          professionalAttachments: await Promise.all(
+            question.professionalAttachments.map((attachment: unknown) =>
+              signQuestionAttachment(attachment, ownerId, now)),
+          ),
+        };
+      }),
+    );
+  }
+  return next as T;
+};
+
 export const withSignedProjectMediaList = async <T = any>(
   projects: T[],
   options: { now?: Date } = {},
